@@ -9,12 +9,14 @@ The workspace manifest exposes repository-owned semantic lanes:
 ```text
 python tools/verify.py quick
 python tools/verify.py standard
+python tools/verify.py full
 ```
 
 `quick` currently owns:
 
 - Rust formatting check;
 - locked deterministic `pi-wizard-core` tests;
+- deterministic renderer crash-loop and accessibility structure contract tests;
 - strict TypeScript type checking.
 
 `standard` runs `quick`, then additionally owns:
@@ -24,7 +26,14 @@ python tools/verify.py standard
 - production Vite renderer build;
 - Tauri host compilation as part of the workspace Clippy target graph.
 
-Do not turn these into a generic staircase. Use `quick` for ordinary core/frontend edits when it proves the changed contract; use `standard` for routine cross-surface completion or host/configuration changes. A future `full` lane should be added only when a distinct reproducible contract justifies it.
+`full` runs `standard`, then owns the deliberately expensive deterministic Windows desktop contract:
+
+- ignored core scale fixtures, currently a 25+ MiB/10k-entry Pi JSONL history, a multi-megabyte tracked Git diff paged through fixed byte/scan ceilings, four concurrent simulated streaming runs, and a 1,200-file historical session catalog constrained by fixed candidate/scan/page ceilings;
+- an ignored desktop cold/warm app-owned-state startup measurement with a deliberately loose regression ceiling;
+- desktop configuration/version/CSP/icon checks;
+- an optimized Tauri Windows desktop build with `--no-bundle`.
+
+Use `quick` for ordinary core/frontend edits when it proves the changed contract; use `standard` for routine cross-surface completion or host/configuration changes; use `full` after changes to persistence bounds, packaging, large-history/diff behavior, or desktop build configuration.
 
 Focused Rust tests use Cargo package/test filters directly when diagnosing one owner. The repository currently has no live-Pi test in routine verification because credentials, installed providers, and a mutable external Pi installation are not deterministic test dependencies.
 
@@ -103,6 +112,9 @@ Prove:
 - explicit Stop and application shutdown supersede/cancel the startup readiness timer rather than allowing it to relabel intentional termination as a protocol failure;
 - the persistent manager survives repeated renderer-style hydration without restarting the child;
 - normal Stop recovers queue text, settles the turn, and leaves the same child reusable;
+- idle-run Close refuses active agent work, forces the current session draft through the bounded durability boundary before termination, terminates only the exact owned child tree/group, and releases execution-root ownership afterward;
+- failed Close draft persistence does not kill the child or discard the unsaved draft;
+- terminal-run Dismiss refuses live runs and removes only run-scoped hot state while preserving Pi session JSONL and session-scoped draft authority;
 - global shutdown waits for all children owned at shutdown start and reports quarantine rather than silently abandoning uncertainty;
 - extension dialog responses use the priority control plane and clear exact backend ownership after successful stdin write;
 - high-frequency stream wakeups are coalesced per dirty run and bounded drains expose whether more work remains.
@@ -166,6 +178,9 @@ Composer draft tests use disposable app-state fixtures and cover:
 - draft byte ceilings reject oversized updates without destroying the prior draft.
 - a pre-session pending draft migrates only when the first authoritative Pi session identity arrives;
 - a later session switch selects a different draft without carrying the previous session's text, and switching back restores the previous in-memory draft;
+- the in-memory session-draft record count is bounded; at capacity only unowned Saved records are evicted, Dirty/Saving/Failed records are retained, and lack of a safe candidate fails closed rather than allocating without limit;
+- a stale asynchronous load completion cannot recreate an already-evicted unowned draft record outside the cache ceiling;
+- after a Saved session is evicted, revisiting it clears stale load-attempt bookkeeping and reloads its exact persisted draft rather than presenting an empty baseline;
 - persisted draft restoration gates edit/submit until load success/absence/failure is known;
 - hydration schema v6 exposes the currently active backend draft, durability/error, restore-pending flag, composer ownership, and immutable worktree identity rather than relying on renderer component state.
 
@@ -181,6 +196,9 @@ Create disposable local Git fixtures and prove:
 - live worktrees are never pooled or reassigned between runs;
 - Git operations use the run's canonical worktree identity rather than current UI navigation state;
 - dirty worktree cleanup is rejected unless explicitly handled;
+- explicit cleanup succeeds only for an exact, clean app-created worktree whose `HEAD` still equals the captured base, removes the worktree without force, deletes the branch with expected-old ref identity, and retires the journal only after a fresh both-absent proof;
+- cleanup refuses clean worktrees containing task commits as well as dirty/untracked worktrees, preserving their path/branch and recovery record;
+- cleanup is serialized against desktop run starts so a worktree cannot become live between the active-run proof and Git removal;
 - navigation/project switching cannot change a run's root;
 - failure halfway through creation rolls back only proven task-owned empty resources or leaves a classified orphan/recovery record.
 - a durable recovery intent is committed before the first mutating Git command and survives a complete desktop-runtime reopen;
@@ -197,10 +215,15 @@ Cover:
 
 - clean/dirty status;
 - renamed/deleted/binary files;
+- binary changes return an explicit metadata marker without sending a binary patch into renderer text state;
 - large files and huge change sets;
-- payload/file/hunk caps;
+- payload/file/page/scan caps;
+- streamed text pages concatenate to the exact Git patch without retaining the whole patch at once;
+- continuation cursors are path-bound and SHA-256-prefix-bound, and a mutation to any earlier patch byte makes a later cursor stale instead of mixing two repository observations;
+- small legal scan budgets still allow early pages, while later prefix rescans stop explicitly at the scan ceiling instead of growing without bound;
 - timeout/cancellation;
 - invalidation after known changes;
+- a newer review-summary request invalidates ownership of older in-flight file detail so stale completion cannot repopulate the detail pane;
 - no Git command from passive sidebar rendering;
 - no synchronous diff work in the renderer path.
 
@@ -217,6 +240,7 @@ Automated UI tests should focus on contracts rather than pixel trivia:
 - dialog-local state resets when request ID changes and stale requests cannot remain actionable;
 - session switch does not mount complete old history;
 - initial hydration failure reaches actionable Retry/Relaunch instead of an indefinite spinner;
+- initial hydration can be retried in place without restarting the renderer or backend-owned Pi children;
 - hydration snapshots are idempotent and version/revision aware;
 - hydration result application is request-ordered so an older async result cannot overwrite a newer recovery snapshot;
 - renderer reload rebuilds from backend state without restarting live runs;
@@ -228,6 +252,14 @@ Automated UI tests should focus on contracts rather than pixel trivia:
 - hydration demand survives multi-batch bounded drain continuation so a display/semantic change in an early batch cannot be forgotten before backlog completion;
 - IPC enum variant and struct-variant field casing is regression-tested against the TypeScript camelCase contract;
 - repeated renderer failures trip a bounded crash-loop breaker instead of auto-reloading forever;
+- the crash-loop policy itself is executable in the repository: crash counts 0/1 permit the two automatic reloads, count 2 stops automation, unavailable session storage disables automatic reload, malformed counts recover to zero, and displayed failure detail remains bounded;
+- live-run admission changes remain backend-owned, enforce the configured maximum, reject excess starts before spawn, never terminate already-active runs when the ceiling is lowered, and persist atomically for later desktop launches;
+- sidebar/dashboard ordering keeps Needs Attention first, then working/live runs, with retained terminal rows behind current work and newer UUIDv7 runs first inside each group;
+- failed and quarantined selected runs expose the backend-bounded failure kind/detail, exit code when known, truncation marker, and explicit termination-uncertain wording rather than only a state badge;
+- an unexpected child exit with a known OS status preserves that status through `RunMutation::ProcessFailed` into hydration, while failure classes without an observed OS exit do not manufacture one;
+- execution-folder opening accepts only a RunId from the renderer, derives the canonical execution root from backend hydration, and passes that root as one platform-opener argument without shell interpolation;
+- a failed admission-preference write leaves both the preference owner and runtime manager at their previous ceiling;
+- corrupt/out-of-range/oversized admission preferences are quarantined to the configured default without hiding an intact project registration or worktree recovery record;
 - draft persistence failure is visible without blocking unrelated navigation;
 - failed draft IPC synchronization cannot be overwritten by a later hydration; explicit edit/submit retries the newest local value;
 - live assistant/thinking/tool/Bash cards consume only backend-bounded snapshots and visibly report dropped bytes;
@@ -252,6 +284,7 @@ Minimum scenarios:
 10. renderer reload during an active run followed by bounded hydration recovery.
 11. startup with malformed/disposable derived project/catalog state while authoritative Pi sessions remain available.
 12. launch from a minimal GUI-style PATH while the configured environment resolver discovers the expected Pi/Git/toolchain binaries.
+13. page through a multi-megabyte tracked diff while recording current-page bytes and prefix-scan high-water marks.
 
 Record at least elapsed time, peak/app-owned memory where practical, IPC backlog high-water mark, and mounted timeline rows.
 
@@ -266,8 +299,8 @@ Manual review remains necessary for:
 - IME/text composition;
 - accessibility tree and keyboard traversal;
 - high-DPI diff/Markdown rendering;
-- platform-specific child shutdown;
-- GUI-launched Pi sees the intended PATH/toolchain environment on Windows/macOS/Linux without exposing provider secrets in diagnostics;
+- Windows child/process-tree shutdown;
+- GUI-launched Pi sees the intended PATH/toolchain environment on Windows without exposing provider secrets in diagnostics;
 - CSP behavior in packaged/static builds and absence of unexpected remote script/content loading;
 - installer/uninstaller behavior when packaging changes.
 

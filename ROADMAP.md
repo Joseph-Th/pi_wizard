@@ -38,7 +38,7 @@ Build first:
 - byte-bounded diagnostic and streaming projection primitives;
 - packaged renderer Content Security Policy;
 - deterministic protocol/state tests that do not require credentials or a live Pi process;
-- repository-owned quick and standard verification lanes.
+- repository-owned quick, standard, and full verification lanes.
 
 Exit criteria:
 
@@ -58,7 +58,7 @@ Do not optimize for an end-to-end demo during this phase. A visible prompt-to-re
 
 ## Phase 2: runtime integration and Pi-native UX
 
-Status: **substantially implemented**. The remaining Phase 2 gap is the full visual session-tree inspector plus hardening of recovery UX; the runtime/history/composer/capability/attachment slices below are operational.
+Status: **complete for the personal Windows application boundary**. Runtime/history/composer/capability/attachment/session-tree/recovery surfaces and deterministic fake-Pi compatibility coverage are operational.
 
 Add:
 
@@ -105,7 +105,7 @@ Exit criteria:
 
 ## Phase 3: parallel orchestration
 
-Status: **substantially implemented**. Several independently owned runs, cross-run Needs Attention, local-vs-worktree startup, immutable worktree identity, durable creation recovery, and run-bound Git review are operational. Explicit Git cleanup/integration and configurable admission control remain.
+Status: **complete for the first-product scope**. Several independently owned runs, cross-run Needs Attention, exclusive canonical execution-root ownership, local-vs-worktree startup, immutable worktree identity, durable creation recovery, conservative explicit worktree cleanup, run-bound Git review, durable configurable admission control, explicit idle-run Close, terminal-run Dismiss, attention/working/live-first run ordering, bounded terminal retention, and a four-run full-lane scale fixture are operational. Branch integration is deliberately outside the review-only first product.
 
 Add:
 
@@ -128,7 +128,7 @@ Exit criteria:
 
 ## Phase 4: change review
 
-Status: **substantially implemented**. On-demand repository status, bounded changed-file metadata, and one-file-at-a-time bounded tracked diffs are operational. Binary/hunk paging, cancellation polish, and optional external-editor actions remain.
+Status: **complete for the review-only first-product scope**. On-demand repository status, bounded changed-file metadata, one-file-at-a-time UTF-8-safe streamed byte-window diff paging, SHA-256 prefix-bound stale cursors, binary classification, independent page/scan ceilings, semantic hunk navigation, renderer stale-result invalidation, and backend-owned cancellation/supersession of active review jobs are operational. A cheap backend-derived "open execution folder" action is also implemented; editor/terminal integration remains optional scope expansion rather than an exit criterion.
 
 Add:
 
@@ -147,11 +147,12 @@ Exit criteria:
 
 ## Phase 5: hardening and packaging
 
+Status: **complete for deterministic repository-owned work in the personal Windows app**. Renderer crash-loop protection, explicit recovery UI, retryable hydration, corruption/write-failure fault injection, accessibility/keyboard contracts, Windows process lifecycle behavior, bounded terminal/runtime and session-draft caches, large-history/diff/concurrency/session-catalog fixtures, cold/warm app-owned-state startup measurement, migration/version policy, and optimized Windows builds are implemented. Draft-cache pressure evicts only unowned Saved records and reloads persisted sessions on revisit; unsaved draft state fails closed rather than being discarded.
+
 Add:
 
-- cross-platform process lifecycle validation;
+- Windows process lifecycle validation;
 - crash/recovery UX;
-- installer/signing/update strategy appropriate to target platforms;
 - accessibility and keyboard pass;
 - cold/warm startup benchmarks;
 - memory/CPU regression fixtures;
@@ -168,4 +169,4 @@ Add:
 - remote runtimes;
 - multi-harness adapters.
 
-Each candidate should be added only after identifying the user job, owner, idle/runtime cost, failure semantics, and smallest verification path. The default answer to scope expansion is not "never"; it is "prove the orchestration core stays small first."
+These are not current gaps. Do not work on or report them as remaining work unless the user explicitly asks for that feature.

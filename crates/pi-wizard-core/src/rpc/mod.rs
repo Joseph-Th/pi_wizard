@@ -30,5 +30,5 @@ pub use pending::{PendingRequest, PendingRequestError, PendingRequests};
 pub use response::{
     BashCommandResult, ClearQueueResult, CommandSummary, CompactionResult, ModelSummary,
     RpcResponsePayloadError, RpcStateSnapshot, SessionContextUsage, SessionEntriesPage,
-    SessionEntryEnvelope, SessionStats, SessionTokenUsage,
+    SessionEntryEnvelope, SessionStats, SessionTokenUsage, SessionTreeNode, SessionTreeSnapshot,
 };

@@ -9,6 +9,38 @@
   text-rendering: optimizeLegibility;
 }
 
+.skip-link {
+  position: fixed;
+  z-index: 1000;
+  top: 0.5rem;
+  left: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  background: Canvas;
+  color: CanvasText;
+  border: 2px solid CanvasText;
+  transform: translateY(-200%);
+}
+
+.skip-link:focus {
+  transform: translateY(0);
+}
+
+:where(button, input, select, textarea, a):focus-visible {
+  outline: 3px solid Highlight;
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+  }
+}
+
 .live-timeline {
   display: grid;
   gap: 0.625rem;
@@ -50,6 +82,101 @@
   line-height: 1.45;
 }
 
+.session-tree-inspector {
+  display: grid;
+  gap: 0.625rem;
+  padding: 0.75rem 0;
+  border-bottom: 1px solid color-mix(in srgb, CanvasText 10%, transparent);
+}
+
+.session-tree-toolbar {
+  display: flex;
+  gap: 0.625rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.session-tree-toolbar span {
+  flex: 1 1 auto;
+  color: GrayText;
+  font-size: 0.75rem;
+}
+
+.session-tree-toolbar button,
+.session-tree-node button {
+  padding: 0.3rem 0.5rem;
+  font: inherit;
+  font-size: 0.75rem;
+}
+
+.session-tree-list {
+  display: grid;
+  gap: 0.25rem;
+  max-height: min(30rem, 48vh);
+  overflow: auto;
+  padding-right: 0.25rem;
+}
+
+.session-tree-node {
+  display: grid;
+  gap: 0.35rem;
+  min-width: 0;
+  margin-left: calc(var(--tree-depth) * 0.7rem);
+  padding: 0.5rem 0.625rem;
+  border-left: 2px solid color-mix(in srgb, CanvasText 18%, transparent);
+  background: color-mix(in srgb, CanvasText 2.5%, transparent);
+}
+
+.session-tree-node.active-leaf {
+  border-left-width: 4px;
+  background: color-mix(in srgb, CanvasText 5%, transparent);
+}
+
+.session-tree-node-main,
+.session-tree-node-main > div:first-child {
+  display: flex;
+  gap: 0.5rem;
+  align-items: baseline;
+}
+
+.session-tree-node-main {
+  justify-content: space-between;
+}
+
+.session-tree-node-main > div:first-child {
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+.session-tree-node-main strong,
+.session-tree-node-main span {
+  min-width: 0;
+}
+
+.session-tree-node-main span,
+.session-tree-node-actions span {
+  color: GrayText;
+  font-size: 0.7rem;
+}
+
+.session-tree-node-actions {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  flex: 0 0 auto;
+}
+
+.session-tree-node pre {
+  max-width: 100%;
+  margin: 0;
+  overflow: hidden;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.75rem;
+  line-height: 1.4;
+}
+
 .live-thinking {
   opacity: 0.8;
 }
@@ -88,12 +215,18 @@
   font-size: 0.75rem;
 }
 
-.history-page {
+.history-window {
   display: grid;
   gap: 0.5rem;
   max-height: min(34rem, 52vh);
   overflow-y: auto;
   padding-right: 0.25rem;
+  overscroll-behavior: contain;
+}
+
+.history-page {
+  display: grid;
+  gap: 0.5rem;
 }
 
 .history-item {
@@ -318,6 +451,53 @@
   gap: 0.75rem;
 }
 
+.git-review-diff > .git-review-page-actions {
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+}
+
+.git-review-page-actions span {
+  flex: 1 1 auto;
+}
+
+.git-review-page-actions button {
+  padding: 0.3rem 0.55rem;
+  font: inherit;
+  font-size: 0.75rem;
+}
+
+.git-review-hunks {
+  display: flex;
+  gap: 0.35rem;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.git-review-hunks button {
+  max-width: 12rem;
+  padding: 0.3rem 0.5rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: inherit;
+  font-size: 0.75rem;
+}
+
+.git-review-diff-segments {
+  max-height: 24rem;
+  overflow: auto;
+}
+
+.git-review-diff-segments pre {
+  max-height: none;
+}
+
+.git-review-hunk {
+  scroll-margin-block: 0.5rem;
+  border-top: 1px solid color-mix(in srgb, CanvasText 12%, transparent);
+}
+
 .git-review-diff pre {
   max-height: 24rem;
   margin: 0;
@@ -464,6 +644,122 @@
 .composer-card .error {
   color: CanvasText;
   font-size: 0.875rem;
+}
+
+.runtime-recovery {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  align-items: center;
+  width: min(42rem, calc(100vw - 4rem));
+  margin-top: 0.75rem;
+  padding: 0.75rem;
+  border: 1px solid color-mix(in srgb, CanvasText 22%, transparent);
+  border-radius: 0.5rem;
+}
+
+.runtime-recovery > div {
+  display: grid;
+  gap: 0.2rem;
+}
+
+.runtime-recovery span {
+  color: GrayText;
+  font-size: 0.8rem;
+}
+
+.runtime-recovery button {
+  flex: 0 0 auto;
+  padding: 0.45rem 0.75rem;
+  font: inherit;
+}
+
+.runtime-recovery > .runtime-recovery-actions {
+  display: flex;
+  gap: 0.5rem;
+  flex: 0 0 auto;
+}
+
+.capacity-control {
+  display: flex;
+  gap: 0.5rem;
+  align-items: end;
+  flex-wrap: wrap;
+}
+
+.capacity-control label {
+  display: grid;
+  gap: 0.2rem;
+}
+
+.capacity-control label span,
+.capacity-control small {
+  color: GrayText;
+  font-size: 0.7rem;
+}
+
+.capacity-control input {
+  width: 5rem;
+  padding: 0.3rem 0.4rem;
+  font: inherit;
+}
+
+.capacity-control button {
+  padding: 0.3rem 0.55rem;
+  font: inherit;
+}
+
+.capacity-control small {
+  flex-basis: 100%;
+}
+
+.renderer-recovery-screen {
+  display: grid;
+  place-content: center;
+  gap: 0.75rem;
+  min-height: 100%;
+  padding: 2rem;
+}
+
+.renderer-recovery-card {
+  display: grid;
+  gap: 0.75rem;
+  width: min(38rem, calc(100vw - 4rem));
+  padding: 1.25rem;
+  border: 1px solid color-mix(in srgb, CanvasText 24%, transparent);
+  border-radius: 0.5rem;
+}
+
+.renderer-recovery-card h1,
+.renderer-recovery-card p {
+  margin: 0;
+}
+
+.renderer-recovery-card p {
+  color: GrayText;
+  line-height: 1.45;
+}
+
+.renderer-recovery-card pre {
+  max-height: 12rem;
+  margin: 0;
+  padding: 0.625rem;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  background: color-mix(in srgb, CanvasText 4%, transparent);
+  font-size: 0.75rem;
+}
+
+.renderer-recovery-actions {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.renderer-recovery-actions button {
+  padding: 0.45rem 0.75rem;
+  font: inherit;
 }
 
 * {
@@ -779,6 +1075,20 @@ body {
     grid-column: 1 / -1;
     grid-row: 2;
   }
+
+  .session-tree-node {
+    margin-left: calc(var(--tree-depth) * 0.35rem);
+  }
+
+  .session-tree-node-main,
+  .runtime-recovery {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .runtime-recovery-actions button {
+    flex: 1 1 auto;
+  }
 }
 
 .attention {
@@ -845,4 +1155,500 @@ body {
 .dialog-card .error {
   color: CanvasText;
   font-size: 0.875rem;
+}
+
+.app-shell {
+  display: grid;
+  grid-template-columns: 18rem minmax(0, 1fr);
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+}
+
+.app-sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  min-width: 0;
+  min-height: 0;
+  padding: 1rem;
+  overflow-y: auto;
+  border-right: 1px solid color-mix(in srgb, CanvasText 14%, transparent);
+  background: color-mix(in srgb, CanvasText 2.5%, Canvas);
+}
+
+.app-brand {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.75rem;
+  align-items: baseline;
+}
+
+.app-brand strong {
+  font-size: 1.05rem;
+}
+
+.app-brand span,
+.sidebar-note,
+.sidebar-heading span,
+.project-row small,
+.runtime-details,
+.surface-heading p,
+.run-card small,
+.run-path,
+.attention-summary span {
+  color: GrayText;
+  font-size: 0.75rem;
+}
+
+.primary-nav {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.4rem;
+}
+
+.primary-nav button,
+.sidebar-run,
+.project-use,
+.project-row-actions button,
+.sidebar-heading button,
+.runtime-details button,
+.surface-heading button,
+.run-card-actions button,
+.empty-state button,
+.attention-summary button {
+  padding: 0.45rem 0.6rem;
+  font: inherit;
+}
+
+.primary-nav button.active,
+.sidebar-run.active {
+  background: color-mix(in srgb, Highlight 16%, Canvas);
+  border-color: color-mix(in srgb, Highlight 45%, CanvasText 20%);
+}
+
+.sidebar-runs,
+.project-manager {
+  display: grid;
+  gap: 0.4rem;
+}
+
+.sidebar-heading {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.sidebar-heading button {
+  padding-block: 0.25rem;
+  font-size: 0.7rem;
+}
+
+.sidebar-run,
+.project-use {
+  display: grid;
+  gap: 0.15rem;
+  width: 100%;
+  min-width: 0;
+  text-align: left;
+}
+
+.sidebar-run strong,
+.sidebar-run span,
+.sidebar-run small,
+.project-use strong,
+.project-use span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sidebar-run span {
+  text-transform: capitalize;
+  font-size: 0.72rem;
+}
+
+.sidebar-run small,
+.project-use span {
+  color: GrayText;
+  font-size: 0.68rem;
+}
+
+.project-row {
+  display: grid;
+  gap: 0.35rem;
+  padding: 0.4rem;
+  border: 1px solid color-mix(in srgb, CanvasText 10%, transparent);
+  border-radius: 0.4rem;
+}
+
+.project-row:not(.project-present) {
+  border-style: dashed;
+}
+
+.project-use {
+  border: 0;
+  background: transparent;
+}
+
+.project-row-actions,
+.run-card-actions {
+  display: flex;
+  gap: 0.4rem;
+}
+
+.project-row-actions button,
+.run-card-actions button {
+  flex: 1 1 0;
+  font-size: 0.72rem;
+}
+
+.runtime-details {
+  margin-top: auto;
+  padding-top: 0.75rem;
+  border-top: 1px solid color-mix(in srgb, CanvasText 12%, transparent);
+}
+
+.runtime-details summary {
+  cursor: pointer;
+  color: CanvasText;
+  font-weight: 600;
+}
+
+.runtime-detail-grid {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 0.3rem 0.65rem;
+  margin-block: 0.65rem;
+}
+
+.runtime-detail-grid strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: CanvasText;
+}
+
+.runtime-details .capacity-control {
+  align-items: end;
+}
+
+.runtime-details .error {
+  margin-top: 0.5rem;
+  overflow-wrap: anywhere;
+}
+
+.app-main {
+  min-width: 0;
+  min-height: 0;
+  padding: 1.5rem 2rem 3rem;
+  overflow-y: auto;
+}
+
+.surface-heading {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  align-items: start;
+  width: min(70rem, 100%);
+  margin-bottom: 1rem;
+}
+
+.surface-heading h1,
+.surface-heading p,
+.empty-state p,
+.sidebar-note {
+  margin: 0;
+}
+
+.surface-heading h1 {
+  font-size: 1.35rem;
+}
+
+.surface-heading p {
+  margin-top: 0.25rem;
+  line-height: 1.4;
+}
+
+.active-run-surface,
+.dashboard {
+  display: grid;
+  gap: 1rem;
+  width: min(70rem, 100%);
+}
+
+.active-run-surface > .composer-card {
+  width: 100%;
+}
+
+.run-surface-heading p {
+  max-width: 52rem;
+  overflow-wrap: anywhere;
+}
+
+.run-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(17rem, 1fr));
+  gap: 0.75rem;
+}
+
+.run-card {
+  display: grid;
+  gap: 0.65rem;
+  min-width: 0;
+  padding: 0.85rem;
+  border: 1px solid color-mix(in srgb, CanvasText 16%, transparent);
+  border-radius: 0.5rem;
+}
+
+.run-card > div:first-child,
+.attention-summary {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.75rem;
+  align-items: center;
+}
+
+.run-card > div:first-child strong,
+.run-path {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.run-state {
+  flex: 0 0 auto;
+  padding: 0.15rem 0.4rem;
+  border: 1px solid color-mix(in srgb, CanvasText 14%, transparent);
+  border-radius: 999px;
+  font-size: 0.68rem;
+  text-transform: capitalize;
+}
+
+.state-working,
+.state-needs-attention {
+  border-color: color-mix(in srgb, Highlight 48%, CanvasText 16%);
+}
+
+.attention-count {
+  font-size: 0.75rem;
+}
+
+.empty-state {
+  display: grid;
+  justify-items: start;
+  gap: 0.6rem;
+  max-width: 28rem;
+  padding: 1.25rem;
+  border: 1px dashed color-mix(in srgb, CanvasText 20%, transparent);
+  border-radius: 0.5rem;
+}
+
+.empty-state span {
+  color: GrayText;
+}
+
+.dashboard-attention,
+.active-run-surface > .attention {
+  width: min(70rem, 100%);
+  margin-top: 0;
+}
+
+.attention-summary {
+  padding: 0.65rem 0;
+  border-top: 1px solid color-mix(in srgb, CanvasText 10%, transparent);
+}
+
+.attention-summary > div {
+  display: grid;
+  gap: 0.2rem;
+  min-width: 0;
+}
+
+.app-error {
+  width: min(70rem, 100%);
+  margin: 0 0 1rem;
+  padding: 0.65rem;
+  border-left: 3px solid CanvasText;
+  background: color-mix(in srgb, CanvasText 4%, transparent);
+  overflow-wrap: anywhere;
+}
+
+.run-failure-panel {
+  display: grid;
+  gap: 0.3rem;
+  width: min(70rem, 100%);
+  margin: 0 0 1rem;
+  padding: 0.75rem;
+  border: 1px solid color-mix(in srgb, CanvasText 22%, transparent);
+  border-left-width: 4px;
+  border-radius: 0.4rem;
+  background: color-mix(in srgb, CanvasText 4%, transparent);
+  overflow-wrap: anywhere;
+}
+
+.run-failure-panel span {
+  white-space: pre-wrap;
+}
+
+.run-failure-panel small {
+  color: GrayText;
+}
+
+.initial-task-field {
+  grid-column: 1 / -1;
+}
+
+.project-launcher .initial-task-field textarea {
+  width: 100%;
+  min-height: 6rem;
+  padding: 0.55rem 0.625rem;
+  resize: vertical;
+  font: inherit;
+}
+
+.path-field {
+  grid-column: 1 / -1;
+}
+
+.path-picker-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.45rem;
+}
+
+.path-picker-row input {
+  min-width: 0;
+}
+
+.path-picker-row button {
+  padding-inline: 0.75rem;
+}
+
+.extension-ui-panel {
+  display: grid;
+  gap: 0.5rem;
+  padding: 0.75rem;
+  border: 1px solid color-mix(in srgb, CanvasText 12%, transparent);
+  border-radius: 0.45rem;
+  background: color-mix(in srgb, CanvasText 2%, transparent);
+}
+
+.extension-ui-title {
+  font-size: 0.9rem;
+}
+
+.extension-status-row {
+  display: grid;
+  grid-template-columns: minmax(5rem, auto) minmax(0, 1fr);
+  gap: 0.65rem;
+  font-size: 0.78rem;
+}
+
+.extension-status-row span,
+.extension-widget header span {
+  color: GrayText;
+}
+
+.extension-widget {
+  display: grid;
+  gap: 0.25rem;
+  min-width: 0;
+  padding-top: 0.45rem;
+  border-top: 1px solid color-mix(in srgb, CanvasText 9%, transparent);
+}
+
+.extension-widget header {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.75rem;
+  font-size: 0.75rem;
+}
+
+.extension-widget pre {
+  margin: 0;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 0.75rem;
+}
+
+.notification-stack {
+  position: sticky;
+  z-index: 20;
+  top: 0;
+  display: grid;
+  gap: 0.4rem;
+  width: min(36rem, 100%);
+  margin: 0 0 0.75rem auto;
+}
+
+.extension-notification {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.75rem;
+  align-items: start;
+  padding: 0.6rem 0.7rem;
+  border: 1px solid color-mix(in srgb, CanvasText 20%, transparent);
+  border-radius: 0.45rem;
+  background: Canvas;
+  box-shadow: 0 0.2rem 0.6rem color-mix(in srgb, CanvasText 12%, transparent);
+}
+
+.extension-notification > div {
+  display: grid;
+  gap: 0.15rem;
+  min-width: 0;
+}
+
+.extension-notification span {
+  overflow-wrap: anywhere;
+  font-size: 0.8rem;
+}
+
+.extension-notification button {
+  flex: 0 0 auto;
+  padding: 0.1rem 0.35rem;
+  font: inherit;
+}
+
+.notification-warning,
+.notification-error {
+  border-width: 2px;
+}
+
+@media (max-width: 900px) {
+  .app-shell {
+    grid-template-columns: 14rem minmax(0, 1fr);
+  }
+
+  .app-main {
+    padding-inline: 1rem;
+  }
+}
+
+@media (max-width: 640px) {
+  .app-shell {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto minmax(0, 1fr);
+  }
+
+  .app-sidebar {
+    max-height: 42vh;
+    border-right: 0;
+    border-bottom: 1px solid color-mix(in srgb, CanvasText 14%, transparent);
+  }
+
+  .surface-heading {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .run-grid {
+    grid-template-columns: 1fr;
+  }
 }

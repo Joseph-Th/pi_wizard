@@ -24,10 +24,10 @@ pub use hydration::{
     RunRpcHydrationSnapshot, RuntimeHydrationSnapshot,
 };
 pub use manager::{
-    ComposerAction, ComposerSubmitResult, ManagedRpcCompletion, RunStartSpec, RuntimeManagerError,
-    RuntimeManagerHandle, RuntimeManagerSignal, RuntimeShutdownReport, RuntimeStopResult,
-    RuntimeUiDrain, RuntimeUiEvent, SessionReplacementResult, spawn_runtime_manager,
-    spawn_runtime_manager_with_draft_persistence,
+    ComposerAction, ComposerSubmitResult, ManagedRpcCompletion, RunStartSpec,
+    RuntimeCapacitySnapshot, RuntimeCloseResult, RuntimeManagerError, RuntimeManagerHandle,
+    RuntimeManagerSignal, RuntimeShutdownReport, RuntimeStopResult, RuntimeUiDrain, RuntimeUiEvent,
+    SessionReplacementResult, spawn_runtime_manager, spawn_runtime_manager_with_draft_persistence,
 };
 pub use process_actor::{
     ProcessTerminationReport, RunProcessCommandError, RunProcessEnvelope, RunProcessEvent,

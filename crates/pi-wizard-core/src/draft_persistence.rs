@@ -518,6 +518,32 @@ mod tests {
     }
 
     #[test]
+    fn unsupported_future_draft_schema_is_quarantined_instead_of_downgraded() {
+        let root = fixture("future-schema");
+        let store = DraftFileStore::open(&root, RuntimeLimits::default()).expect("store");
+        let path = store.path_for_session("future");
+        fs::write(
+            &path,
+            br#"{"schemaVersion":999,"sessionId":"future","text":"do not guess","images":[]}"#,
+        )
+        .expect("future draft");
+
+        assert!(matches!(
+            store.load("future"),
+            Err(DraftPersistenceError::Quarantined { .. })
+        ));
+        assert!(
+            !path.exists(),
+            "unsupported future state must leave the active draft path"
+        );
+        assert!(
+            root.join("draft-quarantine").is_dir(),
+            "unsupported future state must be retained for diagnosis"
+        );
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
     fn attachment_round_trip_preserves_validated_image_data() {
         let root = fixture("attachment");
         let limits = RuntimeLimits::default();

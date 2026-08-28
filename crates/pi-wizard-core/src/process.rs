@@ -266,6 +266,21 @@ fn remaining(expires_at: Instant) -> Duration {
     expires_at.saturating_duration_since(Instant::now())
 }
 
+#[cfg(any(windows, test))]
+fn windows_tree_termination_args(identity: PiProcessIdentity) -> [String; 4] {
+    [
+        "/PID".to_owned(),
+        identity.pid.to_string(),
+        "/T".to_owned(),
+        "/F".to_owned(),
+    ]
+}
+
+#[cfg(any(unix, test))]
+fn unix_tree_termination_args(identity: PiProcessIdentity) -> [String; 2] {
+    ["-KILL".to_owned(), format!("-{}", identity.pid)]
+}
+
 #[cfg(windows)]
 async fn request_process_tree_termination(
     identity: PiProcessIdentity,
@@ -276,8 +291,9 @@ async fn request_process_tree_termination(
         .map(|root| root.join("System32").join("taskkill.exe"))
         .filter(|path| path.is_file())
         .unwrap_or_else(|| PathBuf::from("taskkill.exe"));
+    let args = windows_tree_termination_args(identity);
     let mut child = Command::new(taskkill)
-        .args(["/PID", &identity.pid.to_string(), "/T", "/F"])
+        .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -305,9 +321,9 @@ async fn request_process_tree_termination(
     identity: PiProcessIdentity,
     deadline: Duration,
 ) -> Result<(), ProcessError> {
-    let process_group = format!("-{}", identity.pid);
+    let args = unix_tree_termination_args(identity);
     let mut child = Command::new("/bin/kill")
-        .args(["-KILL", &process_group])
+        .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -467,6 +483,19 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.root);
         }
+    }
+
+    #[test]
+    fn platform_tree_termination_specs_are_exact_and_never_name_based() {
+        let identity = PiProcessIdentity { pid: 4242 };
+        assert_eq!(
+            windows_tree_termination_args(identity),
+            ["/PID", "4242", "/T", "/F"].map(str::to_owned)
+        );
+        assert_eq!(
+            unix_tree_termination_args(identity),
+            ["-KILL", "-4242"].map(str::to_owned)
+        );
     }
 
     #[tokio::test]

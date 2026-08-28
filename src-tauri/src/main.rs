@@ -1,3 +1,3 @@
 fn main() {
-    pi_wizard_desktop::run();
+    pi_wizard_desktop_lib::run();
 }

@@ -202,7 +202,7 @@ The Session Tree inspector supports:
 
 - current branch path;
 - fork points;
-- switching/forking through Pi-owned session operations;
+- forking through Pi-owned session operations, and direct historical branch switching only if Pi exposes a corresponding RPC operation;
 - session rename where Pi exposes it.
 
 Recent history should open on the latest bounded window. For a live Pi process, new history synchronizes incrementally with Pi's stable `get_entries(since)` entry cursor. Cold history is parsed from Pi JSONL incrementally as the user moves backward. Neither path hydrates an entire large transcript merely to open its latest turn.

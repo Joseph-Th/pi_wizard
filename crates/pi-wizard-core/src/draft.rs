@@ -466,18 +466,19 @@ impl SessionDraftStore {
         &mut self,
         run_id: RunId,
         initial_session_id: Option<String>,
-    ) -> Result<(), DraftStoreError> {
+    ) -> Result<Option<String>, DraftStoreError> {
         if self.run_owners.contains_key(&run_id) {
             return Err(DraftStoreError::DuplicateRun { run_id });
         }
         let owner = initial_session_id
             .map(DraftOwner::Session)
             .unwrap_or(DraftOwner::PendingRun(run_id));
+        let evicted = self.make_room_for(&owner, None)?;
         self.records
             .entry(owner.clone())
             .or_insert_with(|| DraftRecord::new(self.limits));
         self.run_owners.insert(run_id, owner);
-        Ok(())
+        Ok(evicted)
     }
 
     /// Rebinds a run to Pi's authoritative current session. A draft created
@@ -487,7 +488,7 @@ impl SessionDraftStore {
         &mut self,
         run_id: RunId,
         session_id: String,
-    ) -> Result<(), DraftStoreError> {
+    ) -> Result<Option<String>, DraftStoreError> {
         let current = self
             .run_owners
             .get(&run_id)
@@ -495,7 +496,7 @@ impl SessionDraftStore {
             .ok_or(DraftStoreError::UnknownRun { run_id })?;
         let next = DraftOwner::Session(session_id);
         if current == next {
-            return Ok(());
+            return Ok(None);
         }
 
         if matches!(current, DraftOwner::PendingRun(_)) {
@@ -513,12 +514,64 @@ impl SessionDraftStore {
                     }
                 }
             }
+            self.run_owners.insert(run_id, next);
+            Ok(None)
         } else {
+            let evicted = self.make_room_for(&next, Some(run_id))?;
             self.records
                 .entry(next.clone())
                 .or_insert_with(|| DraftRecord::new(self.limits));
+            self.run_owners.insert(run_id, next);
+            Ok(evicted)
         }
-        self.run_owners.insert(run_id, next);
+    }
+
+    fn make_room_for(
+        &mut self,
+        target: &DraftOwner,
+        releasing_run: Option<RunId>,
+    ) -> Result<Option<String>, DraftStoreError> {
+        if self.records.contains_key(target)
+            || self.records.len() < self.limits.max_cached_draft_records
+        {
+            return Ok(None);
+        }
+
+        let candidate = self.records.iter().find_map(|(owner, record)| {
+            let DraftOwner::Session(session_id) = owner else {
+                return None;
+            };
+            if owner == target || record.durability() != DraftDurability::Saved {
+                return None;
+            }
+            let owned_by_non_releasing_run = self
+                .run_owners
+                .iter()
+                .any(|(run_id, run_owner)| run_owner == owner && Some(*run_id) != releasing_run);
+            (!owned_by_non_releasing_run).then(|| (owner.clone(), session_id.clone()))
+        });
+
+        let Some((owner, session_id)) = candidate else {
+            return Err(DraftStoreError::Capacity {
+                limit: self.limits.max_cached_draft_records,
+            });
+        };
+        self.records.remove(&owner);
+        Ok(Some(session_id))
+    }
+
+    /// Releases only the run-to-draft ownership edge. Session-scoped draft
+    /// records remain available for another live run or durable persistence;
+    /// a pre-session pending record is run-scoped and can be discarded once
+    /// that terminal run is no longer retained.
+    pub fn release_run(&mut self, run_id: RunId) -> Result<(), DraftStoreError> {
+        let owner = self
+            .run_owners
+            .remove(&run_id)
+            .ok_or(DraftStoreError::UnknownRun { run_id })?;
+        if matches!(owner, DraftOwner::PendingRun(_)) {
+            self.records.remove(&owner);
+        }
         Ok(())
     }
 
@@ -620,10 +673,12 @@ impl SessionDraftStore {
         loaded: DraftLoaded,
     ) -> Result<DraftRestoreOutcome, DraftStoreError> {
         let owner = DraftOwner::Session(session_id.to_owned());
-        let record = self
-            .records
-            .entry(owner)
-            .or_insert_with(|| DraftRecord::new(self.limits));
+        let Some(record) = self.records.get_mut(&owner) else {
+            // A bounded cache may evict an unowned saved record while an older
+            // load completion is still queued. Never let stale I/O recreate an
+            // unowned record outside the cache ceiling.
+            return Ok(DraftRestoreOutcome::LocalStateWins);
+        };
         if record.generation() != 0 || !record.text().is_empty() || !record.images().is_empty() {
             return Ok(DraftRestoreOutcome::LocalStateWins);
         }
@@ -774,6 +829,8 @@ pub enum DraftStoreError {
     MissingRecord { run_id: RunId },
     #[error("draft record is missing for session {session_id}")]
     UnknownSession { session_id: String },
+    #[error("draft cache limit {limit} reached with no safely evictable saved session")]
+    Capacity { limit: usize },
     #[error(transparent)]
     Draft(#[from] DraftError),
 }
@@ -790,6 +847,113 @@ mod tests {
             limits,
         )
         .expect("valid image")
+    }
+
+    #[test]
+    fn cached_drafts_evict_only_unowned_saved_sessions_at_capacity() {
+        let limits = RuntimeLimits {
+            max_live_runs: 1,
+            max_cached_draft_records: 2,
+            ..RuntimeLimits::default()
+        };
+        let run_id = RunId::new();
+        let mut drafts = SessionDraftStore::new(limits);
+        drafts
+            .register_run(run_id, Some("session-a".to_owned()))
+            .expect("register a");
+        drafts
+            .reconcile_session(run_id, "session-b".to_owned())
+            .expect("switch b");
+        let evicted = drafts
+            .reconcile_session(run_id, "session-c".to_owned())
+            .expect("switch c with bounded eviction");
+
+        assert!(matches!(
+            evicted.as_deref(),
+            Some("session-a" | "session-b")
+        ));
+        assert!(drafts.snapshot_session("session-c").is_some());
+        let retained_old = usize::from(drafts.snapshot_session("session-a").is_some())
+            + usize::from(drafts.snapshot_session("session-b").is_some());
+        assert_eq!(retained_old, 1);
+    }
+
+    #[test]
+    fn draft_cache_capacity_never_evicts_dirty_or_failed_session_state() {
+        let limits = RuntimeLimits {
+            max_live_runs: 1,
+            max_cached_draft_records: 2,
+            ..RuntimeLimits::default()
+        };
+        let run_id = RunId::new();
+        let mut drafts = SessionDraftStore::new(limits);
+        drafts
+            .register_run(run_id, Some("session-a".to_owned()))
+            .expect("register a");
+        drafts
+            .edit_run(run_id, "draft a".to_owned())
+            .expect("dirty a");
+        drafts
+            .reconcile_session(run_id, "session-b".to_owned())
+            .expect("switch b");
+        drafts
+            .edit_run(run_id, "draft b".to_owned())
+            .expect("dirty b");
+
+        assert_eq!(
+            drafts.reconcile_session(run_id, "session-c".to_owned()),
+            Err(DraftStoreError::Capacity { limit: 2 })
+        );
+        assert_eq!(drafts.current_session_id(run_id), Some("session-b"));
+        assert_eq!(
+            drafts
+                .snapshot_session("session-a")
+                .expect("a retained")
+                .text,
+            "draft a"
+        );
+        assert_eq!(
+            drafts
+                .snapshot_session("session-b")
+                .expect("b retained")
+                .text,
+            "draft b"
+        );
+        assert!(drafts.snapshot_session("session-c").is_none());
+    }
+
+    #[test]
+    fn stale_draft_load_cannot_recreate_an_evicted_unowned_record() {
+        let limits = RuntimeLimits {
+            max_live_runs: 1,
+            max_cached_draft_records: 1,
+            ..RuntimeLimits::default()
+        };
+        let run_id = RunId::new();
+        let mut drafts = SessionDraftStore::new(limits);
+        drafts
+            .register_run(run_id, Some("session-a".to_owned()))
+            .expect("register a");
+        assert_eq!(
+            drafts
+                .reconcile_session(run_id, "session-b".to_owned())
+                .expect("evict a"),
+            Some("session-a".to_owned())
+        );
+        assert_eq!(
+            drafts
+                .restore_session_if_unedited(
+                    "session-a",
+                    DraftLoaded {
+                        text: "stale load".to_owned(),
+                        images: Vec::new(),
+                    },
+                )
+                .expect("ignore stale load"),
+            DraftRestoreOutcome::LocalStateWins
+        );
+        assert!(drafts.snapshot_session("session-a").is_none());
+        assert!(drafts.snapshot_session("session-b").is_some());
     }
 
     #[test]
@@ -884,6 +1048,43 @@ mod tests {
         assert_eq!(
             drafts.snapshot_run(run_id).expect("draft a").text,
             "draft a"
+        );
+    }
+
+    #[test]
+    fn releasing_run_keeps_session_draft_but_drops_run_owner() {
+        let run_id = RunId::new();
+        let mut drafts = SessionDraftStore::new(RuntimeLimits::default());
+        drafts
+            .register_run(run_id, Some("session-a".to_owned()))
+            .expect("register run");
+        drafts
+            .edit_run(run_id, "keep by session".to_owned())
+            .expect("edit session draft");
+
+        drafts.release_run(run_id).expect("release run owner");
+        assert!(drafts.snapshot_run(run_id).is_none());
+        assert_eq!(
+            drafts
+                .snapshot_session("session-a")
+                .expect("session draft retained")
+                .text,
+            "keep by session"
+        );
+    }
+
+    #[test]
+    fn releasing_pre_session_run_discards_only_pending_record() {
+        let run_id = RunId::new();
+        let mut drafts = SessionDraftStore::new(RuntimeLimits::default());
+        drafts
+            .register_run(run_id, None)
+            .expect("register pending run");
+        drafts.release_run(run_id).expect("release pending run");
+        assert!(drafts.snapshot_run(run_id).is_none());
+        assert_eq!(
+            drafts.release_run(run_id),
+            Err(DraftStoreError::UnknownRun { run_id })
         );
     }
 

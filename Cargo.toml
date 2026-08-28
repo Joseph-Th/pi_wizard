@@ -14,6 +14,7 @@ license = "MIT"
 [workspace.metadata.git-wizard.validation]
 quick = "python tools/verify.py quick"
 standard = "python tools/verify.py standard"
+full = "python tools/verify.py full"
 
 [workspace.dependencies]
 atomic-write-file = "0.3.1"

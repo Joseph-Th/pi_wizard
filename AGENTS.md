@@ -4,6 +4,15 @@
 
 Follow the workspace `../AGENTS.md` and portfolio `../STANDARDS.md` first. Pi Wizard currently applies the Universal and Stateful Application profiles. If the application later exposes an agent-facing control API, explicitly add the Agent Tool profile rather than assuming it now.
 
+## Project scope
+
+Pi Wizard is a **personal Windows desktop application**. The goal is simple: make the app itself reliable and useful for its owner.
+
+- Do not propose, implement, track, or report macOS, Linux, web deployment, browser delivery, app-store distribution, signing/notarization, public-release certification, multi-platform packaging, or similar work as a project gap.
+- Do not spend engineering time on hypothetical portability or distribution concerns unless the user explicitly reopens that scope.
+- Prefer fixing concrete Windows desktop behavior, Pi integration, Git/worktree behavior, persistence, recovery, performance, and daily-use UX over adding abstractions for imagined future platforms.
+- Deferred/optional ideas are not unfinished work. Do not surface them as blockers or next steps unless the user asks for them.
+
 ## Read order
 
 For a cold start, read:
@@ -58,7 +67,7 @@ Use `RESEARCH.md` when a decision needs its external evidence or competitor cont
 | Timeline rendering | Virtualized frontend timeline |
 | Commands/models/thinking choices | Runtime-derived Pi capabilities |
 | Product interaction policy | `DESIGN.md` |
-| Performance budgets | `ARCHITECTURE.md` and executable benchmarks once implemented |
+| Performance budgets | `ARCHITECTURE.md` plus repository `full` scale/startup fixtures on Windows |
 
 ## Design-before-code gate
 

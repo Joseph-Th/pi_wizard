@@ -460,9 +460,10 @@ impl RunRecord {
                 self.exit_code = code;
                 self.clear_hot_activity();
             }
-            RunMutation::ProcessFailed { failure } => {
+            RunMutation::ProcessFailed { failure, code } => {
                 self.require_nonterminal("process_failed")?;
                 self.process = ProcessState::Failed;
+                self.exit_code = code;
                 self.failure = Some(failure);
                 self.clear_hot_activity();
             }
@@ -525,17 +526,28 @@ pub enum RunMutation {
     AgentSettled,
     CompactionStarted,
     CompactionEnded,
-    UiRequestOpened { request_id: String },
-    UiRequestClosed { request_id: String },
+    UiRequestOpened {
+        request_id: String,
+    },
+    UiRequestClosed {
+        request_id: String,
+    },
     AbortRequested,
     QueueChanged(QueueState),
     StateObserved(RunStateObservation),
     ThinkingLevelChanged(ThinkingLevel),
     SessionNameChanged(Option<String>),
     BeginStop,
-    ProcessExited { code: Option<i32> },
-    ProcessFailed { failure: RunFailure },
-    ProcessQuarantined { failure: RunFailure },
+    ProcessExited {
+        code: Option<i32>,
+    },
+    ProcessFailed {
+        failure: RunFailure,
+        code: Option<i32>,
+    },
+    ProcessQuarantined {
+        failure: RunFailure,
+    },
 }
 
 #[derive(Debug)]
@@ -1027,6 +1039,36 @@ mod tests {
         assert_eq!(
             store.remove_terminal(id),
             Err(RuntimeError::RemoveLiveRun { run_id: id })
+        );
+    }
+
+    #[test]
+    fn failed_run_wire_shape_exposes_bounded_failure_and_exit_code_contract() {
+        let id = RunId::new();
+        let mut run = record(id);
+        run.apply(
+            RunMutation::ProcessFailed {
+                failure: RunFailure::bounded(
+                    RunFailureKind::UnexpectedExit,
+                    "process failed with a deliberately longer detail",
+                    20,
+                ),
+                code: Some(17),
+            },
+            RuntimeLimits::default().max_pending_ui_requests_per_run,
+        )
+        .expect("fail run");
+
+        let value = serde_json::to_value(&run).expect("serialize failed run");
+        assert_eq!(value["process"], serde_json::json!("failed"));
+        assert_eq!(value["exitCode"], serde_json::json!(17));
+        assert_eq!(
+            value["failure"],
+            serde_json::json!({
+                "kind": "unexpected_exit",
+                "detail": "rately longer detail",
+                "detailTruncated": true
+            })
         );
     }
 

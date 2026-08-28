@@ -1263,4 +1263,53 @@ mod tests {
         assert!(page.items.iter().all(|item| item.text_truncated));
         assert!(page.items.iter().all(|item| item.is_error));
     }
+
+    #[test]
+    #[ignore = "scale fixture; exercised by full verification"]
+    fn twenty_five_megabyte_session_opens_latest_page_with_bounded_scan_and_page_memory() {
+        let fixture = Fixture::new("scale-25mb");
+        let mut file = File::create(&fixture.session).expect("large session fixture");
+        writeln!(
+            file,
+            "{}",
+            serde_json::json!({
+                "type":"session",
+                "version":3,
+                "id":"session-1",
+                "timestamp":"2026-08-27T00:00:00.000Z",
+                "cwd":fixture.project.canonicalize().unwrap(),
+            })
+        )
+        .unwrap();
+        let payload = "x".repeat(2600);
+        let mut parent: Option<String> = None;
+        for index in 0..10_000usize {
+            let id = format!("entry-{index:05}");
+            writeln!(file, "{}", user(&id, parent.as_deref(), &payload)).unwrap();
+            parent = Some(id);
+        }
+        file.flush().expect("flush large session fixture");
+        let file_bytes = fs::metadata(&fixture.session)
+            .expect("large session metadata")
+            .len();
+        assert!(file_bytes >= 25 * 1024 * 1024, "fixture must exceed 25 MiB");
+
+        let limits = RuntimeLimits::default();
+        let page = read_session_history_page(
+            &fixture.session,
+            &fixture.project,
+            "session-1",
+            None,
+            limits,
+        )
+        .expect("bounded latest page from large session");
+        assert_eq!(page.items.len(), limits.max_session_history_page_items);
+        assert!(page.next_cursor.is_some());
+        assert!(page.scanned_bytes <= limits.max_session_history_scan_bytes_per_page);
+        assert!(page.encoded_bytes <= limits.max_session_history_page_bytes);
+        assert!(
+            page.scanned_bytes as u64 * 20 < file_bytes,
+            "latest-page open must not scan a material fraction of the full session"
+        );
+    }
 }

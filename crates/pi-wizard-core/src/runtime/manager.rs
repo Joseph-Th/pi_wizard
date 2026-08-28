@@ -19,18 +19,18 @@ use crate::process::spawn_pi_process;
 use crate::rpc::{
     ClearQueueResult, CompactionResult, ExtensionUiResponse, InboundMessage, RpcCommand,
     RpcConcurrencyClass, RpcRequest, RpcResponse, RpcResponseOutcome, SessionEntriesPage,
-    SessionStats, ThinkingLevel,
+    SessionStats, SessionTreeSnapshot, ThinkingLevel,
 };
 use crate::worktree::GitWorktreeIdentity;
 use crate::{DraftImageId, ProjectId, RequestId, RunId, RuntimeLimits};
 
 use super::{
-    AssistantContentSnapshot, ComposerAvailability, DirectBashSnapshot, ExecutionIsolation,
-    ProcessState, ProcessTerminationReport, RunFailure, RunFailureKind, RunMutation,
-    RunProcessEnvelope, RunProcessEvent, RunProcessHandle, RunRecord, RunRpcController,
-    RunRpcEffect, RuntimeHydrationSnapshot, RuntimeStore, SessionSyncCompletion, StopDirective,
-    StopPhase, StopTransaction, ToolPreviewSnapshot, UiBacklogError, UiBacklogFrame, UiCoalesceKey,
-    UiEventBacklog, spawn_run_process_actor,
+    ActivityState, AssistantContentSnapshot, ComposerAvailability, DirectBashSnapshot,
+    ExecutionIsolation, ProcessState, ProcessTerminationReport, RunFailure, RunFailureKind,
+    RunMutation, RunProcessEnvelope, RunProcessEvent, RunProcessHandle, RunRecord,
+    RunRpcController, RunRpcEffect, RuntimeHydrationSnapshot, RuntimeStore, SessionSyncCompletion,
+    StopDirective, StopPhase, StopTransaction, ToolPreviewSnapshot, UiBacklogError, UiBacklogFrame,
+    UiCoalesceKey, UiEventBacklog, spawn_run_process_actor,
 };
 
 /// Fully resolved launch input for one live runtime. Environment values remain
@@ -42,6 +42,30 @@ pub struct RunStartSpec {
     pub worktree: Option<GitWorktreeIdentity>,
     pub launch: ResolvedPiLaunchSpec,
     pub environment: ResolvedLaunchEnvironment,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeCloseResult {
+    pub process_terminated: bool,
+    pub quarantined: bool,
+}
+
+impl RuntimeCloseResult {
+    fn terminal(process: ProcessState) -> Self {
+        Self {
+            process_terminated: process != ProcessState::Quarantined,
+            quarantined: process == ProcessState::Quarantined,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeCapacitySnapshot {
+    pub active_runs: usize,
+    pub live_run_limit: usize,
+    pub configured_max_live_runs: usize,
 }
 
 struct PendingSessionReplacement {
@@ -240,6 +264,35 @@ impl RuntimeManagerHandle {
         receive(response).await
     }
 
+    /// Removes one terminal run from the desktop runtime projection. Pi's
+    /// session JSONL and session-scoped draft remain owned by their independent
+    /// persistence domains.
+    pub async fn dismiss_terminal_run(&self, run_id: RunId) -> Result<(), RuntimeManagerError> {
+        let (reply, response) = oneshot::channel();
+        self.send(RuntimeManagerCommand::DismissTerminalRun { run_id, reply })
+            .await?;
+        receive(response).await
+    }
+
+    pub async fn capacity(&self) -> Result<RuntimeCapacitySnapshot, RuntimeManagerError> {
+        let (reply, response) = oneshot::channel();
+        self.send(RuntimeManagerCommand::Capacity { reply }).await?;
+        receive(response).await
+    }
+
+    /// Changes the admission ceiling for this desktop runtime. The configured
+    /// RuntimeLimits value remains the hard maximum; lowering the ceiling below
+    /// the current active count is allowed and simply blocks new starts.
+    pub async fn set_live_run_limit(
+        &self,
+        limit: usize,
+    ) -> Result<RuntimeCapacitySnapshot, RuntimeManagerError> {
+        let (reply, response) = oneshot::channel();
+        self.send(RuntimeManagerCommand::SetLiveRunLimit { limit, reply })
+            .await?;
+        receive(response).await
+    }
+
     pub async fn attach_draft_image(
         &self,
         run_id: RunId,
@@ -408,6 +461,22 @@ impl RuntimeManagerHandle {
             .map_err(|error| RuntimeManagerError::Operation(error.to_string()))
     }
 
+    /// Reads Pi's current in-session branch tree on demand. The projection is
+    /// bounded before it crosses the desktop boundary.
+    pub async fn session_tree(
+        &self,
+        run_id: RunId,
+    ) -> Result<SessionTreeSnapshot, RuntimeManagerError> {
+        let completion = self
+            .request(run_id, RpcRequest::new(RpcCommand::GetTree))
+            .await?;
+        require_accepted("get session tree", &completion)?;
+        completion
+            .response
+            .session_tree(self.limits)
+            .map_err(|error| RuntimeManagerError::Operation(error.to_string()))
+    }
+
     /// Sets or clears the Pi session display name and waits for the resulting
     /// session identity metadata to be observed through `get_state`.
     pub async fn set_session_name(
@@ -563,6 +632,19 @@ impl RuntimeManagerHandle {
         receive(response).await
     }
 
+    /// Terminates one owned Pi process after the run is idle. This is distinct
+    /// from Stop, which aborts active agent work but deliberately keeps Pi
+    /// alive for reuse.
+    pub async fn close_run(
+        &self,
+        run_id: RunId,
+    ) -> Result<RuntimeCloseResult, RuntimeManagerError> {
+        let (reply, response) = oneshot::channel();
+        self.send_control(RuntimeManagerControlCommand::CloseRun { run_id, reply })
+            .await?;
+        receive(response).await
+    }
+
     pub async fn drain_ui(
         &self,
         run_id: RunId,
@@ -646,8 +728,10 @@ pub enum RuntimeManagerError {
     AsyncRuntimeUnavailable,
     #[error("runtime manager is closed")]
     ManagerClosed,
-    #[error("Git worktree execution root is already owned by a live run: {execution_root}")]
-    WorktreeAlreadyActive { execution_root: PathBuf },
+    #[error("execution root is already owned by a live run: {execution_root}")]
+    ExecutionRootAlreadyActive { execution_root: PathBuf },
+    #[error("live run admission limit reached: {active} active runs, limit {limit}")]
+    LiveRunLimit { active: usize, limit: usize },
     #[error("runtime manager operation failed: {0}")]
     Operation(String),
 }
@@ -663,6 +747,17 @@ enum RuntimeManagerCommand {
     StartRun {
         spec: Box<RunStartSpec>,
         reply: oneshot::Sender<Result<RunId, String>>,
+    },
+    Capacity {
+        reply: oneshot::Sender<Result<RuntimeCapacitySnapshot, String>>,
+    },
+    SetLiveRunLimit {
+        limit: usize,
+        reply: oneshot::Sender<Result<RuntimeCapacitySnapshot, String>>,
+    },
+    DismissTerminalRun {
+        run_id: RunId,
+        reply: oneshot::Sender<Result<(), String>>,
     },
     Request {
         run_id: RunId,
@@ -721,6 +816,10 @@ enum RuntimeManagerControlCommand {
     StopRun {
         run_id: RunId,
         reply: oneshot::Sender<Result<RuntimeStopResult, String>>,
+    },
+    CloseRun {
+        run_id: RunId,
+        reply: oneshot::Sender<Result<RuntimeCloseResult, String>>,
     },
     Shutdown {
         reply: oneshot::Sender<Result<RuntimeShutdownReport, String>>,
@@ -825,6 +924,13 @@ struct ActiveStop {
     reply: oneshot::Sender<Result<RuntimeStopResult, String>>,
 }
 
+struct ActiveClose {
+    reply: oneshot::Sender<Result<RuntimeCloseResult, String>>,
+    draft_session_id: Option<String>,
+    draft_deadline: Instant,
+    termination_started: bool,
+}
+
 struct ShutdownState {
     reply: oneshot::Sender<Result<RuntimeShutdownReport, String>>,
     target_runs: Vec<RunId>,
@@ -833,6 +939,7 @@ struct ShutdownState {
 
 struct RuntimeManagerTask {
     limits: RuntimeLimits,
+    live_run_limit: usize,
     store: RuntimeStore,
     drafts: SessionDraftStore,
     controllers: HashMap<RunId, RunRpcController>,
@@ -851,6 +958,7 @@ struct RuntimeManagerTask {
     draft_save_deadlines: HashMap<String, Instant>,
     startups: HashMap<RunId, StartupHandshake>,
     stops: HashMap<RunId, ActiveStop>,
+    closes: HashMap<RunId, ActiveClose>,
     pending_failures: HashMap<RunId, RunFailure>,
     shutdown: Option<ShutdownState>,
     commands: mpsc::Receiver<RuntimeManagerCommand>,
@@ -901,6 +1009,7 @@ fn spawn_runtime_manager_inner(
     let (signals, _) = broadcast::channel(limits.max_runtime_command_queue);
     let task = RuntimeManagerTask {
         limits,
+        live_run_limit: limits.max_live_runs,
         store: RuntimeStore::new(limits),
         drafts: SessionDraftStore::new(limits),
         controllers: HashMap::new(),
@@ -918,6 +1027,7 @@ fn spawn_runtime_manager_inner(
         draft_save_deadlines: HashMap::new(),
         startups: HashMap::new(),
         stops: HashMap::new(),
+        closes: HashMap::new(),
         pending_failures: HashMap::new(),
         shutdown: None,
         commands: command_rx,
@@ -1033,6 +1143,9 @@ impl RuntimeManagerTask {
                 };
                 let _ = reply.send(result);
             }
+            RuntimeManagerCommand::DismissTerminalRun { run_id, reply } => {
+                let _ = reply.send(self.dismiss_terminal_run(run_id));
+            }
             RuntimeManagerCommand::AttachDraftImage {
                 run_id,
                 file_name,
@@ -1065,6 +1178,16 @@ impl RuntimeManagerTask {
                 } else {
                     let _ = reply.send(self.start_run(*spec).map_err(|error| error.to_string()));
                 }
+            }
+            RuntimeManagerCommand::Capacity { reply } => {
+                let _ = reply.send(Ok(self.capacity_snapshot()));
+            }
+            RuntimeManagerCommand::SetLiveRunLimit { limit, reply } => {
+                let result = self
+                    .set_live_run_limit(limit)
+                    .map(|()| self.capacity_snapshot())
+                    .map_err(|error| error.to_string());
+                let _ = reply.send(result);
             }
             RuntimeManagerCommand::Request {
                 run_id,
@@ -1154,6 +1277,13 @@ impl RuntimeManagerTask {
                     self.begin_stop(run_id, reply);
                 }
             }
+            RuntimeManagerControlCommand::CloseRun { run_id, reply } => {
+                if self.shutdown.is_some() {
+                    let _ = reply.send(Err("runtime manager is shutting down".to_owned()));
+                } else {
+                    self.begin_close_run(run_id, reply);
+                }
+            }
             RuntimeManagerControlCommand::Shutdown { reply } => {
                 if self.shutdown.is_some() {
                     let _ = reply.send(Err("runtime manager is already shutting down".to_owned()));
@@ -1165,16 +1295,197 @@ impl RuntimeManagerTask {
         true
     }
 
-    fn start_run(&mut self, spec: RunStartSpec) -> Result<RunId, RuntimeManagerError> {
-        if spec.execution_isolation == ExecutionIsolation::GitWorktree {
-            let execution_root = spec.launch.cwd();
-            if self.store.records().any(|run| {
-                !run.process_state().is_terminal() && run.execution_root() == execution_root
-            }) {
-                return Err(RuntimeManagerError::WorktreeAlreadyActive {
-                    execution_root: execution_root.to_path_buf(),
-                });
+    fn begin_close_run(
+        &mut self,
+        run_id: RunId,
+        reply: oneshot::Sender<Result<RuntimeCloseResult, String>>,
+    ) {
+        if self.closes.contains_key(&run_id) {
+            let _ = reply.send(Err(format!("run {run_id} already has a Close transaction")));
+            return;
+        }
+        let Some(run) = self.store.get(run_id) else {
+            let _ = reply.send(Err(format!("run {run_id} is not registered")));
+            return;
+        };
+        let process_state = run.process_state();
+        if process_state.is_terminal() {
+            let _ = reply.send(Ok(RuntimeCloseResult::terminal(process_state)));
+            return;
+        }
+        if process_state == ProcessState::Stopping || self.stops.contains_key(&run_id) {
+            let _ = reply.send(Err(format!("run {run_id} is already stopping")));
+            return;
+        }
+        if process_state == ProcessState::Ready && run.activity_state() != ActivityState::Idle {
+            let _ = reply.send(Err(
+                "Stop active agent work or resolve its pending interaction before closing the run"
+                    .to_owned(),
+            ));
+            return;
+        }
+        if self.composer_submissions.contains_key(&run_id)
+            || self.pending_session_replacements.contains_key(&run_id)
+        {
+            let _ = reply.send(Err(
+                "wait for the pending composer or session operation before closing the run"
+                    .to_owned(),
+            ));
+            return;
+        }
+        if self.run_draft_restore_pending(run_id) {
+            let _ = reply.send(Err(
+                "wait for the session draft restore to finish before closing the run".to_owned(),
+            ));
+            return;
+        }
+        if !self.processes.contains_key(&run_id) {
+            let _ = reply.send(Err(format!("run {run_id} has no live process")));
+            return;
+        }
+
+        let draft_session_id = self
+            .draft_persistence
+            .as_ref()
+            .and_then(|_| self.drafts.current_session_id(run_id).map(str::to_owned));
+        self.closes.insert(
+            run_id,
+            ActiveClose {
+                reply,
+                draft_session_id,
+                draft_deadline: Instant::now()
+                    + Duration::from_millis(self.limits.draft_flush_deadline_ms),
+                termination_started: false,
+            },
+        );
+        self.continue_close_run(run_id);
+    }
+
+    fn continue_close_run(&mut self, run_id: RunId) {
+        let Some(active) = self.closes.get(&run_id) else {
+            return;
+        };
+        if active.termination_started {
+            return;
+        }
+        let session_id = active.draft_session_id.clone();
+
+        if let Some(session_id) = session_id {
+            let Some(snapshot) = self.drafts.snapshot_session(&session_id) else {
+                self.fail_close_run(run_id, "current session draft disappeared before Close");
+                return;
+            };
+            match snapshot.durability {
+                DraftDurability::Saved => {}
+                DraftDurability::Dirty => {
+                    self.draft_save_deadlines.remove(&session_id);
+                    self.start_draft_save(&session_id);
+                    let Some(after_start) = self.drafts.snapshot_session(&session_id) else {
+                        self.fail_close_run(
+                            run_id,
+                            "current session draft disappeared while starting its Close save",
+                        );
+                        return;
+                    };
+                    match after_start.durability {
+                        DraftDurability::Saved => {}
+                        DraftDurability::Dirty | DraftDurability::Saving => return,
+                        DraftDurability::Failed => {
+                            self.fail_close_run(
+                                run_id,
+                                after_start
+                                    .persistence_error
+                                    .as_deref()
+                                    .unwrap_or("draft persistence failed before Close"),
+                            );
+                            return;
+                        }
+                    }
+                }
+                DraftDurability::Saving => return,
+                DraftDurability::Failed => {
+                    self.fail_close_run(
+                        run_id,
+                        snapshot
+                            .persistence_error
+                            .as_deref()
+                            .unwrap_or("draft persistence failed before Close"),
+                    );
+                    return;
+                }
             }
+        }
+
+        self.start_close_termination(run_id);
+    }
+
+    fn start_close_termination(&mut self, run_id: RunId) {
+        let process_state = self.store.get(run_id).map(RunRecord::process_state);
+        if process_state.is_none() || process_state.is_some_and(ProcessState::is_terminal) {
+            self.finish_close_run(run_id, process_state == Some(ProcessState::Quarantined));
+            return;
+        }
+        let Some(process) = self.processes.get(&run_id).cloned() else {
+            self.fail_close_run(run_id, "run has no live process to close");
+            return;
+        };
+
+        self.startups.remove(&run_id);
+        if let Err(error) = process.terminate(Duration::from_millis(
+            self.limits.stop_termination_deadline_ms,
+        )) {
+            self.fail_close_run(run_id, &format!("could not queue run termination: {error}"));
+            return;
+        }
+        if matches!(
+            process_state,
+            Some(ProcessState::Starting | ProcessState::Ready)
+        ) {
+            self.store
+                .apply(run_id, RunMutation::BeginStop)
+                .expect("Close may enter Stopping only from a verified live process state");
+        }
+        if let Some(active) = self.closes.get_mut(&run_id) {
+            active.termination_started = true;
+        }
+        self.push_state_changed(run_id);
+    }
+
+    fn continue_closes_for_session(&mut self, session_id: &str) {
+        let run_ids: Vec<_> = self
+            .closes
+            .iter()
+            .filter(|(_, active)| active.draft_session_id.as_deref() == Some(session_id))
+            .map(|(run_id, _)| *run_id)
+            .collect();
+        for run_id in run_ids {
+            self.continue_close_run(run_id);
+        }
+    }
+
+    fn fail_close_run(&mut self, run_id: RunId, detail: &str) {
+        if let Some(active) = self.closes.remove(&run_id) {
+            let _ = active.reply.send(Err(detail.to_owned()));
+        }
+    }
+
+    fn start_run(&mut self, spec: RunStartSpec) -> Result<RunId, RuntimeManagerError> {
+        let active_runs = self.active_run_count();
+        if active_runs >= self.live_run_limit {
+            return Err(RuntimeManagerError::LiveRunLimit {
+                active: active_runs,
+                limit: self.live_run_limit,
+            });
+        }
+        let execution_root = spec.launch.cwd();
+        if self
+            .store
+            .records()
+            .any(|run| !run.process_state().is_terminal() && run.execution_root() == execution_root)
+        {
+            return Err(RuntimeManagerError::ExecutionRootAlreadyActive {
+                execution_root: execution_root.to_path_buf(),
+            });
         }
         let run_id = RunId::new();
         let record = RunRecord::starting_with_worktree(
@@ -1190,11 +1501,18 @@ impl RuntimeManagerTask {
             SessionLaunch::NewWithId(session_id) => Some(session_id.to_string()),
             SessionLaunch::New | SessionLaunch::Ephemeral | SessionLaunch::Resume(_) => None,
         };
-        let process = spawn_pi_process(&spec.launch, &spec.environment, self.limits)
-            .map_err(|error| RuntimeManagerError::Operation(error.to_string()))?;
-        self.drafts
+        let evicted_draft_session = self
+            .drafts
             .register_run(run_id, initial_session_id)
             .map_err(|error| RuntimeManagerError::Operation(error.to_string()))?;
+        self.forget_evicted_draft_session(evicted_draft_session);
+        let process = match spawn_pi_process(&spec.launch, &spec.environment, self.limits) {
+            Ok(process) => process,
+            Err(error) => {
+                let _ = self.drafts.release_run(run_id);
+                return Err(RuntimeManagerError::Operation(error.to_string()));
+            }
+        };
         self.store
             .register(record)
             .map_err(|error| RuntimeManagerError::Operation(error.to_string()))?;
@@ -1232,6 +1550,90 @@ impl RuntimeManagerTask {
             }
         }
         Ok(run_id)
+    }
+
+    fn active_run_count(&self) -> usize {
+        self.store
+            .records()
+            .filter(|run| !run.process_state().is_terminal())
+            .count()
+    }
+
+    fn trim_retained_terminal_runs(&mut self) {
+        let mut terminal_runs: Vec<_> = self
+            .store
+            .records()
+            .filter(|run| run.process_state().is_terminal())
+            .map(RunRecord::id)
+            .collect();
+        if terminal_runs.len() <= self.limits.max_retained_terminal_runs {
+            return;
+        }
+        terminal_runs.sort_by_key(|run_id| run_id.as_uuid().as_u128());
+        let remove_count = terminal_runs.len() - self.limits.max_retained_terminal_runs;
+        for run_id in terminal_runs.into_iter().take(remove_count) {
+            self.release_terminal_run(run_id);
+        }
+    }
+
+    fn dismiss_terminal_run(&mut self, run_id: RunId) -> Result<(), String> {
+        let run = self
+            .store
+            .get(run_id)
+            .ok_or_else(|| format!("run {run_id} is not registered"))?;
+        if !run.process_state().is_terminal() {
+            return Err("only terminal runs can be dismissed".to_owned());
+        }
+        self.release_terminal_run(run_id);
+        Ok(())
+    }
+
+    fn release_terminal_run(&mut self, run_id: RunId) {
+        // Terminal pruning/dismissal releases only run-scoped hot state. Pi
+        // session JSONL and session-scoped draft persistence are independent.
+        self.controllers.remove(&run_id);
+        self.ui.remove(&run_id);
+        self.processes.remove(&run_id);
+        self.startups.remove(&run_id);
+        self.pending_failures.remove(&run_id);
+        self.closes.remove(&run_id);
+        self.stops.remove(&run_id);
+        self.composer_submissions.remove(&run_id);
+        self.pending_session_replacements.remove(&run_id);
+        self.request_waiters
+            .retain(|(owner, _), _| *owner != run_id);
+        self.extension_waiters
+            .retain(|(owner, _), _| *owner != run_id);
+        let _ = self.drafts.release_run(run_id);
+        let _ = self.store.remove_terminal(run_id);
+    }
+
+    fn forget_evicted_draft_session(&mut self, session_id: Option<String>) {
+        let Some(session_id) = session_id else {
+            return;
+        };
+        self.draft_load_attempted.remove(&session_id);
+        self.draft_load_pending.remove(&session_id);
+        self.draft_save_deadlines.remove(&session_id);
+    }
+
+    fn capacity_snapshot(&self) -> RuntimeCapacitySnapshot {
+        RuntimeCapacitySnapshot {
+            active_runs: self.active_run_count(),
+            live_run_limit: self.live_run_limit,
+            configured_max_live_runs: self.limits.max_live_runs,
+        }
+    }
+
+    fn set_live_run_limit(&mut self, limit: usize) -> Result<(), RuntimeManagerError> {
+        if limit == 0 || limit > self.limits.max_live_runs {
+            return Err(RuntimeManagerError::Operation(format!(
+                "live run limit must be between 1 and {}",
+                self.limits.max_live_runs
+            )));
+        }
+        self.live_run_limit = limit;
+        Ok(())
     }
 
     fn edit_draft(&mut self, run_id: RunId, text: String) -> Result<DraftSnapshot, String> {
@@ -1550,6 +1952,7 @@ impl RuntimeManagerTask {
                 }
                 self.signal_draft_session(&session_id);
                 self.continue_pending_session_replacements(&session_id);
+                self.continue_closes_for_session(&session_id);
             }
         }
     }
@@ -1568,6 +1971,10 @@ impl RuntimeManagerTask {
             self.pending_session_replacements.keys().copied().collect();
         for run_id in pending_replacements {
             self.fail_pending_session_replacement(run_id, detail);
+        }
+        let close_ids: Vec<_> = self.closes.keys().copied().collect();
+        for run_id in close_ids {
+            self.fail_close_run(run_id, detail);
         }
         let session_ids = self.drafts.unsaved_sessions();
         for session_id in session_ids {
@@ -2030,9 +2437,11 @@ impl RuntimeManagerTask {
                 .get(run_id)
                 .and_then(|run| run.session_state().session_id.clone())
                 .ok_or_else(|| format!("run {run_id} get_state did not establish a session id"))?;
-            self.drafts
+            let evicted_draft_session = self
+                .drafts
                 .reconcile_session(run_id, session_id)
                 .map_err(|error| error.to_string())?;
+            self.forget_evicted_draft_session(evicted_draft_session);
             self.queue_draft_load_for_run(run_id);
             self.schedule_draft_save_for_run(run_id);
         }
@@ -2328,6 +2737,19 @@ impl RuntimeManagerTask {
 
     fn handle_deadlines(&mut self) {
         let now = Instant::now();
+        let expired_closes: Vec<_> = self
+            .closes
+            .iter()
+            .filter(|(_, active)| !active.termination_started && active.draft_deadline <= now)
+            .map(|(run_id, _)| *run_id)
+            .collect();
+        for run_id in expired_closes {
+            self.fail_close_run(
+                run_id,
+                "draft flush deadline expired before Close; run was left alive",
+            );
+        }
+
         let expired_replacements: Vec<_> = self
             .pending_session_replacements
             .iter()
@@ -2430,6 +2852,12 @@ impl RuntimeManagerTask {
         self.stops
             .values()
             .map(|stop| stop.transaction.rpc_deadline())
+            .chain(
+                self.closes
+                    .values()
+                    .filter(|close| !close.termination_started)
+                    .map(|close| close.draft_deadline),
+            )
             .chain(self.startups.values().map(|startup| startup.deadline))
             .chain(
                 self.pending_session_replacements
@@ -2486,7 +2914,7 @@ impl RuntimeManagerTask {
             controller.process_ended();
         }
         let mutation = if let Some(failure) = self.pending_failures.remove(&run_id) {
-            RunMutation::ProcessFailed { failure }
+            RunMutation::ProcessFailed { failure, code }
         } else if process_state == Some(ProcessState::Stopping) {
             RunMutation::ProcessExited { code }
         } else {
@@ -2496,6 +2924,7 @@ impl RuntimeManagerTask {
                     &format!("Pi process exited unexpectedly with code {code:?}"),
                     self.limits,
                 ),
+                code,
             }
         };
         let _ = self.store.apply(run_id, mutation);
@@ -2503,6 +2932,8 @@ impl RuntimeManagerTask {
         self.fail_run_waiters(run_id, "Pi process exited");
         self.finish_terminal_ui(run_id);
         self.finish_hard_stop(run_id, false);
+        self.finish_close_run(run_id, false);
+        self.trim_retained_terminal_runs();
     }
 
     fn finalize_termination_report(&mut self, run_id: RunId, report: ProcessTerminationReport) {
@@ -2542,6 +2973,17 @@ impl RuntimeManagerTask {
         self.fail_run_waiters(run_id, detail);
         self.finish_terminal_ui(run_id);
         self.finish_hard_stop(run_id, true);
+        self.finish_close_run(run_id, true);
+        self.trim_retained_terminal_runs();
+    }
+
+    fn finish_close_run(&mut self, run_id: RunId, quarantined: bool) {
+        if let Some(active) = self.closes.remove(&run_id) {
+            let _ = active.reply.send(Ok(RuntimeCloseResult {
+                process_terminated: !quarantined,
+                quarantined,
+            }));
+        }
     }
 
     fn finish_terminal_ui(&mut self, run_id: RunId) {
@@ -3141,6 +3583,524 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn close_idle_run_flushes_draft_terminates_process_and_releases_execution_root() {
+        let fixture = ManagerFixture::new("close-idle");
+        let persistence_root = fixture.root.join("app-state");
+        let limits = RuntimeLimits {
+            draft_save_debounce_ms: 60_000,
+            draft_flush_deadline_ms: 1_000,
+            // This test proves confirmed Close semantics, not the quarantine
+            // fallback under an overloaded test host. Give the Windows
+            // process-tree helper additional scheduling margin while keeping
+            // the production default unchanged.
+            stop_termination_deadline_ms: 10_000,
+            ..RuntimeLimits::default()
+        };
+        let manager = spawn_runtime_manager_with_draft_persistence(limits, &persistence_root)
+            .expect("persistent manager");
+        let spec = fixture.start_spec();
+        let run_id = manager.start_run(spec.clone()).await.expect("idle run");
+        synchronize(&manager, run_id, "close-idle-startup").await;
+        wait_for_draft_durability(&manager, run_id, DraftDurability::Saved, Some("")).await;
+        manager
+            .edit_draft(run_id, "save before close".to_owned())
+            .await
+            .expect("dirty draft");
+
+        let closed = manager.close_run(run_id).await.expect("close idle run");
+        assert!(closed.process_terminated);
+        assert!(!closed.quarantined);
+        let snapshot = manager.hydrate().await.expect("closed hydration");
+        let closed_run = snapshot
+            .runs
+            .iter()
+            .find(|run| run.run.id() == run_id)
+            .expect("closed run retained");
+        assert_eq!(closed_run.run.process_state(), ProcessState::Exited);
+        assert_eq!(
+            closed_run.draft.as_ref().expect("session draft").durability,
+            DraftDurability::Saved
+        );
+        let store = DraftFileStore::open(&persistence_root, limits).expect("draft file store");
+        assert_eq!(
+            store
+                .load("fake-session")
+                .expect("load close-flushed draft")
+                .as_ref()
+                .map(|draft| draft.text.as_str()),
+            Some("save before close")
+        );
+
+        let replacement = manager
+            .start_run(spec)
+            .await
+            .expect("closed run releases execution root");
+        synchronize(&manager, replacement, "close-idle-replacement").await;
+        manager.shutdown().await.expect("shutdown");
+    }
+
+    #[tokio::test]
+    async fn dismiss_terminal_run_rejects_live_owner_and_preserves_session_draft() {
+        let fixture = ManagerFixture::new("dismiss-terminal");
+        let manager = spawn_runtime_manager(RuntimeLimits::default()).expect("manager");
+        let spec = fixture.start_spec();
+        let run_id = manager
+            .start_run(spec.clone())
+            .await
+            .expect("run to dismiss");
+        synchronize(&manager, run_id, "dismiss-terminal-startup").await;
+        manager
+            .edit_draft(run_id, "draft survives dismiss".to_owned())
+            .await
+            .expect("session draft before dismiss");
+
+        let live_error = manager
+            .dismiss_terminal_run(run_id)
+            .await
+            .expect_err("live run cannot be dismissed");
+        assert!(
+            live_error
+                .to_string()
+                .contains("only terminal runs can be dismissed")
+        );
+
+        manager
+            .close_run(run_id)
+            .await
+            .expect("close idle run first");
+        manager
+            .dismiss_terminal_run(run_id)
+            .await
+            .expect("dismiss terminal run");
+        let dismissed = manager.hydrate().await.expect("dismissed hydration");
+        assert!(dismissed.runs.iter().all(|run| run.run.id() != run_id));
+        assert!(manager.drain_ui(run_id, 8).await.is_err());
+
+        let replacement = manager
+            .start_run(spec)
+            .await
+            .expect("dismissed terminal owner releases execution root");
+        synchronize(&manager, replacement, "dismiss-terminal-replacement").await;
+        let restored = manager.hydrate().await.expect("replacement hydration");
+        let replacement_run = restored
+            .runs
+            .iter()
+            .find(|run| run.run.id() == replacement)
+            .expect("replacement run");
+        assert_eq!(
+            replacement_run.draft.as_ref().expect("session draft").text,
+            "draft survives dismiss"
+        );
+        manager.shutdown().await.expect("shutdown");
+    }
+
+    #[tokio::test]
+    async fn close_run_refuses_active_agent_without_terminating_process() {
+        let fixture = ManagerFixture::new("close-working");
+        let manager = spawn_runtime_manager(RuntimeLimits::default()).expect("manager");
+        let run_id = manager.start_run(fixture.start_spec()).await.expect("run");
+        synchronize(&manager, run_id, "close-working-startup").await;
+        manager
+            .request(
+                run_id,
+                RpcRequest::with_id(
+                    RequestId::from_wire("close-working-hold"),
+                    RpcCommand::Prompt {
+                        message: "hold".to_owned(),
+                        images: Vec::new(),
+                        streaming_behavior: None,
+                    },
+                ),
+            )
+            .await
+            .expect("working prompt");
+        synchronize(&manager, run_id, "close-working-observe").await;
+
+        let error = manager
+            .close_run(run_id)
+            .await
+            .expect_err("working run rejects Close");
+        assert!(error.to_string().contains("Stop active agent work"));
+        let snapshot = manager.hydrate().await.expect("working hydration");
+        let run = snapshot
+            .runs
+            .iter()
+            .find(|run| run.run.id() == run_id)
+            .expect("working run retained");
+        assert_eq!(run.run.process_state(), ProcessState::Ready);
+        assert_eq!(run.run.activity_state(), ActivityState::Working);
+        manager.shutdown().await.expect("shutdown");
+    }
+
+    #[tokio::test]
+    async fn local_checkout_execution_root_is_exclusive_until_prior_run_is_terminal() {
+        let fixture = ManagerFixture::new("local-exclusive");
+        let manager = spawn_runtime_manager(RuntimeLimits::default()).expect("manager");
+        let spec = fixture.start_spec();
+        let first = manager
+            .start_run(spec.clone())
+            .await
+            .expect("first local checkout run");
+        synchronize(&manager, first, "local-exclusive-startup").await;
+
+        let second = manager.start_run(spec.clone()).await;
+        assert!(matches!(
+            second,
+            Err(RuntimeManagerError::Operation(message))
+                if message.contains("execution root is already owned by a live run")
+        ));
+
+        manager
+            .request(
+                first,
+                RpcRequest::with_id(
+                    RequestId::from_wire("local-exclusive-exit"),
+                    RpcCommand::Prompt {
+                        message: "exit-process".to_owned(),
+                        images: Vec::new(),
+                        streaming_behavior: None,
+                    },
+                ),
+            )
+            .await
+            .expect("exit first local run");
+        timeout(Duration::from_secs(5), async {
+            loop {
+                let snapshot = manager.hydrate().await.expect("terminal hydration");
+                if snapshot
+                    .runs
+                    .iter()
+                    .find(|run| run.run.id() == first)
+                    .is_some_and(|run| run.run.process_state().is_terminal())
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("first local run reaches terminal state");
+
+        let replacement = manager
+            .start_run(spec)
+            .await
+            .expect("terminal owner releases local execution root");
+        synchronize(&manager, replacement, "local-exclusive-replacement").await;
+        manager.shutdown().await.expect("shutdown");
+    }
+
+    #[tokio::test]
+    async fn unexpected_process_exit_preserves_known_exit_code_in_hydration() {
+        let fixture = ManagerFixture::new("unexpected-exit-code");
+        let manager = spawn_runtime_manager(RuntimeLimits::default()).expect("manager");
+        let run_id = manager.start_run(fixture.start_spec()).await.expect("run");
+        synchronize(&manager, run_id, "unexpected-exit-code-startup").await;
+
+        manager
+            .request(
+                run_id,
+                RpcRequest::with_id(
+                    RequestId::from_wire("unexpected-exit-code"),
+                    RpcCommand::Prompt {
+                        message: "exit-process-17".to_owned(),
+                        images: Vec::new(),
+                        streaming_behavior: None,
+                    },
+                ),
+            )
+            .await
+            .expect("exit response");
+
+        let failed = timeout(Duration::from_secs(5), async {
+            loop {
+                let snapshot = manager.hydrate().await.expect("failed hydration");
+                if let Some(run) = snapshot
+                    .runs
+                    .iter()
+                    .find(|run| run.run.id() == run_id)
+                    .filter(|run| run.run.process_state() == ProcessState::Failed)
+                {
+                    break run.clone();
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("unexpected exit becomes failed");
+        let wire = serde_json::to_value(&failed.run).expect("serialize failed run");
+        assert_eq!(wire["exitCode"], serde_json::json!(17));
+        assert_eq!(
+            wire["failure"]["kind"],
+            serde_json::json!("unexpected_exit")
+        );
+        assert!(
+            wire["failure"]["detail"]
+                .as_str()
+                .is_some_and(|detail| detail.contains("Some(17)"))
+        );
+        manager.shutdown().await.expect("shutdown");
+    }
+
+    #[tokio::test]
+    #[ignore = "scale fixture; exercised by full verification"]
+    async fn four_simulated_streaming_runs_remain_independently_bounded_and_responsive() {
+        let fixtures = [
+            ManagerFixture::new("scale-four-a"),
+            ManagerFixture::new("scale-four-b"),
+            ManagerFixture::new("scale-four-c"),
+            ManagerFixture::new("scale-four-d"),
+        ];
+        let limits = RuntimeLimits {
+            max_live_runs: 4,
+            ..RuntimeLimits::default()
+        };
+        let manager = spawn_runtime_manager(limits).expect("manager");
+        let mut run_ids = Vec::new();
+        for (index, fixture) in fixtures.iter().enumerate() {
+            let run_id = manager
+                .start_run(fixture.start_spec())
+                .await
+                .expect("start scale run");
+            synchronize(&manager, run_id, &format!("scale-four-startup-{index}")).await;
+            let _ = drain_all(&manager, run_id).await;
+            run_ids.push(run_id);
+        }
+        assert_eq!(manager.capacity().await.expect("capacity").active_runs, 4);
+
+        let mut tasks = Vec::new();
+        for (index, run_id) in run_ids.iter().copied().enumerate() {
+            let manager = manager.clone();
+            tasks.push(tokio::spawn(async move {
+                manager
+                    .request(
+                        run_id,
+                        RpcRequest::with_id(
+                            RequestId::from_wire(format!("scale-four-stream-{index}")),
+                            RpcCommand::Prompt {
+                                message: "stream".to_owned(),
+                                images: Vec::new(),
+                                streaming_behavior: None,
+                            },
+                        ),
+                    )
+                    .await
+            }));
+        }
+        for task in tasks {
+            let completion = timeout(Duration::from_secs(5), task)
+                .await
+                .expect("bounded four-run request deadline")
+                .expect("request task")
+                .expect("request completion");
+            assert_eq!(completion.response.outcome(), RpcResponseOutcome::Accepted);
+        }
+
+        let snapshot = manager.hydrate().await.expect("four-run hydration");
+        assert_eq!(snapshot.runs.len(), 4);
+        for run_id in run_ids {
+            let events = drain_all(&manager, run_id).await;
+            assert!(events.len() <= limits.max_runtime_command_queue);
+            let run = snapshot
+                .runs
+                .iter()
+                .find(|run| run.run.id() == run_id)
+                .expect("run retained");
+            let live = &run.rpc.as_ref().expect("rpc projection").live;
+            assert!(live.assistant_blocks.len() <= limits.max_stream_content_blocks_per_message);
+            assert!(live.active_tools.len() <= limits.max_active_tools_per_run);
+        }
+        manager.shutdown().await.expect("shutdown");
+    }
+
+    #[tokio::test]
+    async fn terminal_run_hot_state_is_bounded_and_oldest_terminal_run_is_pruned() {
+        let fixtures = [
+            ManagerFixture::new("retained-terminal-a"),
+            ManagerFixture::new("retained-terminal-b"),
+            ManagerFixture::new("retained-terminal-c"),
+        ];
+        let limits = RuntimeLimits {
+            max_live_runs: 1,
+            max_retained_terminal_runs: 2,
+            ..RuntimeLimits::default()
+        };
+        let manager = spawn_runtime_manager(limits).expect("manager");
+        let mut run_ids = Vec::new();
+
+        for (index, fixture) in fixtures.iter().enumerate() {
+            let run_id = manager
+                .start_run(fixture.start_spec())
+                .await
+                .expect("start sequential run");
+            synchronize(&manager, run_id, &format!("retained-terminal-{index}")).await;
+            let _ = drain_all(&manager, run_id).await;
+            if index == 0 {
+                manager
+                    .edit_draft(run_id, "session draft survives terminal pruning".to_owned())
+                    .await
+                    .expect("session draft before terminal pruning");
+            }
+            let mut signals = manager.subscribe();
+            while signals.try_recv().is_ok() {}
+
+            manager
+                .request(
+                    run_id,
+                    RpcRequest::with_id(
+                        RequestId::from_wire(format!("exit-retained-{index}")),
+                        RpcCommand::Prompt {
+                            message: "exit-process".to_owned(),
+                            images: Vec::new(),
+                            streaming_behavior: None,
+                        },
+                    ),
+                )
+                .await
+                .expect("exit request response");
+
+            timeout(Duration::from_secs(5), async {
+                loop {
+                    let snapshot = manager.hydrate().await.expect("terminal hydration");
+                    if snapshot
+                        .runs
+                        .iter()
+                        .find(|run| run.run.id() == run_id)
+                        .is_some_and(|run| run.run.process_state().is_terminal())
+                    {
+                        break;
+                    }
+                    let signal = signals.recv().await.expect("terminal dirty signal");
+                    if signal == (RuntimeManagerSignal::RunDirty { run_id }) {
+                        let _ = drain_all(&manager, run_id).await;
+                    }
+                }
+            })
+            .await
+            .expect("run reaches terminal state");
+            run_ids.push(run_id);
+        }
+
+        let retained = manager.hydrate().await.expect("retained hydration");
+        assert_eq!(retained.runs.len(), 2);
+        let retained_ids: HashSet<_> = retained.runs.iter().map(|run| run.run.id()).collect();
+        assert!(!retained_ids.contains(&run_ids[0]));
+        assert!(retained_ids.contains(&run_ids[1]));
+        assert!(retained_ids.contains(&run_ids[2]));
+        assert!(
+            retained
+                .runs
+                .iter()
+                .all(|run| run.run.process_state().is_terminal())
+        );
+        assert!(retained.runs.iter().all(|run| {
+            run.draft
+                .as_ref()
+                .is_some_and(|draft| draft.text == "session draft survives terminal pruning")
+        }));
+        assert!(manager.drain_ui(run_ids[0], 8).await.is_err());
+        assert!(
+            manager
+                .request(run_ids[0], RpcRequest::new(RpcCommand::GetState))
+                .await
+                .is_err()
+        );
+
+        manager.shutdown().await.expect("shutdown");
+    }
+
+    #[tokio::test]
+    async fn live_run_admission_limit_is_backend_configurable_and_enforced_before_spawn() {
+        let first_fixture = ManagerFixture::new("admission-first");
+        let second_fixture = ManagerFixture::new("admission-second");
+        let limits = RuntimeLimits {
+            max_live_runs: 2,
+            ..RuntimeLimits::default()
+        };
+        let manager = spawn_runtime_manager(limits).expect("manager");
+        assert_eq!(
+            manager.capacity().await.expect("initial capacity"),
+            RuntimeCapacitySnapshot {
+                active_runs: 0,
+                live_run_limit: 2,
+                configured_max_live_runs: 2,
+            }
+        );
+        manager
+            .set_live_run_limit(1)
+            .await
+            .expect("lower admission limit");
+        let first = manager
+            .start_run(first_fixture.start_spec())
+            .await
+            .expect("first run");
+        synchronize(&manager, first, "admission-first-startup").await;
+
+        assert!(matches!(
+            manager.start_run(second_fixture.start_spec()).await,
+            Err(RuntimeManagerError::Operation(message))
+                if message.contains("live run admission limit reached")
+                    && message.contains("limit 1")
+        ));
+        let snapshot = manager.hydrate().await.expect("admission hydration");
+        assert_eq!(snapshot.runs.len(), 1);
+        assert_eq!(
+            manager.capacity().await.expect("full capacity").active_runs,
+            1
+        );
+        manager
+            .set_live_run_limit(2)
+            .await
+            .expect("raise admission limit");
+        let second = manager
+            .start_run(second_fixture.start_spec())
+            .await
+            .expect("second run after raising limit");
+        synchronize(&manager, second, "admission-second-startup").await;
+        assert_eq!(
+            manager
+                .capacity()
+                .await
+                .expect("two-run capacity")
+                .active_runs,
+            2
+        );
+        assert!(manager.set_live_run_limit(3).await.is_err());
+        manager.shutdown().await.expect("shutdown");
+    }
+
+    #[test]
+    fn runtime_capacity_wire_shape_matches_desktop_contract() {
+        assert_eq!(
+            serde_json::to_value(RuntimeCapacitySnapshot {
+                active_runs: 2,
+                live_run_limit: 4,
+                configured_max_live_runs: 8,
+            })
+            .expect("capacity wire shape"),
+            serde_json::json!({
+                "activeRuns":2,
+                "liveRunLimit":4,
+                "configuredMaxLiveRuns":8
+            })
+        );
+    }
+
+    #[test]
+    fn runtime_close_result_wire_shape_matches_desktop_contract() {
+        assert_eq!(
+            serde_json::to_value(RuntimeCloseResult {
+                process_terminated: true,
+                quarantined: false,
+            })
+            .expect("close result wire shape"),
+            serde_json::json!({
+                "processTerminated": true,
+                "quarantined": false
+            })
+        );
+    }
+
+    #[tokio::test]
     async fn second_live_run_cannot_reuse_same_worktree_execution_root() {
         let fixture = ManagerFixture::new("worktree-exclusive");
         let manager = spawn_runtime_manager(RuntimeLimits::default()).expect("manager");
@@ -3426,6 +4386,26 @@ mod tests {
         assert_eq!(stats.session_id, "fake-session");
         assert_eq!(stats.tokens.total, 150);
         assert_eq!(stats.context_usage.expect("context").percent, Some(25.0));
+        manager.shutdown().await.expect("shutdown");
+    }
+
+    #[tokio::test]
+    async fn session_tree_is_requested_on_demand_and_keeps_pi_leaf_identity() {
+        let fixture = ManagerFixture::new("session-tree-control");
+        let manager = spawn_runtime_manager(RuntimeLimits::default()).expect("manager");
+        let run_id = manager
+            .start_run(fixture.start_spec())
+            .await
+            .expect("start run");
+        synchronize(&manager, run_id, "session-tree-startup").await;
+
+        let tree = manager.session_tree(run_id).await.expect("session tree");
+        assert_eq!(tree.nodes.len(), 3);
+        assert_eq!(tree.nodes[0].id, "tree-root");
+        assert_eq!(tree.nodes[0].child_count, 2);
+        assert_eq!(tree.nodes[1].label.as_deref(), Some("primary"));
+        assert_eq!(tree.leaf_id.as_deref(), Some("tree-alt"));
+        assert!(!tree.truncated);
         manager.shutdown().await.expect("shutdown");
     }
 
@@ -3771,6 +4751,126 @@ mod tests {
             Some("switched-session")
         );
         assert_eq!(after.runs[0].draft.as_ref().expect("new draft").text, "");
+        manager.shutdown().await.expect("shutdown");
+    }
+
+    #[tokio::test]
+    async fn evicted_saved_session_draft_reloads_when_session_is_revisited() {
+        let fixture = ManagerFixture::new("draft-cache-reload");
+        let persistence_root = fixture.root.join("app-state");
+        let limits = RuntimeLimits {
+            max_live_runs: 1,
+            max_cached_draft_records: 1,
+            draft_save_debounce_ms: 10,
+            draft_flush_deadline_ms: 1_000,
+            ..RuntimeLimits::default()
+        };
+        let manager = spawn_runtime_manager_with_draft_persistence(limits, &persistence_root)
+            .expect("persistent manager");
+        let run_id = manager.start_run(fixture.start_spec()).await.expect("run");
+        synchronize(&manager, run_id, "draft-cache-reload-startup").await;
+        wait_for_draft_durability(&manager, run_id, DraftDurability::Saved, Some("")).await;
+
+        manager
+            .edit_draft(run_id, "draft from original".to_owned())
+            .await
+            .expect("edit original draft");
+        wait_for_draft_durability(
+            &manager,
+            run_id,
+            DraftDurability::Saved,
+            Some("draft from original"),
+        )
+        .await;
+
+        let switched = manager
+            .request(
+                run_id,
+                RpcRequest::with_id(
+                    RequestId::from_wire("draft-cache-switch-away"),
+                    RpcCommand::SwitchSession {
+                        session_path: PathBuf::from("switched-session.jsonl"),
+                    },
+                ),
+            )
+            .await
+            .expect("switch away from original session");
+        assert_eq!(switched.response.outcome(), RpcResponseOutcome::Accepted);
+        synchronize(&manager, run_id, "draft-cache-switched-away").await;
+        wait_for_draft_durability(&manager, run_id, DraftDurability::Saved, Some("")).await;
+        assert_eq!(
+            manager.hydrate().await.expect("switched hydration").runs[0]
+                .run
+                .session_state()
+                .session_id
+                .as_deref(),
+            Some("switched-session")
+        );
+
+        manager
+            .edit_draft(run_id, "draft from switched".to_owned())
+            .await
+            .expect("edit switched draft");
+        wait_for_draft_durability(
+            &manager,
+            run_id,
+            DraftDurability::Saved,
+            Some("draft from switched"),
+        )
+        .await;
+
+        let original = manager
+            .request(
+                run_id,
+                RpcRequest::with_id(
+                    RequestId::from_wire("draft-cache-switch-back"),
+                    RpcCommand::SwitchSession {
+                        session_path: PathBuf::from("original-session.jsonl"),
+                    },
+                ),
+            )
+            .await
+            .expect("switch back to original session");
+        assert_eq!(original.response.outcome(), RpcResponseOutcome::Accepted);
+        synchronize(&manager, run_id, "draft-cache-switched-back").await;
+        wait_for_draft_durability(
+            &manager,
+            run_id,
+            DraftDurability::Saved,
+            Some("draft from original"),
+        )
+        .await;
+
+        let restored = manager.hydrate().await.expect("restored hydration");
+        assert_eq!(
+            restored.runs[0].run.session_state().session_id.as_deref(),
+            Some("fake-session")
+        );
+        assert_eq!(
+            restored.runs[0]
+                .draft
+                .as_ref()
+                .expect("restored draft")
+                .text,
+            "draft from original"
+        );
+        let store = DraftFileStore::open(&persistence_root, limits).expect("draft file store");
+        assert_eq!(
+            store
+                .load("fake-session")
+                .expect("load original persisted draft")
+                .as_ref()
+                .map(|draft| draft.text.as_str()),
+            Some("draft from original")
+        );
+        assert_eq!(
+            store
+                .load("switched-session")
+                .expect("load switched persisted draft")
+                .as_ref()
+                .map(|draft| draft.text.as_str()),
+            Some("draft from switched")
+        );
         manager.shutdown().await.expect("shutdown");
     }
 
@@ -4555,6 +5655,18 @@ function handle(request) {
         contextUsage: {tokens: 50000, contextWindow: 200000, percent: 25},
       });
       break;
+    case "get_tree":
+      respond(request, {
+        tree: [{
+          entry: {type: "message", id: "tree-root", parentId: null, timestamp: "2026-08-27T00:00:00Z", message: {role: "user", content: "root"}},
+          children: [
+            {entry: {type: "message", id: "tree-main", parentId: "tree-root", timestamp: "2026-08-27T00:00:01Z", message: {role: "assistant", content: "main"}}, children: [], label: "primary"},
+            {entry: {type: "message", id: "tree-alt", parentId: "tree-root", timestamp: "2026-08-27T00:00:02Z", message: {role: "user", content: "alternate"}}, children: []},
+          ],
+        }],
+        leafId: "tree-alt",
+      });
+      break;
     case "clone":
       sessionId = "cloned-session";
       respond(request, {cancelled: false});
@@ -4576,6 +5688,16 @@ function handle(request) {
     case "prompt":
       if (request.message === "reject") {
         reject(request, "fixture prompt rejection");
+        break;
+      }
+      if (request.message === "exit-process") {
+        respond(request);
+        setTimeout(() => process.exit(0), 5);
+        break;
+      }
+      if (request.message === "exit-process-17") {
+        respond(request);
+        setTimeout(() => process.exit(17), 5);
         break;
       }
       if (request.message === "delayed-accept") {

@@ -112,6 +112,13 @@ impl ProjectRegistry {
         self.by_id.get(&id)
     }
 
+    #[must_use]
+    pub fn bindings(&self) -> Vec<ProjectBinding> {
+        let mut bindings: Vec<_> = self.by_id.values().cloned().collect();
+        bindings.sort_by_key(|binding| binding.id().to_string());
+        bindings
+    }
+
     pub fn resolve_or_register(
         &mut self,
         path: impl AsRef<Path>,
@@ -179,6 +186,23 @@ impl ProjectRegistry {
         self.by_root.insert(new_root, id);
         self.by_id.insert(id, relocated.clone());
         Ok(relocated)
+    }
+
+    pub fn remove_explicit(
+        &mut self,
+        id: ProjectId,
+    ) -> Result<ProjectBinding, ProjectRegistryError> {
+        let current = self
+            .by_id
+            .get(&id)
+            .cloned()
+            .ok_or(ProjectRegistryError::UnknownProject { project_id: id })?;
+        let mut next = self.persisted_entries();
+        next.retain(|entry| entry.id != id);
+        self.persist_entries(&next)?;
+        self.by_root.remove(current.canonical_root());
+        self.by_id.remove(&id);
+        Ok(current)
     }
 
     fn load_from_disk(&mut self) -> Result<(), ProjectRegistryError> {
@@ -428,6 +452,47 @@ mod tests {
             id
         );
         fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn explicit_removal_is_durable_and_does_not_delete_project_contents() {
+        let root = fixture("remove");
+        let project = root.join("project");
+        let state = root.join("state");
+        fs::create_dir_all(&project).expect("project");
+        fs::write(project.join("keep.txt"), "keep").expect("project content");
+        let id = {
+            let mut registry =
+                ProjectRegistry::open(&state, RuntimeLimits::default()).expect("registry");
+            let binding = registry.resolve_or_register(&project).expect("register");
+            let id = binding.id();
+            let removed = registry.remove_explicit(id).expect("remove registration");
+            assert_eq!(removed.id(), id);
+            assert!(registry.get(id).is_none());
+            id
+        };
+        assert!(project.join("keep.txt").is_file());
+        let reopened = ProjectRegistry::open(&state, RuntimeLimits::default()).expect("reopen");
+        assert!(reopened.get(id).is_none());
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn bindings_are_bounded_to_registry_contents_and_stably_sorted() {
+        let first = fixture("bindings-first");
+        let second = fixture("bindings-second");
+        let mut registry = ProjectRegistry::ephemeral(RuntimeLimits::default());
+        registry
+            .resolve_or_register(&second)
+            .expect("register second");
+        registry
+            .resolve_or_register(&first)
+            .expect("register first");
+        let bindings = registry.bindings();
+        assert_eq!(bindings.len(), 2);
+        assert!(bindings[0].id().to_string() < bindings[1].id().to_string());
+        fs::remove_dir_all(first).expect("cleanup first");
+        fs::remove_dir_all(second).expect("cleanup second");
     }
 
     #[test]

@@ -79,6 +79,31 @@ pub struct SessionEntriesPage {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SessionTreeNode {
+    pub id: String,
+    pub parent_id: Option<String>,
+    pub entry_type: String,
+    pub role: Option<String>,
+    pub timestamp: Option<String>,
+    pub label: Option<String>,
+    pub label_timestamp: Option<String>,
+    pub depth: usize,
+    pub child_count: usize,
+    pub preview: Option<String>,
+    pub preview_truncated: bool,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionTreeSnapshot {
+    pub nodes: Vec<SessionTreeNode>,
+    pub leaf_id: Option<String>,
+    pub truncated: bool,
+    pub encoded_bytes: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CommandSummary {
     pub name: String,
     pub description: Option<String>,
@@ -142,6 +167,127 @@ fn validate_session_cursor(
     Ok(())
 }
 
+fn append_tree_preview(target: &mut String, value: &str, limit: usize, truncated: &mut bool) {
+    if target.len() >= limit {
+        *truncated = true;
+        return;
+    }
+    if !target.is_empty() {
+        if target.len().saturating_add(1) > limit {
+            *truncated = true;
+            return;
+        }
+        target.push('\n');
+    }
+    let remaining = limit.saturating_sub(target.len());
+    if value.len() <= remaining {
+        target.push_str(value);
+        return;
+    }
+    let mut end = remaining;
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    target.push_str(&value[..end]);
+    *truncated = true;
+}
+
+fn session_tree_entry_projection(
+    entry: &Map<String, Value>,
+    limits: RuntimeLimits,
+) -> (Option<String>, Option<String>, bool) {
+    let entry_type = entry
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let preview_limit = limits.max_session_history_item_text_bytes.min(4096);
+    let mut preview = String::new();
+    let mut truncated = false;
+    let mut role = None;
+
+    match entry_type {
+        "message" => {
+            if let Some(message) = entry.get("message").and_then(Value::as_object) {
+                role = message
+                    .get("role")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
+                match message.get("content") {
+                    Some(Value::String(text)) => {
+                        append_tree_preview(&mut preview, text, preview_limit, &mut truncated);
+                    }
+                    Some(Value::Array(content)) => {
+                        for item in content {
+                            if let Some(text) = item
+                                .as_object()
+                                .filter(|item| {
+                                    item.get("type").and_then(Value::as_str) == Some("text")
+                                })
+                                .and_then(|item| item.get("text"))
+                                .and_then(Value::as_str)
+                            {
+                                append_tree_preview(
+                                    &mut preview,
+                                    text,
+                                    preview_limit,
+                                    &mut truncated,
+                                );
+                                if truncated {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        "compaction" | "branch_summary" => {
+            if let Some(summary) = entry.get("summary").and_then(Value::as_str) {
+                append_tree_preview(&mut preview, summary, preview_limit, &mut truncated);
+            }
+        }
+        "session_info" => {
+            if let Some(name) = entry.get("name").and_then(Value::as_str) {
+                append_tree_preview(&mut preview, name, preview_limit, &mut truncated);
+            }
+        }
+        "custom" | "custom_message" => {
+            if let Some(custom_type) = entry.get("customType").and_then(Value::as_str) {
+                append_tree_preview(&mut preview, custom_type, preview_limit, &mut truncated);
+            }
+        }
+        _ => {}
+    }
+
+    let preview = (!preview.is_empty()).then_some(preview);
+    (role, preview, truncated)
+}
+
+fn bounded_tree_optional_string(
+    object: &Map<String, Value>,
+    field: &'static str,
+    limit: usize,
+) -> Result<Option<String>, RpcResponsePayloadError> {
+    let Some(value) = object.get(field) else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    let value = value
+        .as_str()
+        .ok_or(RpcResponsePayloadError::InvalidOptionalString {
+            command: "get_tree",
+            field,
+        })?;
+    let mut end = value.len().min(limit);
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    Ok(Some(value[..end].to_owned()))
+}
+
 impl RpcResponse {
     pub fn entries_page(
         &self,
@@ -199,6 +345,99 @@ impl RpcResponse {
         Ok(SessionEntriesPage {
             entries: parsed,
             leaf_id,
+            encoded_bytes,
+        })
+    }
+
+    /// Projects Pi's complete in-session branch tree into one bounded flat
+    /// depth-first list. Raw session entries are not retained in the result.
+    pub fn session_tree(
+        &self,
+        limits: RuntimeLimits,
+    ) -> Result<SessionTreeSnapshot, RpcResponsePayloadError> {
+        let data = accepted_data(self, "get_tree")?;
+        let roots = required_array(data, "get_tree", "tree")?;
+        let leaf_id = optional_string(data, "get_tree", "leafId")?;
+        if let Some(leaf_id) = &leaf_id {
+            validate_session_cursor(leaf_id, limits)?;
+        }
+
+        let max_nodes = limits.max_session_entry_page_entries;
+        let mut truncated = roots.len() > max_nodes;
+        let mut stack = Vec::with_capacity(roots.len().min(max_nodes));
+        for root in roots.iter().take(max_nodes).rev() {
+            stack.push((root, 0usize));
+        }
+
+        let mut nodes = Vec::with_capacity(stack.len());
+        let mut encoded_bytes = 0usize;
+        while let Some((value, depth)) = stack.pop() {
+            if nodes.len() >= max_nodes {
+                truncated = true;
+                break;
+            }
+            let node = value
+                .as_object()
+                .ok_or(RpcResponsePayloadError::InvalidObjectArray {
+                    command: "get_tree",
+                    field: "tree",
+                })?;
+            let entry = node.get("entry").and_then(Value::as_object).ok_or(
+                RpcResponsePayloadError::MissingObject {
+                    command: "get_tree",
+                    field: "entry",
+                },
+            )?;
+            let id = required_string(entry, "get_tree", "id")?;
+            validate_session_cursor(&id, limits)?;
+            let parent_id = optional_string(entry, "get_tree", "parentId")?;
+            if let Some(parent_id) = &parent_id {
+                validate_session_cursor(parent_id, limits)?;
+            }
+            let entry_type = required_string(entry, "get_tree", "type")?;
+            let timestamp = optional_string(entry, "get_tree", "timestamp")?;
+            let label_limit = limits.max_session_history_item_text_bytes.min(1024);
+            let label = bounded_tree_optional_string(node, "label", label_limit)?;
+            let label_timestamp = bounded_tree_optional_string(node, "labelTimestamp", 128)?;
+            let children = required_array(node, "get_tree", "children")?;
+            let (role, preview, preview_truncated) = session_tree_entry_projection(entry, limits);
+            let projected = SessionTreeNode {
+                id,
+                parent_id,
+                entry_type,
+                role,
+                timestamp,
+                label,
+                label_timestamp,
+                depth,
+                child_count: children.len(),
+                preview,
+                preview_truncated,
+            };
+            let node_bytes = serde_json::to_vec(&projected)
+                .map_err(|_| RpcResponsePayloadError::InvalidSessionEntryEncoding)?
+                .len();
+            let attempted = encoded_bytes.saturating_add(node_bytes);
+            if attempted > limits.max_session_entry_page_bytes {
+                truncated = true;
+                break;
+            }
+            encoded_bytes = attempted;
+            nodes.push(projected);
+
+            let available = max_nodes.saturating_sub(nodes.len().saturating_add(stack.len()));
+            if children.len() > available {
+                truncated = true;
+            }
+            for child in children.iter().take(available).rev() {
+                stack.push((child, depth.saturating_add(1)));
+            }
+        }
+
+        Ok(SessionTreeSnapshot {
+            nodes,
+            leaf_id,
+            truncated,
             encoded_bytes,
         })
     }
@@ -1213,6 +1452,64 @@ mod tests {
         assert_eq!(page.leaf_id.as_deref(), Some("ghi789"));
         assert!(page.encoded_bytes > 0);
         assert_eq!(page.entries[0].raw["message"]["role"], "user");
+    }
+
+    #[test]
+    fn get_tree_projects_branch_structure_without_retaining_raw_entries() {
+        let tree = response(
+            "get_tree",
+            json!({
+                "tree":[{
+                    "entry":{"type":"message","id":"root","parentId":null,"timestamp":"t1","message":{"role":"user","content":"root prompt","largeIgnoredField":"xxxxxxxx"}},
+                    "children":[
+                        {"entry":{"type":"message","id":"a","parentId":"root","timestamp":"t2","message":{"role":"assistant","content":[{"type":"text","text":"first answer"}]}},"children":[],"label":"approach A"},
+                        {"entry":{"type":"message","id":"b","parentId":"root","timestamp":"t3","message":{"role":"user","content":"alternate"}},"children":[]}
+                    ]
+                }],
+                "leafId":"b"
+            }),
+        )
+        .session_tree(RuntimeLimits::default())
+        .expect("tree projection");
+
+        assert_eq!(tree.nodes.len(), 3);
+        assert_eq!(tree.nodes[0].id, "root");
+        assert_eq!(tree.nodes[0].depth, 0);
+        assert_eq!(tree.nodes[0].child_count, 2);
+        assert_eq!(tree.nodes[0].role.as_deref(), Some("user"));
+        assert_eq!(tree.nodes[0].preview.as_deref(), Some("root prompt"));
+        assert_eq!(tree.nodes[1].label.as_deref(), Some("approach A"));
+        assert_eq!(tree.nodes[2].depth, 1);
+        assert_eq!(tree.leaf_id.as_deref(), Some("b"));
+        assert!(!tree.truncated);
+        assert!(tree.encoded_bytes > 0);
+    }
+
+    #[test]
+    fn get_tree_stops_at_renderer_entry_budget() {
+        let limits = RuntimeLimits {
+            max_session_entry_page_entries: 2,
+            ..RuntimeLimits::default()
+        };
+        let tree = response(
+            "get_tree",
+            json!({
+                "tree":[{
+                    "entry":{"type":"message","id":"root","parentId":null,"message":{"role":"user","content":"root"}},
+                    "children":[
+                        {"entry":{"type":"message","id":"a","parentId":"root","message":{"role":"assistant","content":"a"}},"children":[]},
+                        {"entry":{"type":"message","id":"b","parentId":"root","message":{"role":"assistant","content":"b"}},"children":[]}
+                    ]
+                }],
+                "leafId":"b"
+            }),
+        )
+        .session_tree(limits)
+        .expect("bounded tree");
+
+        assert_eq!(tree.nodes.len(), 2);
+        assert!(tree.truncated);
+        assert_eq!(tree.leaf_id.as_deref(), Some("b"));
     }
 
     #[test]

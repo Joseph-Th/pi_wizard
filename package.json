@@ -6,13 +6,18 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1 --port 1420",
     "build": "vite build",
-    "check": "tsc --noEmit"
+    "check": "tsc --noEmit",
+    "test:renderer-recovery": "node tools/test_renderer_recovery.mjs",
+    "test:accessibility": "node tools/test_accessibility_contract.mjs",
+    "desktop:build": "tauri build --no-bundle",
+    "desktop:bundle": "tauri build"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.11.1",
     "solid-js": "^1.9.15"
   },
   "devDependencies": {
+    "@tauri-apps/cli": "^2.11.4",
     "typescript": "^7.0.2",
     "vite": "^8.2.2",
     "vite-plugin-solid": "^2.11.14"

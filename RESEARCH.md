@@ -4,6 +4,8 @@ Research snapshot: **2026-08-27**.
 
 This document records the external evidence behind the first design so later implementation does not have to rediscover why the boundaries exist. Product and architecture authorities remain `DESIGN.md` and `ARCHITECTURE.md`.
 
+This is historical research, not active scope. References to other operating systems, browser/web delivery, competing products, distribution channels, signing, or portability must not be converted into Pi Wizard work unless the user explicitly asks to expand the project. The active project is the personal Windows desktop app described in `README.md` and `AGENTS.md`.
+
 ## 1. Method
 
 The research pass prioritized:
@@ -227,7 +229,7 @@ Sources:
 
 Useful patterns include lazy loading for large diffs, explicit session history limits, stable scroll anchoring, worktree isolation, and session activity that remains correct when views are hidden. These are directly aligned with Pi Wizard's bounded-state goals.
 
-The broader editor/terminal/web/PWA scope is not required for Pi Wizard's first product.
+Broader product surfaces beyond the personal Windows desktop app are not required for Pi Wizard.
 
 ## 8. Desktop stack research
 
@@ -237,7 +239,7 @@ Primary source:
 
 - https://v2.tauri.app/reference/webview-versions/
 
-Tauri 2 uses the system webview: WebView2 on Windows and WebKit-based webviews on macOS/Linux. It therefore avoids bundling a separate Chromium runtime per application while keeping a web rendering surface suitable for Markdown/code/diff UI.
+On Windows, Tauri 2 uses the system WebView2 runtime. This avoids bundling a separate Chromium runtime while still providing the renderer needed for Markdown/code/diff UI.
 
 ### SolidJS
 

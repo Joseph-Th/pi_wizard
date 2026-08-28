@@ -13,6 +13,7 @@ pub mod git_review;
 pub mod ids;
 pub mod launch;
 pub mod limits;
+pub mod preferences;
 mod probe;
 pub mod process;
 pub mod project;

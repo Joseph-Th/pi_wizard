@@ -189,7 +189,7 @@ Authoritative recovery is still bounded retained state, not permission to retain
 
 Successful Pi session-replacement responses do not establish the identity of the session now active in the child. For accepted `new_session`, `switch_session`, `fork`, and `clone`, the runtime manager therefore queues a `get_state` reconciliation before releasing the original replacement completion. In a persistent runtime, the replacement is not written to Pi until the old session's current draft is already durable or a bounded forced save completes. Composer edits/submissions and later managed commands cannot overtake that durability barrier. A persistence failure/deadline fails the replacement locally and leaves Pi bound to the old session. Extension-cancelled replacements do not rebind the run.
 
-Renderer hydration is a versioned snapshot operation, not an assumption that the first IPC call succeeds. A hydration response carries a schema/version plus runtime revision. Current schema v4 carries the active session draft/durability, whether persisted draft restoration is still pending, backend-derived composer availability/submission ownership, capabilities, live bounded assistant/tool/Bash projections, extension UI state, and session-sync cursors. Failure must enter an actionable Retry/Relaunch state rather than an indefinite loading spinner. Applying the same snapshot twice is idempotent.
+Renderer hydration is a versioned snapshot operation, not an assumption that the first IPC call succeeds. A hydration response carries a schema/version plus runtime revision. Current schema v6 carries immutable worktree identity, the active session draft/durability and attachment metadata, whether persisted draft restoration is still pending, backend-derived composer availability/submission ownership, capabilities, live bounded assistant/tool/Bash projections, extension UI state, and session-sync cursors. Failure must enter an actionable Retry/Relaunch state rather than an indefinite loading spinner. Applying the same snapshot twice is idempotent.
 
 The backend emits only a coalesced `run dirty` wake-up to Tauri. The renderer then pulls bounded normalized event pages. A dirty run is signaled once until its backlog has been drained. Ordinary hydration is deliberately non-destructive because some transient delivery, such as extension notifications and completed-tool events, is not represented in the authoritative snapshot; clearing all queues during hydration could erase another run's pending transient event. Hydration instead re-announces any queue that already has pending delivery, which also closes the late-subscriber/reload wake-up case.
 
@@ -197,7 +197,13 @@ If one run's semantic backlog declares renderer desynchronization, recovery is a
 
 Application exit is also a runtime-manager transaction. Tauri intercepts `ExitRequested`, asks the manager to terminate all child identities that were live when shutdown began, and prevents native exit until the bounded shutdown result returns. A renderer close/reload is not equivalent to process shutdown.
 
+An explicit per-run **Close** operation is separate from both Stop and application shutdown. Stop cancels current agent work but intentionally keeps the Pi process reusable. Close is allowed only when the run is not actively working, forces the current session draft to durable storage first, then terminates only that run's exact owned child tree/group. Failure to persist the draft fails closed and leaves the process alive. After confirmed terminal transition, the execution-root ownership lock is released so another run may use that checkout. A separate **Dismiss** operation applies only to already-terminal runs and removes run-scoped hot/runtime projection state; it does not delete Pi session JSONL or session-scoped draft persistence.
+
+Canonical execution roots are exclusive across live runs, not only for app-created Git worktrees. This prevents two local-checkout runs from concurrently editing the same filesystem root. The backend is authoritative for admission; renderer launch/session-recovery surfaces only mirror that ownership by routing the user to the existing run or suggesting worktree isolation.
+
 The renderer is disposable. Reload/crash recovery reconstructs the window from the backend RuntimeStore, session-scoped draft owner, and selected navigation identity without restarting live Pi children. Automatic renderer reload attempts are bounded by a crash-loop breaker; repeated failure becomes an explicit recovery screen while backend runs remain supervised.
+
+Run-list ordering is presentation-only and never mutates runtime state. The sidebar/dashboard sort the bounded hydration snapshot by Needs Attention, active work, other live processes, then terminal retention, with newer UUIDv7 RunIds first within a class. Selected-run identity remains keyed by RunId, so reordering cannot retarget an action. Failed/quarantined run surfaces display only the already-bounded `RunFailure` projection and exit code. A known OS exit code is retained when an unexpected child exit becomes `Failed`; protocol/spawn/internal failures that do not have such an OS observation keep the field absent rather than manufacturing a code. Platform folder opening likewise accepts only RunId at IPC, re-resolves that run's execution root in the backend, and passes it as one argument to the native folder opener rather than accepting renderer-supplied filesystem targets.
 
 ### Event coalescing
 
@@ -231,7 +237,7 @@ Pi extension `set_editor_text` mutates this same backend draft before renderer n
 
 Draft persistence uses monotonically increasing generations. At most one write per draft is in flight. Completion for generation N cannot mark a newer generation N+1 durable, and a retry snapshots the newest current generation rather than replaying stale bytes. A bounded worker outside the token/process-manager hot path performs schema-versioned atomic replacement under the app-data runtime-state root and reports completion back through session ID plus generation ownership. Corrupt files are quarantined independently. The UI exposes Dirty/Saving/Saved/Failed truthfully; persistence errors are not swallowed.
 
-Persisted-draft restoration is asynchronous and therefore has an explicit restore-pending gate. The renderer cannot edit or submit the initially empty baseline before the saved value has either loaded, been proven absent, or failed visibly. Session replacement forces old-session durability before Pi switches; application shutdown bypasses normal debounce and waits only through a separate bounded flush deadline.
+Persisted-draft restoration is asynchronous and therefore has an explicit restore-pending gate. The renderer cannot edit or submit the initially empty baseline before the saved value has either loaded, been proven absent, or failed visibly. The in-memory `SessionDraftStore` also has an explicit record-count ceiling. When that ceiling is reached, only an unowned session record whose current generation is `Saved` may be evicted; Dirty, Saving, Failed, or still-owned records are never discarded to make room. Eviction clears the manager's load-attempt/pending/debounce bookkeeping for that session so a later revisit may load the persisted draft again. A stale asynchronous load completion for an already-evicted unowned session is ignored rather than recreating a cache record outside the ceiling. If no safe record can be evicted, the session transition fails closed instead of allocating without bound or dropping user state. Session replacement forces old-session durability before Pi switches; application shutdown bypasses normal debounce and waits only through a separate bounded flush deadline.
 
 Composer submission is also a backend transaction rather than a renderer button convention. Send is valid only for an idle Ready run; Steer/Follow-up only while the agent is working. The transaction captures exact RunId/request ID/draft generation before writing Pi. Pi acceptance clears only that submitted generation, so typing performed while the acknowledgement is in flight survives; rejection or transport failure preserves the submitted text.
 
@@ -278,6 +284,14 @@ Pi Wizard's own registries, indexes, drafts, preferences, and hydration metadata
 
 Durable writes use an atomic replace strategy appropriate to the platform. On parse/schema/integrity failure, quarantine the affected app-owned state and start from a safe empty/rebuildable projection where possible. Do not delete, rewrite, or hide intact Pi JSONL merely because a project/catalog/preferences file is corrupt. A previous failed launch must have a safe-start path that can bypass disposable indexing/project-selection state instead of repeating the same crash or CPU-heavy repair loop indefinitely.
 
+Preferences are a separate persistence domain rather than fields embedded into project/worktree/runtime snapshots. The first persisted preference is the live-run admission ceiling. It is schema-versioned, byte-bounded, atomically replaced, and validated against the configured runtime maximum before use. The preference file is committed before the manager ceiling changes, so a persistence failure cannot create a false durable UI state. Corrupt, oversized, unsupported-schema, or out-of-range preference files are quarantined without altering project/worktree/draft/session authority; startup uses the configured safe default and exposes a bounded recovery notice.
+
+### Compatibility and migration policy
+
+Pi's semantic version is diagnostic input, not the normal feature gate. Startup compatibility is established by resolving and version-probing the exact executable that will be spawned, then completing the bounded RPC `get_state` handshake and parsing required typed responses. Optional UI is driven by discovered models, thinking levels, commands, model input capability, and forward-compatible event parsing. Unknown valid events remain ignorable/diagnostic; malformed known protocol shapes fail the affected run rather than being guessed into another meaning. A version-range rejection is reserved for a specifically known incompatible Pi release and must be backed by an executable regression fixture or upstream protocol evidence.
+
+App-owned durable schemas follow read-old/write-current migration. A known older schema may be migrated only by an explicit tested decoder (for example the existing schema-1 text draft to schema-2 attachment-aware draft). The migrated value is validated under current byte/count limits and any later write uses only the current schema. An unknown newer schema, malformed state, duplicate identity, or out-of-range value is never downgraded heuristically: the affected app-owned domain is quarantined or treated as rebuildable while Pi JSONL, Git contents, and unrelated app-owned domains remain untouched. Schema changes therefore require an explicit version bump, a fixture for the previous supported representation, and a failure fixture for unsupported future state.
+
 ### Project identity
 
 A registered project has an opaque `ProjectId` plus one canonical filesystem root. Display names, Git remotes, repository names, last-opened UI state, and session metadata are hints only; none may silently rebind a `ProjectId` to a different directory.
@@ -320,7 +334,7 @@ The recovery journal has its own stable `WorktreeId`, entry/byte ceilings, atomi
 
 Restart reconciliation is deliberately non-mutating. A plan is considered **Not Created** only when both its requested branch and path are proven absent. A surviving path must resolve to the same Git common repository and requested branch. The captured creation base must still be an ancestor of current `HEAD`, not necessarily equal to it, because legitimate agent commits and dirty work after creation must remain recoverable. A wrong branch, rewritten ancestry, branch-only mutation, path-only mutation, or unrelated repository remains a classified partial/conflicting recovery and is never auto-deleted. After the user independently removes both Git resources, a fresh absence proof may retire only the app journal record.
 
-If creation fails after creating only task-owned resources, rollback is allowed only when their ownership and emptiness are proven. Otherwise record an orphan/recovery item rather than destructively guessing. Worktrees are not pooled or silently reassigned between live runs. Cleanup is explicit; a worktree with uncommitted or unpushed work is never silently deleted. The first product does not need automatic branch merging.
+If creation fails after creating only task-owned resources, rollback is allowed only when their ownership and emptiness are proven. Otherwise record an orphan/recovery item rather than destructively guessing. Worktrees are not pooled or silently reassigned between live runs. Cleanup is explicit; a worktree with uncommitted or unpushed work is never silently deleted. The first cleanup surface is deliberately narrower still: a fresh recovery probe must prove the exact recorded repository/branch/path, no live run may use the worktree, the working tree must be clean, and current `HEAD` must equal the captured creation base. Only then may the service run non-forced `git worktree remove` and delete the task branch with an expected-old object ID. Any failure/partial mutation keeps the recovery journal; the journal is retired only after a fresh probe proves both branch and path absent. The first product does not need automatic branch merging.
 
 Every Git operation for a run resolves from that run's canonical execution root and verifies repository/worktree identity before mutation. UI-selected project state is not an acceptable substitute for the run binding.
 
@@ -345,6 +359,8 @@ Rules:
 - no synchronous JS diff algorithms on large content;
 - commands have time/output bounds and cancellation;
 - cached diff results are keyed to repository/worktree revision plus relevant working-tree metadata and invalidated on known mutations.
+- binary classification happens through bounded Git metadata before a text patch is requested, and the renderer sequences summary/detail requests so stale asynchronous detail cannot reclaim the visible review slot after a newer refresh.
+- tracked text review is byte-window paged. A continuation cursor contains only the project-relative path, raw byte offset, and SHA-256 digest of the exact preceding diff prefix. The next request re-runs Git, stream-discards and hashes that prefix, and fails closed if the digest changed. Only the current page is retained; a separate scan ceiling bounds the cost of re-reading the prefix, so extremely large later offsets stop explicitly rather than making one page request unbounded. Producing a page reads only enough bytes to fill the page plus at most one byte proving another page exists, then terminates the Git subprocess.
 
 ## 10. Project trust and security
 
@@ -395,7 +411,7 @@ Closing a window/view must not leak or silently resolve a pending request. Teard
 
 Parallel agents are useful until local model clients, language servers, build tools, or shell processes saturate the machine.
 
-The runtime should expose a configurable live-run concurrency limit rather than an unbounded fan-out API. The default should be conservative and revised by measurement. Waiting runs are queued explicitly rather than silently spawned.
+The runtime exposes a configurable live-run admission limit rather than an unbounded fan-out API. A validated build/runtime limit is the hard maximum; the manager owns a mutable runtime ceiling within `1..=maximum`. Starts at or above the ceiling are rejected before child spawn. Lowering the ceiling below the current active count never terminates existing runs, and raising it cannot exceed the configured maximum. The desktop preference owner persists the selected ceiling independently with atomic replace/quarantine semantics and applies it to a newly spawned manager before normal desktop use. If queued starts are introduced later, they must be explicit first-class state rather than silently spawned or hidden in the renderer.
 
 Expensive application-owned jobs also have separate limits:
 
@@ -426,7 +442,7 @@ Failures preserve identity and retryability. The UI must not collapse them into 
 
 ## 14. Performance budgets
 
-These are **acceptance targets**, not claims about an implementation that does not exist yet. Benchmarks will refine them on representative Windows/macOS/Linux hardware.
+These are **acceptance targets** for the personal Windows desktop application. Benchmarks refine them on the Windows machine(s) where the app is actually used.
 
 | Surface | Initial target |
 | --- | --- |
@@ -471,9 +487,9 @@ Diagnostics use ring buffers and size caps. Turning on tracing must not reproduc
 
 ## 16. Desktop launch environment
 
-Pi Wizard must not assume a GUI-launched process inherits the same environment as the user's terminal. This is especially important on macOS, but Windows/Linux desktop launchers can also expose a different PATH or stale process environment. Pi and its shell tools inherit the environment used to spawn the RPC child, so environment parity is part of execution correctness.
+Pi Wizard must not assume a GUI-launched Windows process inherits the same environment as the user's terminal. Explorer/start-menu launches can expose a different PATH or stale process environment. Pi and its shell tools inherit the environment used to spawn the RPC child, so environment parity is part of execution correctness.
 
-The backend resolves a launch environment before Pi discovery/spawn. Precedence is: explicit user-configured executable/environment settings, the desktop process environment, then a bounded platform-appropriate user-shell/environment probe when required. Do not parse shell startup files manually or run an unbounded interactive shell. Cache only non-secret provenance needed to invalidate/reprobe; never persist provider keys, tokens, or complete environment dumps.
+The backend resolves a launch environment before Pi discovery/spawn. Precedence is: explicit user-configured executable/environment settings, the desktop process environment, then a bounded Windows-appropriate user-shell/environment probe when required. Do not parse shell startup files manually or run an unbounded interactive shell. Cache only non-secret provenance needed to invalidate/reprobe; never persist provider keys, tokens, or complete environment dumps.
 
 Environment acquisition and environment selection are separate owners. Selection/provenance is Tauri-independent and chooses one complete in-memory environment that is then reused for Pi, Git, compatibility probes, and the final child spawn. The platform shell probe may supply a candidate snapshot, but it cannot cause Pi to be discovered under one PATH and later spawned under another. Process spawn rejects executable-identity mismatch.
 

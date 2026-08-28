@@ -1,6 +1,6 @@
 # Pi Wizard
 
-Pi Wizard is a lightweight desktop control surface for the Pi coding harness. The product is intentionally a shell around upstream Pi, not a fork of its agent runtime and not a replacement IDE.
+Pi Wizard is a personal Windows desktop control surface for the Pi coding harness. The product is intentionally a shell around upstream Pi, not a fork of its agent runtime, not a replacement IDE, and not a cross-platform or web product.
 
 The primary jobs are:
 
@@ -13,9 +13,9 @@ The primary jobs are:
 
 ## Current state
 
-**Phase 2 runtime integration is operational and early Phase 3/4 orchestration is now usable: Git-worktree launch/recovery and bounded repository review are implemented alongside the Pi-native session/runtime surfaces.**
+**The current Windows desktop application is implemented through its deterministic hardening boundary. Runtime/session orchestration, parallel Git-worktree runs, bounded change review, crash recovery, accessibility contracts, scale verification, and optimized desktop builds are operational.**
 
-The current desktop shell can discover Pi, register and launch existing projects, launch an isolated Git worktree from an explicitly inspected commit, recover app-created worktrees after desktop/Pi launch failure, start or resume boundedly discovered project sessions, page persisted active-branch history, fork/clone/name sessions, select discovered models and thinking levels, control Pi's native automatic/manual compaction, run discovered slash commands, persist session-scoped text/image drafts, send/steer/follow up/stop through Pi-native RPC semantics, handle extension UI requests, render bounded live assistant/tool output, and inspect changed files through on-demand bounded Git diffs. The Rust runtime owns process/recovery/Git identity and the Solid renderer remains a projection rather than an authority. `STATUS.md` tracks the exact implemented boundary.
+The current desktop shell can discover Pi, register and launch existing projects, launch/recover/conservatively clean isolated Git worktrees, enforce a durable live-run ceiling, start or resume boundedly discovered project sessions, page persisted active-branch history, inspect Pi's full session tree and fork/clone/name sessions, select discovered models and thinking levels, control Pi's native automatic/manual compaction, run discovered slash commands, persist session-scoped text/image drafts, send/steer/follow up/stop through Pi-native RPC semantics, handle extension UI requests, render bounded live assistant/tool output, and review changes through cancelable paged diffs with binary handling and hunk navigation. The Rust runtime owns process/recovery/Git identity and the Solid renderer remains a projection rather than an authority. The repository `full` lane includes scale/startup checks and an optimized Windows desktop build. `STATUS.md` tracks the exact implemented boundary.
 
 ## Product principles
 

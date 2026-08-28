@@ -14,6 +14,20 @@ type ProjectTrustPolicy = "inherit" | "approve" | "ignore";
 type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 type ExecutionMode = "local" | "worktree";
 type ExecutionIsolation = "local_checkout" | "git_worktree";
+type AppView = "dashboard" | "launcher" | "run";
+
+interface StartRunResult {
+  runId: string;
+  initialTaskSubmitted: boolean;
+  initialTaskError: string | null;
+}
+
+interface DesktopProjectRecord {
+  id: string;
+  canonicalRoot: string;
+  status: "present" | "missing" | "changed" | "unverifiable";
+  detail: string | null;
+}
 
 interface ModelSummary {
   provider: string;
@@ -59,6 +73,13 @@ interface RuntimeAttachmentLimits {
   maxNameBytes: number;
 }
 
+interface RuntimeCapacitySnapshot {
+  activeRuns: number;
+  liveRunLimit: number;
+  configuredMaxLiveRuns: number;
+  preferenceRecoveryNotice: string | null;
+}
+
 interface AssistantContentSnapshot {
   contentIndex: number;
   kind: "text" | "thinking" | "tool_call";
@@ -98,6 +119,11 @@ interface RuntimeStopResult {
   recoveredFollowUp: string[];
   draftRestored: boolean;
   draftRestoreError: string | null;
+  processTerminated: boolean;
+  quarantined: boolean;
+}
+
+interface RuntimeCloseResult {
   processTerminated: boolean;
   quarantined: boolean;
 }
@@ -142,11 +168,29 @@ interface PendingExtensionDialog {
   remainingTimeoutMs: number | null;
 }
 
+interface ExtensionUiSnapshot {
+  statuses: Array<{ key: string; text: string }>;
+  widgets: Array<{
+    key: string;
+    widget: {
+      lines: string[];
+      placement: "aboveEditor" | "belowEditor";
+    };
+  }>;
+  title: string | null;
+}
+
 interface GitWorktreeIdentity {
   repositoryRoot: string;
   worktreeRoot: string;
   branch: string;
   baseCommit: string;
+}
+
+interface RunFailureSnapshot {
+  kind: "spawn" | "protocol" | "unexpected_exit" | "stop" | "internal";
+  detail: string;
+  detailTruncated: boolean;
 }
 
 interface RunHydration {
@@ -159,6 +203,8 @@ interface RunHydration {
     projectTrust: ProjectTrustPolicy;
     agentWorking: boolean;
     process: "starting" | "ready" | "stopping" | "exited" | "failed" | "quarantined";
+    exitCode: number | null;
+    failure: RunFailureSnapshot | null;
     revision: number;
     session: {
       sessionFile: string | null;
@@ -178,6 +224,7 @@ interface RunHydration {
     capabilities: RunCapabilities;
     pendingDialogs: PendingExtensionDialog[];
     live: LiveProjectionSnapshot;
+    extensionUi: ExtensionUiSnapshot;
   } | null;
 }
 
@@ -218,6 +265,10 @@ type WorktreeRecoveryProbe =
   | { kind: "exact"; created: CreatedWorktree }
   | { kind: "partial"; branchExists: boolean; pathExists: boolean; detail: string };
 
+type WorktreeCleanupResult =
+  | { kind: "removed" }
+  | { kind: "partial"; branchExists: boolean; pathExists: boolean; detail: string };
+
 interface WorktreeRecoveryInspection {
   record: WorktreeRecoveryRecord | null;
   probe: WorktreeRecoveryProbe;
@@ -246,11 +297,38 @@ interface GitReviewSummary {
   truncated: boolean;
 }
 
-interface GitFileDiff {
+interface GitDiffCursor {
+  path: string;
+  offset: number;
+  prefixSha256: string;
+}
+
+interface GitDiffHunk {
+  lineIndex: number;
+  header: string;
+}
+
+interface GitFileDiffPage {
   path: string;
   diff: string;
-  truncated: boolean;
+  nextCursor: GitDiffCursor | null;
   untracked: boolean;
+  binary: boolean;
+  scannedBytes: number;
+  hunks: GitDiffHunk[];
+}
+
+function diffPageSegments(page: GitFileDiffPage): Array<{ hunk: GitDiffHunk | null; text: string }> {
+  const lines = page.diff.match(/[^\n]*\n|[^\n]+$/g) ?? [];
+  if (page.hunks.length === 0) return [{ hunk: null, text: page.diff }];
+  const segments: Array<{ hunk: GitDiffHunk | null; text: string }> = [];
+  const first = page.hunks[0]?.lineIndex ?? 0;
+  if (first > 0) segments.push({ hunk: null, text: lines.slice(0, first).join("") });
+  page.hunks.forEach((hunk, index) => {
+    const end = page.hunks[index + 1]?.lineIndex ?? lines.length;
+    segments.push({ hunk, text: lines.slice(hunk.lineIndex, end).join("") });
+  });
+  return segments;
 }
 
 interface SessionCatalogEntry {
@@ -304,6 +382,27 @@ interface SessionHistoryPage {
   encodedBytes: number;
 }
 
+interface SessionTreeNode {
+  id: string;
+  parentId: string | null;
+  entryType: string;
+  role: string | null;
+  timestamp: string | null;
+  label: string | null;
+  labelTimestamp: string | null;
+  depth: number;
+  childCount: number;
+  preview: string | null;
+  previewTruncated: boolean;
+}
+
+interface SessionTreeSnapshot {
+  nodes: SessionTreeNode[];
+  leafId: string | null;
+  truncated: boolean;
+  encodedBytes: number;
+}
+
 interface RuntimeHydration {
   schemaVersion: number;
   runtimeRevision: number;
@@ -341,20 +440,25 @@ function HistoryTimeline(props: {
   forkDisabled: boolean;
   onFork: (entryId: string) => Promise<unknown>;
 }) {
-  const [page, setPage] = createSignal<SessionHistoryPage>();
+  const MAX_HISTORY_RENDER_PAGES = 4;
+  type LoadedHistoryPage = {
+    cursor: SessionHistoryCursor | null;
+    page: SessionHistoryPage;
+  };
+
+  const [pages, setPages] = createSignal<LoadedHistoryPage[]>([]);
   const [loading, setLoading] = createSignal(false);
   const [error, setError] = createSignal<string>();
-  const [currentCursor, setCurrentCursor] = createSignal<SessionHistoryCursor | null>(null);
   const [newerCursors, setNewerCursors] = createSignal<(SessionHistoryCursor | null)[]>([]);
   const [loadedMessageCount, setLoadedMessageCount] = createSignal<number | null>(null);
   let requestSequence = 0;
   let loadedSessionId: string | undefined;
+  let historyViewport: HTMLDivElement | undefined;
 
-  const load = async (
+  const fetchPage = async (
     cursor: SessionHistoryCursor | null,
     expectedSessionId: string,
-    clearNewer = false,
-  ) => {
+  ): Promise<LoadedHistoryPage | undefined> => {
     const sequence = ++requestSequence;
     setLoading(true);
     setError(undefined);
@@ -370,18 +474,30 @@ function HistoryTimeline(props: {
         result.sessionId !== expectedSessionId ||
         props.run.run.session.sessionId !== expectedSessionId
       )
-        return false;
-      setPage(result);
-      setCurrentCursor(cursor);
-      setLoadedMessageCount(props.run.run.session.messageCount);
-      if (clearNewer) setNewerCursors([]);
-      return true;
+        return undefined;
+      if (cursor === null) setLoadedMessageCount(props.run.run.session.messageCount);
+      return { cursor, page: result };
     } catch (historyError) {
       if (sequence === requestSequence) setError(String(historyError));
-      return false;
+      return undefined;
     } finally {
       if (sequence === requestSequence) setLoading(false);
     }
+  };
+
+  const keepBoundedNewerCursor = (cursor: SessionHistoryCursor | null) => {
+    const history = newerCursors();
+    setNewerCursors(
+      history.length >= 64
+        ? [...history.slice(history.length - 63), cursor]
+        : [...history, cursor],
+    );
+  };
+
+  const scrollToBottom = () => {
+    queueMicrotask(() => {
+      if (historyViewport) historyViewport.scrollTop = historyViewport.scrollHeight;
+    });
   };
 
   createEffect(() => {
@@ -390,36 +506,45 @@ function HistoryTimeline(props: {
     if (!sessionId || !sessionFile) {
       requestSequence += 1;
       loadedSessionId = undefined;
-      setPage(undefined);
+      setPages([]);
       setError(undefined);
       setLoading(false);
-      setCurrentCursor(null);
       setNewerCursors([]);
       setLoadedMessageCount(null);
       return;
     }
     if (sessionId === loadedSessionId) return;
     loadedSessionId = sessionId;
-    setPage(undefined);
-    setCurrentCursor(null);
+    setPages([]);
     setNewerCursors([]);
     setLoadedMessageCount(null);
-    void load(null, sessionId, true);
+    void (async () => {
+      const latest = await fetchPage(null, sessionId);
+      if (!latest) return;
+      setPages([latest]);
+      setNewerCursors([]);
+      scrollToBottom();
+    })();
   });
 
   const loadOlder = async () => {
-    const cursor = page()?.nextCursor;
+    const current = pages();
+    const cursor = current[0]?.page.nextCursor;
     const sessionId = props.run.run.session.sessionId;
     if (!cursor || !sessionId || loading()) return;
-    const previous = currentCursor();
-    if (await load(cursor, sessionId)) {
-      const history = newerCursors();
-      setNewerCursors(
-        history.length >= 64
-          ? [...history.slice(history.length - 63), previous]
-          : [...history, previous],
-      );
+    const previousHeight = historyViewport?.scrollHeight ?? 0;
+    const older = await fetchPage(cursor, sessionId);
+    if (!older) return;
+    const next = [older, ...pages()];
+    if (next.length > MAX_HISTORY_RENDER_PAGES) {
+      const droppedNewest = next.pop();
+      if (droppedNewest) keepBoundedNewerCursor(droppedNewest.cursor);
     }
+    setPages(next);
+    queueMicrotask(() => {
+      if (!historyViewport) return;
+      historyViewport.scrollTop += historyViewport.scrollHeight - previousHeight;
+    });
   };
 
   const loadNewer = async () => {
@@ -427,13 +552,25 @@ function HistoryTimeline(props: {
     const cursor = history.at(-1);
     const sessionId = props.run.run.session.sessionId;
     if (cursor === undefined || !sessionId || loading()) return;
-    if (await load(cursor, sessionId)) setNewerCursors(history.slice(0, -1));
+    const newer = await fetchPage(cursor, sessionId);
+    if (!newer) return;
+    const next = [...pages(), newer];
+    if (next.length > MAX_HISTORY_RENDER_PAGES) next.shift();
+    setPages(next);
+    setNewerCursors(history.slice(0, -1));
+    scrollToBottom();
   };
 
   const loadLatest = () => {
     const sessionId = props.run.run.session.sessionId;
     if (!sessionId || loading()) return;
-    void load(null, sessionId, true);
+    void (async () => {
+      const latest = await fetchPage(null, sessionId);
+      if (!latest) return;
+      setPages([latest]);
+      setNewerCursors([]);
+      scrollToBottom();
+    })();
   };
 
   const hasNewActivity = () => {
@@ -442,12 +579,18 @@ function HistoryTimeline(props: {
     return current !== null && loaded !== null && current > loaded;
   };
 
+  const atLatestWindow = () =>
+    pages().at(-1)?.cursor === null && newerCursors().length === 0;
+
+  const scannedBytes = () =>
+    pages().reduce((total, loaded) => total + loaded.page.scannedBytes, 0);
+
   return (
     <Show when={props.run.run.session.sessionFile && props.run.run.session.sessionId}>
       <section class="history-timeline" aria-label="Persisted Pi session history">
         <div class="history-toolbar">
           <strong>Session history</strong>
-          <span>Bounded active-branch page</span>
+          <span>Bounded active-branch window · {pages().length}/{MAX_HISTORY_RENDER_PAGES} pages</span>
           <div>
             <button
               type="button"
@@ -458,14 +601,14 @@ function HistoryTimeline(props: {
             </button>
             <button
               type="button"
-              disabled={loading() || !page()?.nextCursor}
+              disabled={loading() || !pages()[0]?.page.nextCursor}
               onClick={() => void loadOlder()}
             >
-              Older
+              Load older
             </button>
             <button
               type="button"
-              disabled={loading() || (currentCursor() === null && !hasNewActivity())}
+              disabled={loading() || (atLatestWindow() && !hasNewActivity())}
               onClick={loadLatest}
             >
               Latest
@@ -473,60 +616,219 @@ function HistoryTimeline(props: {
           </div>
         </div>
         <Show when={hasNewActivity()}>
-          <p class="history-note">New persisted activity is available. Latest refreshes this page.</p>
+          <p class="history-note">New persisted activity is available. Latest refreshes the bounded window.</p>
         </Show>
-        <Show when={page()}>
-          {(history) => (
-            <div class="history-page">
-              <For each={history().items}>
-                {(item) => (
-                  <article
-                    class={`history-item history-${item.kind}${item.isError ? " history-error" : ""}`}
-                  >
-                    <header>
-                      <strong>{historyLabel(item)}</strong>
-                      <div>
-                        <Show when={historyTimestamp(item.timestamp)}>
-                          {(timestamp) => <span>{timestamp()}</span>}
+        <Show when={pages().length > 0}>
+          <div class="history-window" ref={historyViewport}>
+            <For each={pages()}>
+              {(loaded) => (
+                <div class="history-page">
+                  <For each={loaded.page.items}>
+                    {(item) => (
+                      <article
+                        class={`history-item history-${item.kind}${item.isError ? " history-error" : ""}`}
+                      >
+                        <header>
+                          <strong>{historyLabel(item)}</strong>
+                          <div>
+                            <Show when={historyTimestamp(item.timestamp)}>
+                              {(timestamp) => <span>{timestamp()}</span>}
+                            </Show>
+                            <Show when={item.kind === "user"}>
+                              <button
+                                type="button"
+                                disabled={props.forkDisabled || loading()}
+                                onClick={() => void props.onFork(item.entryId)}
+                              >
+                                Fork here
+                              </button>
+                            </Show>
+                          </div>
+                        </header>
+                        <Show when={item.text}>
+                          <pre>{item.text}</pre>
                         </Show>
-                        <Show when={item.kind === "user"}>
-                          <button
-                            type="button"
-                            disabled={props.forkDisabled || loading()}
-                            onClick={() => void props.onFork(item.entryId)}
-                          >
-                            Fork here
-                          </button>
+                        <Show when={item.textTruncated}>
+                          <span class="truncation-note">History preview truncated</span>
                         </Show>
-                      </div>
-                    </header>
-                    <Show when={item.text}>
-                      <pre>{item.text}</pre>
-                    </Show>
-                    <Show when={item.textTruncated}>
-                      <span class="truncation-note">History preview truncated</span>
-                    </Show>
-                  </article>
-                )}
-              </For>
-              <Show when={history().items.length === 0}>
-                <p class="history-note">
-                  {history().nextCursor
-                    ? "No displayable entries in this bounded scan window. Continue with Older to scan farther back on the active branch."
-                    : "No persisted displayable history is available for this session yet."}
-                </p>
-              </Show>
-              <span class="history-footnote">
-                Read {history().scannedBytes.toLocaleString()} session bytes for this page.
-              </span>
-            </div>
-          )}
+                      </article>
+                    )}
+                  </For>
+                  <Show when={loaded.page.items.length === 0}>
+                    <p class="history-note">
+                      {loaded.page.nextCursor
+                        ? "No displayable entries in this bounded scan window. Load older to scan farther back on the active branch."
+                        : "No persisted displayable history is available for this session yet."}
+                    </p>
+                  </Show>
+                </div>
+              )}
+            </For>
+          </div>
+          <span class="history-footnote">
+            Read {scannedBytes().toLocaleString()} session bytes across the visible bounded window.
+          </span>
         </Show>
-        <Show when={loading() && !page()}>
+        <Show when={loading() && pages().length === 0}>
           <p class="history-note">Loading bounded session history.</p>
         </Show>
         <Show when={error()}>
           {(message) => <p class="error">Session history failed: {message()}</p>}
+        </Show>
+      </section>
+    </Show>
+  );
+}
+
+function isTerminalRun(run: RunHydration): boolean {
+  return ["exited", "failed", "quarantined"].includes(run.run.process);
+}
+
+function SessionTreeInspector(props: {
+  run: RunHydration;
+  forkDisabled: boolean;
+  onFork: (entryId: string) => Promise<unknown>;
+}) {
+  const [open, setOpen] = createSignal(false);
+  const [tree, setTree] = createSignal<SessionTreeSnapshot>();
+  const [loading, setLoading] = createSignal(false);
+  const [error, setError] = createSignal<string>();
+  let requestSequence = 0;
+  let loadedSessionId: string | undefined;
+
+  createEffect(() => {
+    const sessionId = props.run.run.session.sessionId ?? undefined;
+    if (sessionId === loadedSessionId) return;
+    loadedSessionId = sessionId;
+    requestSequence += 1;
+    setOpen(false);
+    setTree(undefined);
+    setLoading(false);
+    setError(undefined);
+  });
+
+  const load = async () => {
+    const sessionId = props.run.run.session.sessionId;
+    if (!sessionId || loading() || props.run.run.process !== "ready") return;
+    const sequence = ++requestSequence;
+    setLoading(true);
+    setError(undefined);
+    try {
+      const result = await invokeDesktop<SessionTreeSnapshot>("runtime_session_tree", {
+        request: { runId: props.run.run.id },
+      });
+      if (
+        sequence !== requestSequence ||
+        props.run.run.session.sessionId !== sessionId ||
+        loadedSessionId !== sessionId
+      )
+        return;
+      setTree(result);
+    } catch (treeError) {
+      if (sequence === requestSequence) setError(String(treeError));
+    } finally {
+      if (sequence === requestSequence) setLoading(false);
+    }
+  };
+
+  const toggle = () => {
+    if (open()) {
+      setOpen(false);
+      return;
+    }
+    setOpen(true);
+    if (!tree()) void load();
+  };
+
+  const nodeKind = (node: SessionTreeNode) => node.role ?? node.entryType.replaceAll("_", " ");
+
+  return (
+    <Show when={props.run.run.session.sessionId}>
+      <section class="session-tree-inspector" aria-label="Pi session tree">
+        <div class="session-tree-toolbar">
+          <button type="button" onClick={toggle}>
+            {open() ? "Hide session tree" : "Session tree"}
+          </button>
+          <Show when={open() && tree()}>
+            {(snapshot) => (
+              <span>
+                {snapshot().nodes.length} entries
+                {snapshot().truncated ? " · bounded tree" : ""}
+              </span>
+            )}
+          </Show>
+          <Show when={open()}>
+            <button
+              type="button"
+              disabled={loading() || props.run.run.process !== "ready"}
+              onClick={() => void load()}
+            >
+              {loading() ? "Reading tree" : "Refresh"}
+            </button>
+          </Show>
+        </div>
+        <Show when={open()}>
+          <Show when={tree()} fallback={<p class="history-note">Loading Pi session tree.</p>}>
+            {(snapshot) => (
+              <div class="session-tree-list">
+                <For each={snapshot().nodes}>
+                  {(node) => {
+                    const isLeaf = () => snapshot().leafId === node.id;
+                    const timestamp = () => historyTimestamp(node.timestamp ?? node.labelTimestamp);
+                    return (
+                      <article
+                        class={`session-tree-node${isLeaf() ? " active-leaf" : ""}`}
+                        style={`--tree-depth: ${Math.min(node.depth, 24)}`}
+                      >
+                        <div class="session-tree-node-main">
+                          <div>
+                            <strong>{node.label ?? nodeKind(node)}</strong>
+                            <span>
+                              {nodeKind(node)} · {node.id.slice(0, 12)}
+                              {node.childCount > 1 ? ` · ${node.childCount} branches` : ""}
+                              {isLeaf() ? " · active leaf" : ""}
+                            </span>
+                          </div>
+                          <div class="session-tree-node-actions">
+                            <Show when={timestamp()}>{(value) => <span>{value()}</span>}</Show>
+                            <Show when={node.entryType === "message" && node.role === "user"}>
+                              <button
+                                type="button"
+                                disabled={props.forkDisabled || loading()}
+                                onClick={() => void props.onFork(node.id)}
+                              >
+                                Fork here
+                              </button>
+                            </Show>
+                          </div>
+                        </div>
+                        <Show when={node.preview}>
+                          {(preview) => <pre>{preview()}</pre>}
+                        </Show>
+                        <Show when={node.previewTruncated}>
+                          <span class="truncation-note">Tree preview truncated</span>
+                        </Show>
+                      </article>
+                    );
+                  }}
+                </For>
+                <Show when={snapshot().nodes.length === 0}>
+                  <p class="history-note">Pi returned an empty session tree.</p>
+                </Show>
+                <Show when={snapshot().truncated}>
+                  <p class="history-note">
+                    The inspector stopped at the configured renderer tree limit. Session history remains authoritative in Pi.
+                  </p>
+                </Show>
+                <span class="history-footnote">
+                  Retained {formatBytes(snapshot().encodedBytes)} of bounded tree metadata.
+                </span>
+              </div>
+            )}
+          </Show>
+          <Show when={error()}>
+            {(message) => <p class="error">Session tree failed: {message()}</p>}
+          </Show>
         </Show>
       </section>
     </Show>
@@ -540,6 +842,16 @@ interface RuntimeManagerSignal {
 
 interface RuntimeUiEvent {
   kind: string;
+  runId?: string;
+  message?: string;
+  notifyType?: "info" | "warning" | "error";
+}
+
+interface UiNotification {
+  id: number;
+  runId: string;
+  message: string;
+  notifyType: "info" | "warning" | "error";
 }
 
 interface RuntimeUiDrain {
@@ -563,6 +875,42 @@ interface PiProbeReport {
 
 async function invokeDesktop<T>(command: string, args?: Record<string, unknown>): Promise<T> {
   return invoke<T>(command, args);
+}
+
+async function pickDirectory(defaultPath?: string): Promise<string | undefined> {
+  const selected = await invokeDesktop<string | null>("runtime_pick_directory", {
+    request: { defaultPath: defaultPath?.trim() || null },
+  });
+  return selected ?? undefined;
+}
+
+function suggestedWorktreeIdentity(
+  repositoryRoot: string,
+  task: string,
+): { branch: string; path: string } {
+  const normalized = repositoryRoot
+    .replace(/^\\\\\?\\UNC\\/i, "\\\\")
+    .replace(/^\\\\\?\\/, "")
+    .replace(/[\\/]+$/, "");
+  const separator = normalized.includes("\\") ? "\\" : "/";
+  const parts = normalized.split(/[\\/]/);
+  const repositoryName = parts.pop() || "repo";
+  const parent = parts.join(separator);
+  const taskSlug = task
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 28);
+  const leaf = `${taskSlug || "task"}-${Date.now().toString(36)}`;
+  const branch = `pi-wizard/${leaf}`;
+  const worktreeDirectory = `${repositoryName}-worktrees`;
+  return {
+    branch,
+    path: parent
+      ? `${parent}${separator}${worktreeDirectory}${separator}${leaf}`
+      : `${worktreeDirectory}${separator}${leaf}`,
+  };
 }
 
 function formatBytes(bytes: number): string {
@@ -776,15 +1124,30 @@ function ComposerCard(props: {
   const [reviewSummary, setReviewSummary] = createSignal<GitReviewSummary>();
   const [reviewBusy, setReviewBusy] = createSignal(false);
   const [reviewError, setReviewError] = createSignal<string>();
-  const [reviewDiff, setReviewDiff] = createSignal<GitFileDiff>();
+  const [reviewDiff, setReviewDiff] = createSignal<GitFileDiffPage>();
   const [reviewDiffPath, setReviewDiffPath] = createSignal<string>();
+  const [reviewDiffCursor, setReviewDiffCursor] = createSignal<GitDiffCursor | null>(null);
+  const [reviewDiffBackCursors, setReviewDiffBackCursors] = createSignal<
+    Array<GitDiffCursor | null>
+  >([]);
   const [sessionNameDraft, setSessionNameDraft] = createSignal(
     props.run.run.session.sessionName ?? "",
   );
   const [sessionNameDirty, setSessionNameDirty] = createSignal(false);
+  let reviewRequestSequence = 0;
+  let reviewDiffRequestSequence = 0;
   let fileInput!: HTMLInputElement;
 
   createEffect(() => props.state.applyBackend(props.run.draft));
+  onCleanup(() => {
+    reviewRequestSequence += 1;
+    reviewDiffRequestSequence += 1;
+    if (reviewBusy() || reviewDiffPath()) {
+      void invokeDesktop<boolean>("runtime_cancel_git_review", {
+        request: { runId: props.run.run.id },
+      });
+    }
+  });
   createEffect(() => {
     if (!sessionNameDirty()) {
       setSessionNameDraft(props.run.run.session.sessionName ?? "");
@@ -945,37 +1308,90 @@ function ComposerCard(props: {
   };
 
   const refreshReview = async () => {
-    if (reviewBusy()) return;
+    const sequence = ++reviewRequestSequence;
+    // A summary refresh invalidates any in-flight file detail derived from the
+    // older repository observation. The backend begins the replacement as a
+    // new owned review job and aborts the superseded Git subprocess.
+    reviewDiffRequestSequence += 1;
     setReviewBusy(true);
     setReviewError(undefined);
     setReviewDiff(undefined);
     setReviewDiffPath(undefined);
+    setReviewDiffCursor(null);
+    setReviewDiffBackCursors([]);
     try {
       const summary = await invokeDesktop<GitReviewSummary>("runtime_git_review_summary", {
         request: { runId: props.run.run.id },
       });
-      setReviewSummary(summary);
+      if (sequence === reviewRequestSequence) setReviewSummary(summary);
     } catch (error) {
-      setReviewError(String(error));
+      if (sequence === reviewRequestSequence) setReviewError(String(error));
     } finally {
-      setReviewBusy(false);
+      if (sequence === reviewRequestSequence) setReviewBusy(false);
     }
   };
 
-  const loadReviewDiff = async (path: string) => {
-    if (reviewDiffPath()) return;
+  const loadReviewDiff = async (
+    path: string,
+    cursor: GitDiffCursor | null = null,
+    backCursors: Array<GitDiffCursor | null> = [],
+  ) => {
+    const sequence = ++reviewDiffRequestSequence;
     setReviewDiffPath(path);
     setReviewError(undefined);
     try {
-      const diff = await invokeDesktop<GitFileDiff>("runtime_git_review_file", {
-        request: { runId: props.run.run.id, path },
+      const diff = await invokeDesktop<GitFileDiffPage>("runtime_git_review_file_page", {
+        request: { runId: props.run.run.id, path, cursor },
       });
-      setReviewDiff(diff);
+      if (sequence === reviewDiffRequestSequence) {
+        setReviewDiff(diff);
+        setReviewDiffCursor(cursor);
+        setReviewDiffBackCursors(backCursors);
+      }
+    } catch (error) {
+      if (sequence === reviewDiffRequestSequence) {
+        setReviewDiff(undefined);
+        setReviewDiffCursor(null);
+        setReviewDiffBackCursors([]);
+        setReviewError(String(error));
+      }
+    } finally {
+      if (sequence === reviewDiffRequestSequence) setReviewDiffPath(undefined);
+    }
+  };
+
+  const cancelReview = async () => {
+    if (!reviewBusy() && !reviewDiffPath()) return;
+    reviewRequestSequence += 1;
+    reviewDiffRequestSequence += 1;
+    setReviewBusy(false);
+    setReviewDiffPath(undefined);
+    setReviewError(undefined);
+    try {
+      await invokeDesktop<boolean>("runtime_cancel_git_review", {
+        request: { runId: props.run.run.id },
+      });
     } catch (error) {
       setReviewError(String(error));
-    } finally {
-      setReviewDiffPath(undefined);
     }
+  };
+
+  const loadNextReviewDiffPage = () => {
+    const page = reviewDiff();
+    const nextCursor = page?.nextCursor;
+    if (!page || !nextCursor || reviewDiffPath()) return;
+    void loadReviewDiff(page.path, nextCursor, [
+      ...reviewDiffBackCursors(),
+      reviewDiffCursor(),
+    ]);
+  };
+
+  const loadPreviousReviewDiffPage = () => {
+    const page = reviewDiff();
+    const back = reviewDiffBackCursors();
+    if (!page || back.length === 0 || reviewDiffPath()) return;
+    const previousCursor = back[back.length - 1] ?? null;
+    void loadReviewDiff(page.path, previousCursor, back.slice(0, -1));
   };
 
   const removeImage = async (imageId: string) => {
@@ -1311,9 +1727,18 @@ function ComposerCard(props: {
       <Show when={statsError()}>{(error) => <p class="error">Session usage: {error()}</p>}</Show>
       <div class="git-review">
         <div class="git-review-toolbar">
-          <button type="button" disabled={reviewBusy()} onClick={() => void refreshReview()}>
-            {reviewBusy() ? "Reading changes" : reviewSummary() ? "Refresh changes" : "Changes"}
+          <button type="button" onClick={() => void refreshReview()}>
+            {reviewBusy()
+              ? "Restart changes"
+              : reviewSummary()
+                ? "Refresh changes"
+                : "Changes"}
           </button>
+          <Show when={reviewBusy() || Boolean(reviewDiffPath())}>
+            <button type="button" onClick={() => void cancelReview()}>
+              Cancel review
+            </button>
+          </Show>
           <Show when={reviewSummary()}>
             {(summary) => (
               <span>
@@ -1333,9 +1758,9 @@ function ComposerCard(props: {
                 {(file) => (
                   <button
                     type="button"
-                    disabled={Boolean(reviewDiffPath())}
+                    disabled={reviewBusy()}
                     class={reviewDiff()?.path === file.path ? "selected" : undefined}
-                    onClick={() => void loadReviewDiff(file.path)}
+                    onClick={() => void loadReviewDiff(file.path, null, [])}
                   >
                     <span>{file.status.replace("_", " ")}</span>
                     <strong title={file.path}>{file.path}</strong>
@@ -1359,17 +1784,84 @@ function ComposerCard(props: {
                 <span>
                   {diff().untracked
                     ? "untracked metadata only"
-                    : diff().truncated
-                      ? "diff truncated at backend limit"
-                      : "current diff"}
+                    : diff().binary
+                      ? "binary file · no text patch"
+                      : `page ${reviewDiffBackCursors().length + 1}${diff().nextCursor ? " · more available" : ""}`}
                 </span>
               </div>
-              <pre>{diff().diff || "No current tracked diff for this file."}</pre>
+              <Show
+                when={diff().diff}
+                fallback={<pre>No current tracked diff for this file.</pre>}
+              >
+                <Show when={diff().hunks.length > 0}>
+                  <nav class="git-review-hunks" aria-label="Diff hunks on this page">
+                    <For each={diff().hunks}>
+                      {(hunk, index) => (
+                        <button
+                          type="button"
+                          title={hunk.header}
+                          onClick={() =>
+                            document
+                              .getElementById(
+                                `git-hunk-${props.run.run.id}-${reviewDiffBackCursors().length}-${index()}`,
+                              )
+                              ?.scrollIntoView({ block: "nearest" })
+                          }
+                        >
+                          Hunk {index() + 1}
+                        </button>
+                      )}
+                    </For>
+                  </nav>
+                </Show>
+                <div class="git-review-diff-segments">
+                  <For each={diffPageSegments(diff())}>
+                    {(segment, index) => (
+                      <pre
+                        id={
+                          segment.hunk
+                            ? `git-hunk-${props.run.run.id}-${reviewDiffBackCursors().length}-${Math.max(0, diff().hunks.findIndex((hunk) => hunk.lineIndex === segment.hunk?.lineIndex))}`
+                            : undefined
+                        }
+                        class={segment.hunk ? "git-review-hunk" : undefined}
+                      >
+                        {segment.text}
+                      </pre>
+                    )}
+                  </For>
+                </div>
+              </Show>
+              <Show when={!diff().untracked && !diff().binary}>
+                <div class="git-review-page-actions">
+                  <button
+                    type="button"
+                    disabled={reviewDiffBackCursors().length === 0 || Boolean(reviewDiffPath())}
+                    onClick={loadPreviousReviewDiffPage}
+                  >
+                    Previous page
+                  </button>
+                  <span>
+                    Scanned {formatBytes(diff().scannedBytes)} for this bounded page
+                  </span>
+                  <button
+                    type="button"
+                    disabled={!diff().nextCursor || Boolean(reviewDiffPath())}
+                    onClick={loadNextReviewDiffPage}
+                  >
+                    Next page
+                  </button>
+                </div>
+              </Show>
             </div>
           )}
         </Show>
         <Show when={reviewError()}>{(error) => <p class="error">Change review: {error()}</p>}</Show>
       </div>
+      <SessionTreeInspector
+        run={props.run}
+        forkDisabled={controlDisabled() || props.run.composerAvailability !== "ready"}
+        onFork={forkSession}
+      />
       <HistoryTimeline
         run={props.run}
         forkDisabled={controlDisabled() || props.run.composerAvailability !== "ready"}
@@ -1399,7 +1891,18 @@ function ComposerCard(props: {
           }
           placeholder="Message Pi"
           aria-label={`Composer for run ${props.run.run.id}`}
+          aria-keyshortcuts="Control+Enter Meta+Enter"
           onInput={(event) => props.state.edit(event.currentTarget.value)}
+          onKeyDown={(event) => {
+            if (event.key !== "Enter" || (!event.ctrlKey && !event.metaKey)) return;
+            event.preventDefault();
+            if (composerDisabled() || imageDraftBlocked()) return;
+            if (props.run.composerAvailability === "ready") {
+              void submit("send");
+            } else if (props.run.composerAvailability === "agent_working") {
+              void submit(runningExtensionCommand() ? "runCommand" : "steer");
+            }
+          }}
           onPaste={(event) => {
             const files = Array.from(event.clipboardData?.files ?? []).filter((file) =>
               file.type.startsWith("image/"),
@@ -1416,6 +1919,7 @@ function ComposerCard(props: {
             type="file"
             accept="image/*"
             multiple
+            aria-label="Choose draft images"
             disabled={attachmentAddDisabled()}
             onChange={(event) => void addFiles(Array.from(event.currentTarget.files ?? []))}
           />
@@ -1645,6 +2149,7 @@ function ExtensionDialogCard(props: {
             <input
               value={value()}
               placeholder={kind.placeholder ?? ""}
+              aria-labelledby={`dialog-${request().id}`}
               disabled={submitting()}
               onInput={(event) => setValue(event.currentTarget.value)}
             />
@@ -1663,6 +2168,7 @@ function ExtensionDialogCard(props: {
           >
             <textarea
               value={value()}
+              aria-labelledby={`dialog-${request().id}`}
               disabled={submitting()}
               onInput={(event) => setValue(event.currentTarget.value)}
             />
@@ -1716,13 +2222,131 @@ function needsHydration(events: RuntimeUiEvent[]): boolean {
   );
 }
 
+function ProjectManager(props: {
+  refreshKey: number;
+  onUse: (path: string) => void;
+}) {
+  const [projects, setProjects] = createSignal<DesktopProjectRecord[]>([]);
+  const [loading, setLoading] = createSignal(false);
+  const [busyId, setBusyId] = createSignal<string>();
+  const [error, setError] = createSignal<string>();
+
+  const load = async () => {
+    if (loading()) return;
+    setLoading(true);
+    setError(undefined);
+    try {
+      setProjects(await invokeDesktop<DesktopProjectRecord[]>("runtime_list_projects"));
+    } catch (loadError) {
+      setError(String(loadError));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  createEffect(() => {
+    props.refreshKey;
+    void load();
+  });
+
+  const relocate = async (project: DesktopProjectRecord) => {
+    if (busyId()) return;
+    let next: string | undefined;
+    try {
+      next = (await pickDirectory(project.canonicalRoot))?.trim();
+    } catch (pickError) {
+      setError(`Could not choose replacement folder: ${String(pickError)}`);
+      return;
+    }
+    if (!next || next === project.canonicalRoot) return;
+    setBusyId(project.id);
+    setError(undefined);
+    try {
+      await invokeDesktop<DesktopProjectRecord>("runtime_relocate_project", {
+        request: { id: project.id, newRoot: next },
+      });
+      await load();
+    } catch (relocateError) {
+      setError(String(relocateError));
+    } finally {
+      setBusyId(undefined);
+    }
+  };
+
+  const remove = async (project: DesktopProjectRecord) => {
+    if (busyId()) return;
+    if (
+      !window.confirm(
+        `Remove ${project.canonicalRoot} from Pi Wizard? This only removes the app registration; it does not delete the folder or Git repository.`,
+      )
+    )
+      return;
+    setBusyId(project.id);
+    setError(undefined);
+    try {
+      await invokeDesktop<void>("runtime_remove_project", { request: { id: project.id } });
+      await load();
+    } catch (removeError) {
+      setError(String(removeError));
+    } finally {
+      setBusyId(undefined);
+    }
+  };
+
+  return (
+    <section class="project-manager" aria-label="Projects">
+      <div class="sidebar-heading">
+        <strong>Projects</strong>
+        <button type="button" disabled={loading()} onClick={() => void load()}>
+          {loading() ? "…" : "Refresh"}
+        </button>
+      </div>
+      <For each={projects()}>
+        {(project) => (
+          <article class={`project-row project-${project.status}`}>
+            <button
+              type="button"
+              class="project-use"
+              disabled={project.status !== "present" || Boolean(busyId())}
+              title={project.canonicalRoot}
+              onClick={() => props.onUse(project.canonicalRoot)}
+            >
+              <strong>{project.canonicalRoot.split(/[\\/]/).filter(Boolean).at(-1) ?? project.canonicalRoot}</strong>
+              <span>{project.status === "present" ? project.canonicalRoot : `Detached · ${project.canonicalRoot}`}</span>
+            </button>
+            <Show when={project.detail}>
+              {(detail) => <small>{detail()}</small>}
+            </Show>
+            <div class="project-row-actions">
+              <button type="button" disabled={Boolean(busyId())} onClick={() => void relocate(project)}>
+                Relocate
+              </button>
+              <button type="button" disabled={Boolean(busyId())} onClick={() => void remove(project)}>
+                Remove
+              </button>
+            </div>
+          </article>
+        )}
+      </For>
+      <Show when={!loading() && projects().length === 0}>
+        <p class="sidebar-note">No registered projects yet.</p>
+      </Show>
+      <Show when={error()}>{(message) => <p class="error">Projects: {message()}</p>}</Show>
+    </section>
+  );
+}
+
 function ProjectLauncher(props: {
   piReady: boolean;
-  onStarted: () => Promise<unknown>;
-  isSessionActive: (path: string) => boolean;
+  preferredProjectPath: string;
+  onStarted: (result: StartRunResult) => Promise<unknown>;
+  onOpenRun: (runId: string) => void;
   isExecutionRootActive: (path: string) => boolean;
+  activeRunIdForExecutionRoot: (path: string) => string | undefined;
+  activeRunIdForSessionPath: (path: string) => string | undefined;
 }) {
   const [projectPath, setProjectPath] = createSignal("");
+  const [initialTask, setInitialTask] = createSignal("");
   const [projectTrust, setProjectTrust] = createSignal<ProjectTrustPolicy>("inherit");
   const [executionMode, setExecutionMode] = createSignal<ExecutionMode>("local");
   const [starting, setStarting] = createSignal(false);
@@ -1740,11 +2364,27 @@ function ProjectLauncher(props: {
   const [recoveryError, setRecoveryError] = createSignal<string>();
   const [reconcilingRecovery, setReconcilingRecovery] = createSignal<string>();
   const [startingRecovery, setStartingRecovery] = createSignal<string>();
+  const [cleaningRecovery, setCleaningRecovery] = createSignal<string>();
   const [sessionQuery, setSessionQuery] = createSignal("");
   const [sessionPage, setSessionPage] = createSignal<SessionCatalogPage>();
   const [sessionError, setSessionError] = createSignal<string>();
   const [loadingSessions, setLoadingSessions] = createSignal(false);
   const [resumingPath, setResumingPath] = createSignal<string>();
+
+  const localCheckoutActive = () =>
+    executionMode() === "local" &&
+    projectPath().trim().length > 0 &&
+    props.isExecutionRootActive(projectPath().trim());
+
+  createEffect(() => {
+    const preferred = props.preferredProjectPath.trim();
+    if (!preferred || preferred === projectPath()) return;
+    setProjectPath(preferred);
+    setSessionPage(undefined);
+    setSessionError(undefined);
+    setWorktreeBase(undefined);
+    setWorktreeError(undefined);
+  });
 
   const loadRecoveries = async () => {
     if (loadingRecoveries()) return;
@@ -1760,11 +2400,58 @@ function ProjectLauncher(props: {
     }
   };
 
+  const cleanupRecovery = async (record: WorktreeRecoveryRecord) => {
+    if (
+      cleaningRecovery() ||
+      reconcilingRecovery() ||
+      startingRecovery() ||
+      !record.created ||
+      recoveryInspections()[record.id]?.kind !== "exact"
+    )
+      return;
+    const confirmed = window.confirm(
+      `Remove the unused worktree at ${record.created.worktreeRoot} and delete branch ${record.branch}? Pi Wizard will refuse if the worktree is dirty, has task commits, or is used by a live run.`,
+    );
+    if (!confirmed) return;
+    setCleaningRecovery(record.id);
+    setRecoveryError(undefined);
+    try {
+      const result = await invokeDesktop<WorktreeCleanupResult>(
+        "runtime_cleanup_worktree_recovery",
+        { request: { id: record.id } },
+      );
+      if (result.kind === "partial") {
+        setRecoveryInspections((current) => ({ ...current, [record.id]: result }));
+        setRecoveryError(
+          `Cleanup stopped with recoverable Git state retained: ${result.detail}`,
+        );
+      } else {
+        setRecoveryInspections((current) => {
+          const next = { ...current };
+          delete next[record.id];
+          return next;
+        });
+      }
+      await loadRecoveries();
+    } catch (cleanupError) {
+      setRecoveryError(String(cleanupError));
+      await loadRecoveries();
+    } finally {
+      setCleaningRecovery(undefined);
+    }
+  };
+
   onMount(() => void loadRecoveries());
 
   const start = async () => {
     const path = projectPath().trim();
     if (!path || starting()) return;
+    if (executionMode() === "local" && props.isExecutionRootActive(path)) {
+      setError(
+        "This checkout is already owned by a live run. Open that run or use a Git worktree for parallel work.",
+      );
+      return;
+    }
     if (executionMode() === "worktree") {
       if (!worktreeBase()) {
         setError("Inspect the exact Git base before creating a worktree");
@@ -1778,22 +2465,33 @@ function ProjectLauncher(props: {
     setStarting(true);
     setError(undefined);
     try {
+      let result: StartRunResult;
       if (executionMode() === "worktree") {
-        await invokeDesktop<string>("runtime_start_project_worktree", {
+        result = await invokeDesktop<StartRunResult>("runtime_start_project_worktree", {
           request: {
             projectPath: path,
             projectTrust: projectTrust(),
             base: worktreeBase(),
             branch: worktreeBranch().trim(),
             worktreePath: worktreePath().trim(),
+            initialTask: initialTask().trim() || null,
           },
         });
       } else {
-        await invokeDesktop<string>("runtime_start_project", {
-          request: { projectPath: path, projectTrust: projectTrust() },
+        result = await invokeDesktop<StartRunResult>("runtime_start_project", {
+          request: {
+            projectPath: path,
+            projectTrust: projectTrust(),
+            initialTask: initialTask().trim() || null,
+          },
         });
       }
-      await props.onStarted();
+      await props.onStarted(result);
+      if (result.initialTaskError) {
+        setError(`Run started, but the initial task was not sent automatically: ${result.initialTaskError}`);
+      } else if (result.initialTaskSubmitted) {
+        setInitialTask("");
+      }
       if (executionMode() === "worktree") await loadRecoveries();
     } catch (startError) {
       setError(String(startError));
@@ -1826,10 +2524,14 @@ function ProjectLauncher(props: {
     setStartingRecovery(record.id);
     setRecoveryError(undefined);
     try {
-      await invokeDesktop<string>("runtime_start_recovered_worktree", {
+      const runId = await invokeDesktop<string>("runtime_start_recovered_worktree", {
         request: { id: record.id, projectTrust: projectTrust() },
       });
-      await props.onStarted();
+      await props.onStarted({
+        runId,
+        initialTaskSubmitted: false,
+        initialTaskError: null,
+      });
       await loadRecoveries();
     } catch (startError) {
       setRecoveryError(String(startError));
@@ -1849,10 +2551,29 @@ function ProjectLauncher(props: {
         request: { projectPath: path },
       });
       setWorktreeBase(base);
+      if (!worktreeBranch().trim() && !worktreePath().trim()) {
+        const suggested = suggestedWorktreeIdentity(base.repositoryRoot, initialTask());
+        setWorktreeBranch(suggested.branch);
+        setWorktreePath(suggested.path);
+      }
     } catch (probeError) {
       setWorktreeError(String(probeError));
     } finally {
       setProbingWorktree(false);
+    }
+  };
+
+  const browseProject = async () => {
+    try {
+      const selected = await pickDirectory(projectPath());
+      if (!selected) return;
+      setProjectPath(selected);
+      setSessionPage(undefined);
+      setSessionError(undefined);
+      setWorktreeBase(undefined);
+      setWorktreeError(undefined);
+    } catch (browseError) {
+      setError(`Could not choose project folder: ${String(browseError)}`);
     }
   };
 
@@ -1875,18 +2596,34 @@ function ProjectLauncher(props: {
 
   const resume = async (session: SessionCatalogEntry) => {
     const path = projectPath().trim();
-    if (!path || resumingPath() || props.isSessionActive(session.path)) return;
+    if (!path || resumingPath()) return;
+    const activeSessionRunId = props.activeRunIdForSessionPath(session.path);
+    if (activeSessionRunId) {
+      props.onOpenRun(activeSessionRunId);
+      return;
+    }
+    const checkoutOwnerRunId = props.activeRunIdForExecutionRoot(path);
+    if (checkoutOwnerRunId) {
+      setSessionError(
+        "This checkout is already owned by a live run. Open that run and close it before resuming another session here.",
+      );
+      return;
+    }
     setResumingPath(session.path);
     setSessionError(undefined);
     try {
-      await invokeDesktop<string>("runtime_resume_project_session", {
+      const runId = await invokeDesktop<string>("runtime_resume_project_session", {
         request: {
           projectPath: path,
           projectTrust: projectTrust(),
           sessionPath: session.path,
         },
       });
-      await props.onStarted();
+      await props.onStarted({
+        runId,
+        initialTaskSubmitted: false,
+        initialTaskError: null,
+      });
     } catch (resumeError) {
       setSessionError(String(resumeError));
     } finally {
@@ -1903,20 +2640,25 @@ function ProjectLauncher(props: {
           void start();
         }}
       >
-        <label>
+        <label class="path-field">
           <span>Project path</span>
-          <input
-            value={projectPath()}
-            disabled={starting()}
-            placeholder="Absolute path to an existing project"
-            onInput={(event) => {
-              setProjectPath(event.currentTarget.value);
-              setSessionPage(undefined);
-              setSessionError(undefined);
-              setWorktreeBase(undefined);
-              setWorktreeError(undefined);
-            }}
-          />
+          <div class="path-picker-row">
+            <input
+              value={projectPath()}
+              disabled={starting()}
+              placeholder="Absolute path to an existing project"
+              onInput={(event) => {
+                setProjectPath(event.currentTarget.value);
+                setSessionPage(undefined);
+                setSessionError(undefined);
+                setWorktreeBase(undefined);
+                setWorktreeError(undefined);
+              }}
+            />
+            <button type="button" disabled={starting()} onClick={() => void browseProject()}>
+              Browse
+            </button>
+          </div>
         </label>
         <label>
           <span>Execution root</span>
@@ -1931,6 +2673,15 @@ function ProjectLauncher(props: {
             <option value="local">Local checkout</option>
             <option value="worktree">New Git worktree</option>
           </select>
+        </label>
+        <label class="initial-task-field">
+          <span>Initial task</span>
+          <textarea
+            value={initialTask()}
+            disabled={starting()}
+            placeholder="What should Pi do? Leave blank to start an idle session."
+            onInput={(event) => setInitialTask(event.currentTarget.value)}
+          />
         </label>
         <label>
           <span>Project resources</span>
@@ -1998,12 +2749,29 @@ function ProjectLauncher(props: {
             </Show>
           </div>
         </Show>
+        <Show when={localCheckoutActive()}>
+          <div class="launch-conflict" role="status">
+            <span>This checkout is already in use by a live run.</span>
+            <button
+              type="button"
+              disabled={starting() || probingWorktree() || !props.piReady}
+              onClick={() => {
+                setExecutionMode("worktree");
+                setError(undefined);
+                queueMicrotask(() => void inspectWorktree());
+              }}
+            >
+              Use a worktree
+            </button>
+          </div>
+        </Show>
         <button
           type="submit"
           disabled={
             starting() ||
             !props.piReady ||
             projectPath().trim().length === 0 ||
+            localCheckoutActive() ||
             (executionMode() === "worktree" &&
               (!worktreeBase() || !worktreeBranch().trim() || !worktreePath().trim()))
           }
@@ -2048,8 +2816,10 @@ function ProjectLauncher(props: {
               const value = probe();
               return value?.kind === "partial" ? value.detail : undefined;
             };
-            const active = () =>
-              Boolean(record.created && props.isExecutionRootActive(record.created.executionRoot));
+            const activeRunId = () =>
+              record.created
+                ? props.activeRunIdForExecutionRoot(record.created.executionRoot)
+                : undefined;
             return (
               <article class="recovery-row">
                 <div>
@@ -2077,7 +2847,11 @@ function ProjectLauncher(props: {
                 <div class="recovery-actions">
                   <button
                     type="button"
-                    disabled={Boolean(reconcilingRecovery()) || Boolean(startingRecovery())}
+                    disabled={
+                      Boolean(reconcilingRecovery()) ||
+                      Boolean(startingRecovery()) ||
+                      Boolean(cleaningRecovery())
+                    }
                     onClick={() => void reconcileRecovery(record)}
                   >
                     {reconcilingRecovery() === record.id ? "Inspecting" : "Inspect"}
@@ -2086,18 +2860,40 @@ function ProjectLauncher(props: {
                     type="button"
                     disabled={
                       !record.created ||
-                      active() ||
-                      !props.piReady ||
+                      (!activeRunId() && !props.piReady) ||
                       Boolean(reconcilingRecovery()) ||
-                      Boolean(startingRecovery())
+                      Boolean(startingRecovery()) ||
+                      Boolean(cleaningRecovery())
                     }
-                    onClick={() => void startRecovered(record)}
+                    onClick={() => {
+                      const runId = activeRunId();
+                      if (runId) {
+                        props.onOpenRun(runId);
+                      } else {
+                        void startRecovered(record);
+                      }
+                    }}
                   >
-                    {active()
+                    {activeRunId()
                       ? "Open"
                       : startingRecovery() === record.id
                         ? "Starting"
                         : "Start Pi"}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={
+                      !record.created ||
+                      Boolean(activeRunId()) ||
+                      probe()?.kind !== "exact" ||
+                      Boolean(reconcilingRecovery()) ||
+                      Boolean(startingRecovery()) ||
+                      Boolean(cleaningRecovery())
+                    }
+                    title="Only pristine worktrees whose branch is still at the captured base can be removed"
+                    onClick={() => void cleanupRecovery(record)}
+                  >
+                    {cleaningRecovery() === record.id ? "Removing" : "Remove unused"}
                   </button>
                 </div>
               </article>
@@ -2148,7 +2944,10 @@ function ProjectLauncher(props: {
               </div>
               <For each={page().sessions}>
                 {(session) => {
-                  const active = () => props.isSessionActive(session.path);
+                  const activeSessionRunId = () => props.activeRunIdForSessionPath(session.path);
+                  const checkoutOwnerRunId = () =>
+                    props.activeRunIdForExecutionRoot(projectPath().trim());
+                  const owningRunId = () => activeSessionRunId() ?? checkoutOwnerRunId();
                   return (
                     <article class="session-row">
                       <div>
@@ -2160,11 +2959,20 @@ function ProjectLauncher(props: {
                       </div>
                       <button
                         type="button"
-                        disabled={Boolean(resumingPath()) || active()}
-                        onClick={() => void resume(session)}
+                        disabled={Boolean(resumingPath())}
+                        onClick={() => {
+                          const runId = owningRunId();
+                          if (runId) {
+                            props.onOpenRun(runId);
+                          } else {
+                            void resume(session);
+                          }
+                        }}
                       >
-                        {active()
+                        {activeSessionRunId()
                           ? "Open"
+                          : checkoutOwnerRunId()
+                            ? "Open live run"
                           : resumingPath() === session.path
                             ? "Resuming"
                             : "Resume"}
@@ -2187,19 +2995,104 @@ function ProjectLauncher(props: {
   );
 }
 
+function runTitle(run: RunHydration): string {
+  return (
+    run.run.session.sessionName ??
+    run.run.session.sessionId?.slice(0, 12) ??
+    `Run ${run.run.id.slice(0, 8)}`
+  );
+}
+
+function runStateLabel(run: RunHydration): string {
+  if (run.run.process !== "ready") return run.run.process.replaceAll("_", " ");
+  if ((run.rpc?.pendingDialogs.length ?? 0) > 0) return "needs attention";
+  if (run.run.agentWorking) return "working";
+  return "idle";
+}
+
+function canCloseRun(run: RunHydration): boolean {
+  if (run.run.process === "starting") return true;
+  if (run.run.process !== "ready") return false;
+  return (
+    !run.run.agentWorking &&
+    run.composerAvailability === "ready" &&
+    !run.composerSubmissionPending &&
+    !run.draftRestorePending &&
+    (run.rpc?.pendingDialogs.length ?? 0) === 0
+  );
+}
+
+function runDisplayPriority(run: RunHydration): number {
+  if ((run.rpc?.pendingDialogs.length ?? 0) > 0) return 0;
+  if (run.run.process === "ready" && run.run.agentWorking) return 1;
+  if (!["exited", "failed", "quarantined"].includes(run.run.process)) return 2;
+  return 3;
+}
+
+function ExtensionUiPanel(props: { snapshot: ExtensionUiSnapshot | undefined }) {
+  const hasContent = () =>
+    Boolean(
+      props.snapshot?.title ||
+        props.snapshot?.statuses.length ||
+        props.snapshot?.widgets.length,
+    );
+  return (
+    <Show when={hasContent()}>
+      <section class="extension-ui-panel" aria-label="Extension status">
+        <Show when={props.snapshot?.title}>
+          {(title) => <strong class="extension-ui-title">{title()}</strong>}
+        </Show>
+        <For each={props.snapshot?.statuses ?? []}>
+          {(status) => (
+            <div class="extension-status-row">
+              <span>{status.key}</span>
+              <strong>{status.text}</strong>
+            </div>
+          )}
+        </For>
+        <For each={props.snapshot?.widgets ?? []}>
+          {(entry) => (
+            <article class="extension-widget">
+              <header>
+                <strong>{entry.key}</strong>
+                <span>{entry.widget.placement === "aboveEditor" ? "Above editor" : "Below editor"}</span>
+              </header>
+              <For each={entry.widget.lines}>{(line) => <pre>{line}</pre>}</For>
+            </article>
+          )}
+        </For>
+      </section>
+    </Show>
+  );
+}
+
 export function App() {
   const [runtime, setRuntime] = createSignal<RuntimeHydration>();
   const [runtimeError, setRuntimeError] = createSignal<string>();
+  const [capacity, setCapacity] = createSignal<RuntimeCapacitySnapshot>();
+  const [capacityError, setCapacityError] = createSignal<string>();
+  const [capacityBusy, setCapacityBusy] = createSignal(false);
+  const [liveRunLimitDraft, setLiveRunLimitDraft] = createSignal("");
   const [piProbe, setPiProbe] = createSignal<PiProbeReport>();
   const [piProbeError, setPiProbeError] = createSignal<string>();
   const [attachmentLimits, setAttachmentLimits] = createSignal<RuntimeAttachmentLimits>();
   const [deliveredEvents, setDeliveredEvents] = createSignal(0);
+  const [view, setView] = createSignal<AppView>("dashboard");
+  const [selectedRunId, setSelectedRunId] = createSignal<string>();
+  const [preferredProjectPath, setPreferredProjectPath] = createSignal("");
+  const [projectRefreshKey, setProjectRefreshKey] = createSignal(0);
+  const [runActionError, setRunActionError] = createSignal<string>();
+  const [closingRunId, setClosingRunId] = createSignal<string>();
+  const [dismissingRunId, setDismissingRunId] = createSignal<string>();
+  const [openingFolderRunId, setOpeningFolderRunId] = createSignal<string>();
+  const [notifications, setNotifications] = createSignal<UiNotification[]>([]);
   const drainingRuns = new Set<string>();
   const redrainRuns = new Set<string>();
   const hydrationNeededRuns = new Set<string>();
   const composerStates = new Map<string, ComposerState>();
   let hydrationRequestSequence = 0;
   let lastAppliedHydrationRequest = 0;
+  let notificationSequence = 0;
   let disposed = false;
 
   const applyHydration = (snapshot: RuntimeHydration, requestSequence: number) => {
@@ -2209,32 +3102,111 @@ export function App() {
     setRuntimeError(undefined);
   };
 
-  const isSessionActive = (path: string) =>
-    Boolean(
-      runtime()?.runs.some(
-        (run) =>
-          !["exited", "failed", "quarantined"].includes(run.run.process) &&
-          run.run.session.sessionFile === path,
-      ),
-    );
+  const refreshCapacity = async () => {
+    try {
+      const snapshot = await invokeDesktop<RuntimeCapacitySnapshot>("runtime_capacity");
+      if (!disposed) {
+        setCapacity(snapshot);
+        setLiveRunLimitDraft(String(snapshot.liveRunLimit));
+        setCapacityError(undefined);
+      }
+      return snapshot;
+    } catch (error) {
+      if (!disposed) setCapacityError(String(error));
+      return undefined;
+    }
+  };
+
+  const openRunFolder = async (run: RunHydration) => {
+    if (openingFolderRunId()) return;
+    setOpeningFolderRunId(run.run.id);
+    setRunActionError(undefined);
+    try {
+      await invokeDesktop<void>("runtime_open_run_folder", {
+        request: { runId: run.run.id },
+      });
+    } catch (error) {
+      setRunActionError(String(error));
+    } finally {
+      setOpeningFolderRunId(undefined);
+    }
+  };
+
+  const setLiveRunLimit = async () => {
+    const next = Number.parseInt(liveRunLimitDraft(), 10);
+    const current = capacity();
+    if (
+      capacityBusy() ||
+      !current ||
+      !Number.isInteger(next) ||
+      next < 1 ||
+      next > current.configuredMaxLiveRuns
+    )
+      return;
+    setCapacityBusy(true);
+    setCapacityError(undefined);
+    try {
+      const snapshot = await invokeDesktop<RuntimeCapacitySnapshot>("runtime_set_live_run_limit", {
+        request: { limit: next },
+      });
+      if (!disposed) {
+        setCapacity(snapshot);
+        setLiveRunLimitDraft(String(snapshot.liveRunLimit));
+      }
+    } catch (error) {
+      if (!disposed) setCapacityError(String(error));
+    } finally {
+      if (!disposed) setCapacityBusy(false);
+    }
+  };
+
+  const refreshRuntimeState = async () => {
+    const [snapshot] = await Promise.all([refreshHydration(), refreshCapacity()]);
+    return snapshot;
+  };
+
+  const activeRunIdForExecutionRoot = (path: string) =>
+    runtime()?.runs.find(
+      (run) =>
+        !["exited", "failed", "quarantined"].includes(run.run.process) &&
+        run.run.executionRoot === path,
+    )?.run.id;
+
+  const activeRunIdForSessionPath = (path: string) =>
+    runtime()?.runs.find(
+      (run) =>
+        !["exited", "failed", "quarantined"].includes(run.run.process) &&
+        run.run.session.sessionFile === path,
+    )?.run.id;
 
   const isExecutionRootActive = (path: string) =>
-    Boolean(
-      runtime()?.runs.some(
-        (run) =>
-          !["exited", "failed", "quarantined"].includes(run.run.process) &&
-          run.run.executionRoot === path,
-      ),
-    );
+    Boolean(activeRunIdForExecutionRoot(path));
 
   const pendingDialogs = () =>
     runtime()?.runs.flatMap((run) =>
       (run.rpc?.pendingDialogs ?? []).map((dialog) => ({ runId: run.run.id, dialog })),
     ) ?? [];
 
-  const runIds = () => runtime()?.runs.map((run) => run.run.id) ?? [];
+  const sortedRuns = () =>
+    [...(runtime()?.runs ?? [])].sort((left, right) => {
+      const priority = runDisplayPriority(left) - runDisplayPriority(right);
+      if (priority !== 0) return priority;
+      // Run IDs are UUIDv7, so descending lexical order is descending creation time.
+      return right.run.id.localeCompare(left.run.id);
+    });
 
   const runById = (runId: string) => runtime()?.runs.find((run) => run.run.id === runId);
+
+  const selectedRun = () => {
+    const id = selectedRunId();
+    return id ? runById(id) : undefined;
+  };
+
+  const openRun = (runId: string) => {
+    setRunActionError(undefined);
+    setSelectedRunId(runId);
+    setView("run");
+  };
 
   const composerState = (run: RunHydration) => {
     let state = composerStates.get(run.run.id);
@@ -2244,6 +3216,101 @@ export function App() {
     }
     return state;
   };
+
+  const handleStarted = async (result: StartRunResult) => {
+    await refreshRuntimeState();
+    setProjectRefreshKey((value) => value + 1);
+    openRun(result.runId);
+    if (result.initialTaskError) {
+      setNotifications((current) =>
+        [
+          ...current,
+          {
+            id: ++notificationSequence,
+            runId: result.runId,
+            message: `Run started, but the initial task was not sent automatically: ${result.initialTaskError}`,
+            notifyType: "error" as const,
+          },
+        ].slice(-5),
+      );
+    }
+  };
+
+  const dismissRun = async (run: RunHydration) => {
+    if (!isTerminalRun(run) || dismissingRunId()) return;
+    setDismissingRunId(run.run.id);
+    setRunActionError(undefined);
+    try {
+      await invokeDesktop<void>("runtime_dismiss_terminal_run", {
+        request: { runId: run.run.id },
+      });
+      composerStates.delete(run.run.id);
+      await Promise.all([refreshHydration(), refreshCapacity()]);
+      if (selectedRunId() === run.run.id) {
+        setSelectedRunId(undefined);
+        setView("dashboard");
+      }
+    } catch (error) {
+      setRunActionError(String(error));
+      await refreshHydration();
+    } finally {
+      setDismissingRunId(undefined);
+    }
+  };
+
+  const stopRunFromDashboard = async (run: RunHydration) => {
+    if (run.run.process !== "ready" || !run.run.agentWorking) return;
+    setRunActionError(undefined);
+    try {
+      await composerState(run).flush();
+      await invokeDesktop<RuntimeStopResult>("runtime_stop", {
+        request: { runId: run.run.id },
+      });
+      await refreshHydration();
+    } catch (error) {
+      setRunActionError(String(error));
+      await refreshHydration();
+    }
+  };
+
+  const closeRun = async (run: RunHydration) => {
+    if (!canCloseRun(run) || closingRunId()) return;
+    setClosingRunId(run.run.id);
+    setRunActionError(undefined);
+    try {
+      // Close is destructive to the renderer-owned unsynced editor value, so
+      // unlike Stop it fails closed if the local draft cannot first reach the
+      // backend. The backend then independently waits for durable persistence.
+      await composerState(run).flush();
+      const result = await invokeDesktop<RuntimeCloseResult>("runtime_close", {
+        request: { runId: run.run.id },
+      });
+      await Promise.all([refreshHydration(), refreshCapacity()]);
+      if (result.quarantined || !result.processTerminated) {
+        setRunActionError(
+          "Pi process termination could not be confirmed. The run was quarantined and remains visible for inspection.",
+        );
+        return;
+      }
+      if (selectedRunId() === run.run.id) {
+        setSelectedRunId(undefined);
+        setView("dashboard");
+      }
+    } catch (error) {
+      setRunActionError(String(error));
+      await Promise.all([refreshHydration(), refreshCapacity()]);
+    } finally {
+      setClosingRunId(undefined);
+    }
+  };
+
+  createEffect(() => {
+    if (view() !== "run") return;
+    const id = selectedRunId();
+    if (!id || runById(id)) return;
+    setSelectedRunId(undefined);
+    setView("dashboard");
+  });
 
   const refreshHydration = async () => {
     const requestSequence = ++hydrationRequestSequence;
@@ -2281,6 +3348,24 @@ export function App() {
         });
         if (disposed) return;
         setDeliveredEvents((count) => count + drained.events.length);
+        const incomingNotifications = drained.events.flatMap((event) =>
+          event.kind === "extensionNotification" &&
+          event.runId &&
+          event.message &&
+          event.notifyType
+            ? [
+                {
+                  id: ++notificationSequence,
+                  runId: event.runId,
+                  message: event.message,
+                  notifyType: event.notifyType,
+                } satisfies UiNotification,
+              ]
+            : [],
+        );
+        if (incomingNotifications.length > 0) {
+          setNotifications((current) => [...current, ...incomingNotifications].slice(-5));
+        }
         if (needsHydration(drained.events)) hydrationNeededRuns.add(runId);
         if (drained.rehydrateRequired) {
           // Recovery is an explicit per-run transaction. Normal hydration is
@@ -2322,7 +3407,7 @@ export function App() {
             void refreshHydration();
           }),
         );
-        await refreshHydration();
+        await refreshRuntimeState();
       } catch (error) {
         if (!disposed) setRuntimeError(`Runtime listener setup failed: ${String(error)}`);
       }
@@ -2348,86 +3433,375 @@ export function App() {
   });
 
   return (
-    <main class="foundation-shell">
-      <h1>Pi Wizard</h1>
-      <p class="subtitle">Runtime integration</p>
+    <>
+      <a class="skip-link" href="#main-content">Skip to main content</a>
+      <div class="app-shell">
+        <aside class="app-sidebar" aria-label="Pi Wizard navigation">
+          <header class="app-brand">
+            <strong>Pi Wizard</strong>
+            <span>
+              <Show when={piProbe()} fallback={"Pi …"}>
+                {(report) => `Pi ${report().version.display}`}
+              </Show>
+            </span>
+          </header>
 
-      <section class="runtime-status" aria-label="Runtime status">
-        <div>
-          <span>Backend</span>
-          <Show when={runtime()} fallback={<strong>Connecting</strong>}>
-            {(snapshot) => (
-              <strong>
-                Ready · schema {snapshot().schemaVersion} · revision {snapshot().runtimeRevision} · {snapshot().runs.length} runs
-              </strong>
-            )}
+          <nav class="primary-nav" aria-label="Main views">
+            <button
+              type="button"
+              class={view() === "dashboard" ? "active" : undefined}
+              onClick={() => setView("dashboard")}
+            >
+              Dashboard
+            </button>
+            <button
+              type="button"
+              class={view() === "launcher" ? "active" : undefined}
+              onClick={() => setView("launcher")}
+            >
+              New run
+            </button>
+          </nav>
+
+          <section class="sidebar-runs" aria-label="Runs">
+            <div class="sidebar-heading">
+              <strong>Runs</strong>
+              <span>{runtime()?.runs.length ?? 0}</span>
+            </div>
+            <For each={sortedRuns()}>
+              {(run) => (
+                <button
+                  type="button"
+                  class={`sidebar-run${selectedRunId() === run.run.id && view() === "run" ? " active" : ""}`}
+                  onClick={() => openRun(run.run.id)}
+                >
+                  <strong>{runTitle(run)}</strong>
+                  <span>{runStateLabel(run)}</span>
+                  <small title={run.run.executionRoot}>{run.run.executionRoot}</small>
+                </button>
+              )}
+            </For>
+            <Show when={(runtime()?.runs.length ?? 0) === 0}>
+              <p class="sidebar-note">No runs yet.</p>
+            </Show>
+          </section>
+
+          <ProjectManager
+            refreshKey={projectRefreshKey()}
+            onUse={(path) => {
+              setPreferredProjectPath(path);
+              setView("launcher");
+            }}
+          />
+
+          <details class="runtime-details">
+            <summary>Runtime</summary>
+            <div class="runtime-detail-grid" aria-live="polite">
+              <span>Backend</span>
+              <strong>{runtime() ? `ready · ${runtime()!.runs.length} runs` : "connecting"}</strong>
+              <span>Events</span>
+              <strong>{deliveredEvents()}</strong>
+              <span>Pi</span>
+              <strong>{piProbe()?.version.display ?? "probing"}</strong>
+            </div>
+            <Show when={capacity()}>
+              {(current) => (
+                <form
+                  class="capacity-control"
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    void setLiveRunLimit();
+                  }}
+                >
+                  <label>
+                    <span>Concurrent run limit</span>
+                    <input
+                      type="number"
+                      min="1"
+                      max={current().configuredMaxLiveRuns}
+                      value={liveRunLimitDraft()}
+                      disabled={capacityBusy()}
+                      aria-label="Live Pi run admission limit"
+                      onInput={(event) => setLiveRunLimitDraft(event.currentTarget.value)}
+                    />
+                  </label>
+                  <button type="submit" disabled={capacityBusy()}>
+                    {capacityBusy() ? "Applying" : "Apply"}
+                  </button>
+                </form>
+              )}
+            </Show>
+            <Show when={capacityError()}>{(error) => <p class="error">{error()}</p>}</Show>
+            <Show when={capacity()?.preferenceRecoveryNotice}>
+              {(notice) => <p class="error">Saved run limit was reset: {notice()}</p>}
+            </Show>
+            <Show when={piProbeError()}>{(error) => <p class="error">Pi: {error()}</p>}</Show>
+          </details>
+        </aside>
+
+        <main class="app-main" id="main-content" tabIndex={-1}>
+          <Show when={notifications().length > 0}>
+            <section class="notification-stack" aria-label="Extension notifications" aria-live="polite">
+              <For each={notifications()}>
+                {(notification) => (
+                  <article class={`extension-notification notification-${notification.notifyType}`}>
+                    <div>
+                      <strong>
+                        {runById(notification.runId)
+                          ? runTitle(runById(notification.runId)!)
+                          : notification.runId.slice(0, 8)}
+                      </strong>
+                      <span>{notification.message}</span>
+                    </div>
+                    <button
+                      type="button"
+                      aria-label="Dismiss notification"
+                      onClick={() =>
+                        setNotifications((current) =>
+                          current.filter((item) => item.id !== notification.id),
+                        )
+                      }
+                    >
+                      ×
+                    </button>
+                  </article>
+                )}
+              </For>
+            </section>
           </Show>
-        </div>
-        <Show when={runtimeError()}>
-          {(error) => <p class="error">Backend runtime failed: {error()}</p>}
-        </Show>
-
-        <div>
-          <span>Delivery</span>
-          <strong>{deliveredEvents()} normalized runtime events</strong>
-        </div>
-
-        <div>
-          <span>Pi</span>
-          <Show when={piProbe()} fallback={<strong>Probing</strong>}>
-            {(report) => (
-              <strong>
-                {report().version.display} · {report().environment.pathSource}
-              </strong>
-            )}
+          <Show when={runtimeError() && !runtime()}>
+            <section class="runtime-recovery" aria-label="Renderer recovery">
+              <div>
+                <strong>Backend connection failed</strong>
+                <span>Retry rehydrates backend state without restarting Pi runs.</span>
+              </div>
+              <div class="runtime-recovery-actions">
+                <button type="button" onClick={() => void refreshRuntimeState()}>
+                  Retry
+                </button>
+                <button type="button" onClick={() => window.location.reload()}>
+                  Reload UI
+                </button>
+              </div>
+            </section>
           </Show>
-        </div>
-        <Show when={piProbeError()}>
-          {(error) => <p class="error">Pi discovery failed: {error()}</p>}
-        </Show>
-      </section>
 
-      <ProjectLauncher
-        piReady={Boolean(piProbe())}
-        onStarted={refreshHydration}
-        isSessionActive={isSessionActive}
-        isExecutionRootActive={isExecutionRootActive}
-      />
+          <Show when={runtime() ? runtimeError() : undefined}>
+            {(error) => <p class="app-error">Runtime update failed: {error()}</p>}
+          </Show>
 
-      <Show when={pendingDialogs().length > 0}>
-        <section class="attention" aria-label="Needs attention">
-          <h2>Needs Attention</h2>
-          <For each={pendingDialogs()}>
-            {(pending) => (
-              <ExtensionDialogCard
-                runId={pending.runId}
-                dialog={pending.dialog}
-                onResolved={refreshHydration}
-              />
-            )}
-          </For>
-        </section>
-      </Show>
+          <Show when={view() === "launcher"}>
+            <header class="surface-heading">
+              <div>
+                <h1>New run</h1>
+                <p>Start Pi in a local checkout or an isolated Git worktree.</p>
+              </div>
+              <button type="button" onClick={() => setView("dashboard")}>Cancel</button>
+            </header>
+            <ProjectLauncher
+              piReady={Boolean(piProbe())}
+              preferredProjectPath={preferredProjectPath()}
+              onStarted={handleStarted}
+              onOpenRun={openRun}
+              isExecutionRootActive={isExecutionRootActive}
+              activeRunIdForExecutionRoot={activeRunIdForExecutionRoot}
+              activeRunIdForSessionPath={activeRunIdForSessionPath}
+            />
+          </Show>
 
-      <Show when={(runtime()?.runs.length ?? 0) > 0}>
-        <section class="composers" aria-label="Run composers">
-          <h2>Composers</h2>
-          <For each={runIds()}>
-            {(runId) => (
-              <Show when={runById(runId)}>
-                {(run) => (
+          <Show when={view() === "run"}>
+            <Show when={selectedRun()} fallback={<p class="empty-state">That run is no longer retained.</p>}>
+              {(run) => (
+                <section class="active-run-surface" aria-label={`Run ${runTitle(run())}`}>
+                  <header class="surface-heading run-surface-heading">
+                    <div>
+                      <h1>{runTitle(run())}</h1>
+                      <p title={run().run.executionRoot}>
+                        {runStateLabel(run())} · {run().run.executionIsolation === "git_worktree" ? "Git worktree" : "Local checkout"} · {run().run.executionRoot}
+                      </p>
+                    </div>
+                    <div class="run-surface-actions">
+                      <button
+                        type="button"
+                        disabled={Boolean(openingFolderRunId())}
+                        onClick={() => void openRunFolder(run())}
+                      >
+                        {openingFolderRunId() === run().run.id ? "Opening" : "Open folder"}
+                      </button>
+                      <Show
+                        when={isTerminalRun(run())}
+                        fallback={
+                          <button
+                            type="button"
+                            disabled={!canCloseRun(run()) || Boolean(closingRunId())}
+                            onClick={() => void closeRun(run())}
+                          >
+                            {closingRunId() === run().run.id ? "Closing" : "Close run"}
+                          </button>
+                        }
+                      >
+                        <button
+                          type="button"
+                          disabled={Boolean(dismissingRunId())}
+                          onClick={() => void dismissRun(run())}
+                        >
+                          {dismissingRunId() === run().run.id ? "Dismissing" : "Dismiss"}
+                        </button>
+                      </Show>
+                      <button type="button" onClick={() => setView("dashboard")}>Dashboard</button>
+                    </div>
+                  </header>
+
+                  <Show when={runActionError()}>
+                    {(error) => <p class="app-error">Run action failed: {error()}</p>}
+                  </Show>
+
+                  <Show when={run().run.failure}>
+                    {(failure) => (
+                      <section class="run-failure-panel" role="alert" aria-label="Run failure">
+                        <strong>
+                          {run().run.process === "quarantined"
+                            ? "Termination uncertain"
+                            : `Run failed · ${failure().kind.replaceAll("_", " ")}`}
+                        </strong>
+                        <span>{failure().detail}</span>
+                        <small>
+                          {run().run.exitCode == null ? "No process exit code" : `Process exit code ${run().run.exitCode}`}
+                          {failure().detailTruncated ? " · detail truncated by backend limit" : ""}
+                        </small>
+                      </section>
+                    )}
+                  </Show>
+
+                  <Show when={(run().rpc?.pendingDialogs.length ?? 0) > 0}>
+                    <section class="attention" aria-label="Needs attention">
+                      <h2>Needs Attention</h2>
+                      <For each={run().rpc?.pendingDialogs ?? []}>
+                        {(dialog) => (
+                          <ExtensionDialogCard
+                            runId={run().run.id}
+                            dialog={dialog}
+                            onResolved={refreshHydration}
+                          />
+                        )}
+                      </For>
+                    </section>
+                  </Show>
+
+                  <ExtensionUiPanel snapshot={run().rpc?.extensionUi} />
+
                   <ComposerCard
                     run={run()}
                     state={composerState(run())}
                     attachmentLimits={attachmentLimits()}
                     onResolved={refreshHydration}
                   />
-                )}
+                </section>
+              )}
+            </Show>
+          </Show>
+
+          <Show when={view() === "dashboard"}>
+            <section class="dashboard" aria-label="Run dashboard">
+              <header class="surface-heading">
+                <div>
+                  <h1>Runs</h1>
+                  <p>Open a session for details. Runs keep working when you switch views.</p>
+                </div>
+                <button type="button" onClick={() => setView("launcher")}>New run</button>
+              </header>
+
+              <Show when={(runtime()?.runs.length ?? 0) > 0} fallback={
+                <div class="empty-state">
+                  <strong>No runs yet</strong>
+                  <span>Start one and give Pi the task up front.</span>
+                  <button type="button" onClick={() => setView("launcher")}>Start a run</button>
+                </div>
+              }>
+                <div class="run-grid">
+                  <For each={sortedRuns()}>
+                    {(run) => (
+                      <article class="run-card">
+                        <div>
+                          <strong>{runTitle(run)}</strong>
+                          <span class={`run-state state-${runStateLabel(run).replaceAll(" ", "-")}`}>
+                            {runStateLabel(run)}
+                          </span>
+                        </div>
+                        <span title={run.run.executionRoot} class="run-path">
+                          {run.run.executionIsolation === "git_worktree" ? "Git worktree" : "Local checkout"} · {run.run.executionRoot}
+                        </span>
+                        <Show when={run.run.worktree}>
+                          {(worktree) => <small>{worktree().branch} · {worktree().baseCommit.slice(0, 12)}</small>}
+                        </Show>
+                        <Show when={(run.rpc?.pendingDialogs.length ?? 0) > 0}>
+                          <strong class="attention-count">{run.rpc!.pendingDialogs.length} request{run.rpc!.pendingDialogs.length === 1 ? "" : "s"} need attention</strong>
+                        </Show>
+                        <div class="run-card-actions">
+                          <button type="button" onClick={() => openRun(run.run.id)}>Open</button>
+                          <button
+                            type="button"
+                            disabled={Boolean(openingFolderRunId())}
+                            onClick={() => void openRunFolder(run)}
+                          >
+                            {openingFolderRunId() === run.run.id ? "Opening" : "Folder"}
+                          </button>
+                          <Show when={run.run.process === "ready" && run.run.agentWorking}>
+                            <button
+                              type="button"
+                              onClick={() => void stopRunFromDashboard(run)}
+                            >
+                              Stop
+                            </button>
+                          </Show>
+                          <Show when={canCloseRun(run)}>
+                            <button
+                              type="button"
+                              disabled={Boolean(closingRunId())}
+                              onClick={() => void closeRun(run)}
+                            >
+                              {closingRunId() === run.run.id ? "Closing" : "Close"}
+                            </button>
+                          </Show>
+                          <Show when={isTerminalRun(run)}>
+                            <button
+                              type="button"
+                              disabled={Boolean(dismissingRunId())}
+                              onClick={() => void dismissRun(run)}
+                            >
+                              {dismissingRunId() === run.run.id ? "Dismissing" : "Dismiss"}
+                            </button>
+                          </Show>
+                        </div>
+                      </article>
+                    )}
+                  </For>
+                </div>
               </Show>
-            )}
-          </For>
-        </section>
-      </Show>
-    </main>
+              <Show when={runActionError()}>
+                {(error) => <p class="error">Run action failed: {error()}</p>}
+              </Show>
+            </section>
+
+            <Show when={pendingDialogs().length > 0}>
+              <section class="attention dashboard-attention" aria-label="Needs attention">
+                <h2>Needs Attention</h2>
+                <For each={pendingDialogs()}>
+                  {(pending) => (
+                    <article class="attention-summary">
+                      <div>
+                        <strong>{runById(pending.runId) ? runTitle(runById(pending.runId)!) : pending.runId.slice(0, 8)}</strong>
+                        <span>{pending.dialog.request.kind.title}</span>
+                      </div>
+                      <button type="button" onClick={() => openRun(pending.runId)}>Open</button>
+                    </article>
+                  )}
+                </For>
+              </section>
+            </Show>
+          </Show>
+        </main>
+      </div>
+    </>
   );
 }

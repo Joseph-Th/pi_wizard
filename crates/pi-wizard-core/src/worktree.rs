@@ -23,6 +23,19 @@ pub struct WorktreeBaseSnapshot {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", tag = "kind")]
+pub enum WorktreeCleanupResult {
+    Removed,
+    Partial {
+        #[serde(rename = "branchExists")]
+        branch_exists: bool,
+        #[serde(rename = "pathExists")]
+        path_exists: bool,
+        detail: String,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", tag = "kind")]
 pub enum WorktreeRecoveryProbe {
     NotCreated,
     Exact {
@@ -33,6 +46,173 @@ pub enum WorktreeRecoveryProbe {
         path_exists: bool,
         detail: String,
     },
+}
+
+/// Removes an app-created worktree only when it is still the exact recorded
+/// worktree, has no working-tree changes, and its branch has never advanced
+/// beyond the captured creation base. The branch deletion uses an expected-old
+/// object ID so a concurrent branch update is preserved rather than guessed
+/// away. Any partial mutation remains observable through the recovery journal.
+pub async fn cleanup_pristine_worktree(
+    plan: &WorktreeCreatePlan,
+    environment: &ResolvedLaunchEnvironment,
+    limits: RuntimeLimits,
+) -> Result<WorktreeCleanupResult, WorktreeError> {
+    validate_ref_text(&plan.branch, limits)?;
+    validate_path_bytes(&plan.worktree_path, limits)?;
+    let created = verify_existing_worktree(
+        &plan.base,
+        &plan.branch,
+        &plan.worktree_path,
+        false,
+        environment,
+        limits,
+    )
+    .await?;
+
+    let head = git_text(
+        environment,
+        &created.worktree_root,
+        &["rev-parse", "--verify", "HEAD^{commit}"],
+        "verify cleanup worktree HEAD",
+        limits,
+    )
+    .await?;
+    if head != plan.base.base_commit {
+        return Err(WorktreeError::CleanupContainsCommits {
+            base_commit: plan.base.base_commit.clone(),
+            head,
+        });
+    }
+
+    let status = git_raw(
+        environment,
+        &created.worktree_root,
+        ["status", "--porcelain=v1", "--untracked-files=normal"],
+        1,
+        limits,
+    )
+    .await?;
+    if !status.status.success() {
+        return Err(WorktreeError::GitCommandFailed {
+            operation: "verify cleanup worktree status",
+            code: status.status.code(),
+        });
+    }
+    if status.stdout_exceeded || !status.stdout.is_empty() {
+        return Err(WorktreeError::CleanupDirty {
+            path: created.worktree_root,
+        });
+    }
+
+    let remove = git_raw_os(
+        environment,
+        &plan.base.repository_root,
+        vec![
+            OsString::from("worktree"),
+            OsString::from("remove"),
+            path_argument_for_git(&created.worktree_root),
+        ],
+        limits.max_git_command_output_bytes,
+        limits,
+    )
+    .await?;
+    if !remove.status.success() {
+        return Err(WorktreeError::CleanupCommandFailed {
+            operation: "remove pristine worktree",
+            code: remove.status.code(),
+            path_exists: plan.worktree_path.exists(),
+        });
+    }
+
+    let full_ref = format!("refs/heads/{}", plan.branch);
+    let delete_branch = git_raw_os(
+        environment,
+        &plan.base.repository_root,
+        vec![
+            OsString::from("update-ref"),
+            OsString::from("-d"),
+            OsString::from(&full_ref),
+            OsString::from(&plan.base.base_commit),
+        ],
+        limits.max_git_command_output_bytes,
+        limits,
+    )
+    .await;
+    match delete_branch {
+        Ok(output) if output.status.success() => {}
+        Ok(output) => {
+            return cleanup_partial_result(
+                plan,
+                environment,
+                limits,
+                format!(
+                    "worktree path was removed but exact branch deletion failed with exit code {:?}",
+                    output.status.code()
+                ),
+            )
+            .await;
+        }
+        Err(error) => {
+            return cleanup_partial_result(
+                plan,
+                environment,
+                limits,
+                format!(
+                    "worktree path was removed but branch deletion became indeterminate: {error}"
+                ),
+            )
+            .await;
+        }
+    }
+
+    match probe_worktree_recovery(plan, environment, limits).await? {
+        WorktreeRecoveryProbe::NotCreated => Ok(WorktreeCleanupResult::Removed),
+        WorktreeRecoveryProbe::Partial {
+            branch_exists,
+            path_exists,
+            detail,
+        } => Ok(WorktreeCleanupResult::Partial {
+            branch_exists,
+            path_exists,
+            detail,
+        }),
+        WorktreeRecoveryProbe::Exact { .. } => Ok(WorktreeCleanupResult::Partial {
+            branch_exists: true,
+            path_exists: true,
+            detail: "cleanup commands completed but the recorded worktree still exists".to_owned(),
+        }),
+    }
+}
+
+async fn cleanup_partial_result(
+    plan: &WorktreeCreatePlan,
+    environment: &ResolvedLaunchEnvironment,
+    limits: RuntimeLimits,
+    fallback_detail: String,
+) -> Result<WorktreeCleanupResult, WorktreeError> {
+    match probe_worktree_recovery(plan, environment, limits).await {
+        Ok(WorktreeRecoveryProbe::NotCreated) => Ok(WorktreeCleanupResult::Removed),
+        Ok(WorktreeRecoveryProbe::Partial {
+            branch_exists,
+            path_exists,
+            detail,
+        }) => Ok(WorktreeCleanupResult::Partial {
+            branch_exists,
+            path_exists,
+            detail,
+        }),
+        Ok(WorktreeRecoveryProbe::Exact { .. }) => Ok(WorktreeCleanupResult::Partial {
+            branch_exists: true,
+            path_exists: true,
+            detail: fallback_detail,
+        }),
+        Err(_) => Ok(WorktreeCleanupResult::Partial {
+            branch_exists: true,
+            path_exists: plan.worktree_path.exists(),
+            detail: bounded_failure_detail(&fallback_detail, limits),
+        }),
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -858,6 +1038,20 @@ pub enum WorktreeError {
     PostCreateVerification { path: PathBuf, detail: String },
     #[error("existing worktree does not match captured recovery identity: {detail}")]
     ExistingWorktreeMismatch { detail: String },
+    #[error("worktree cleanup refused because {path} has uncommitted or untracked changes")]
+    CleanupDirty { path: PathBuf },
+    #[error(
+        "worktree cleanup refused because task branch advanced beyond captured base {base_commit}; current HEAD is {head}"
+    )]
+    CleanupContainsCommits { base_commit: String, head: String },
+    #[error(
+        "worktree cleanup command for {operation} failed with exit code {code:?}; path still exists: {path_exists}"
+    )]
+    CleanupCommandFailed {
+        operation: &'static str,
+        code: Option<i32>,
+        path_exists: bool,
+    },
 }
 
 impl WorktreeError {
@@ -1068,6 +1262,150 @@ mod tests {
                 .canonicalize()
                 .expect("execution root")
         );
+    }
+
+    #[tokio::test]
+    async fn pristine_created_worktree_can_be_explicitly_removed_with_its_unchanged_branch() {
+        let fixture = Fixture::new("cleanup-pristine");
+        let base = inspect_worktree_base(
+            &fixture.project,
+            &fixture.environment,
+            RuntimeLimits::default(),
+        )
+        .await
+        .expect("inspect base");
+        let target = fixture.root.join("cleanup-pristine-worktree");
+        let plan = WorktreeCreatePlan {
+            base: base.clone(),
+            branch: "cleanup-pristine".to_owned(),
+            worktree_path: target.clone(),
+        };
+        create_worktree(plan.clone(), &fixture.environment, RuntimeLimits::default())
+            .await
+            .expect("create worktree");
+
+        assert_eq!(
+            cleanup_pristine_worktree(&plan, &fixture.environment, RuntimeLimits::default())
+                .await
+                .expect("cleanup worktree"),
+            WorktreeCleanupResult::Removed
+        );
+        assert!(!target.exists());
+        assert!(matches!(
+            probe_worktree_recovery(&plan, &fixture.environment, RuntimeLimits::default())
+                .await
+                .expect("post-cleanup probe"),
+            WorktreeRecoveryProbe::NotCreated
+        ));
+    }
+
+    #[test]
+    fn cleanup_result_wire_shape_matches_desktop_contract() {
+        assert_eq!(
+            serde_json::to_value(WorktreeCleanupResult::Removed).expect("removed wire shape"),
+            serde_json::json!({"kind":"removed"})
+        );
+        assert_eq!(
+            serde_json::to_value(WorktreeCleanupResult::Partial {
+                branch_exists: true,
+                path_exists: false,
+                detail: "branch retained".to_owned(),
+            })
+            .expect("partial wire shape"),
+            serde_json::json!({
+                "kind":"partial",
+                "branchExists":true,
+                "pathExists":false,
+                "detail":"branch retained"
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn cleanup_refuses_dirty_worktree_without_removing_path_or_branch() {
+        let fixture = Fixture::new("cleanup-dirty");
+        let base = inspect_worktree_base(
+            &fixture.project,
+            &fixture.environment,
+            RuntimeLimits::default(),
+        )
+        .await
+        .expect("inspect base");
+        let target = fixture.root.join("cleanup-dirty-worktree");
+        let plan = WorktreeCreatePlan {
+            base,
+            branch: "cleanup-dirty".to_owned(),
+            worktree_path: target.clone(),
+        };
+        let created = create_worktree(plan.clone(), &fixture.environment, RuntimeLimits::default())
+            .await
+            .expect("create worktree");
+        fs::write(
+            created.execution_root.join("untracked.txt"),
+            "preserve me\n",
+        )
+        .expect("dirty worktree");
+
+        assert!(matches!(
+            cleanup_pristine_worktree(&plan, &fixture.environment, RuntimeLimits::default()).await,
+            Err(WorktreeError::CleanupDirty { .. })
+        ));
+        assert!(target.exists());
+        assert!(matches!(
+            probe_worktree_recovery(&plan, &fixture.environment, RuntimeLimits::default())
+                .await
+                .expect("dirty recovery probe"),
+            WorktreeRecoveryProbe::Exact { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn cleanup_refuses_task_commits_even_when_worktree_is_clean() {
+        let fixture = Fixture::new("cleanup-commits");
+        let base = inspect_worktree_base(
+            &fixture.project,
+            &fixture.environment,
+            RuntimeLimits::default(),
+        )
+        .await
+        .expect("inspect base");
+        let target = fixture.root.join("cleanup-commit-worktree");
+        let plan = WorktreeCreatePlan {
+            base,
+            branch: "cleanup-commits".to_owned(),
+            worktree_path: target.clone(),
+        };
+        let created = create_worktree(plan.clone(), &fixture.environment, RuntimeLimits::default())
+            .await
+            .expect("create worktree");
+        fs::write(created.execution_root.join("task.txt"), "task commit\n").expect("task file");
+        let git = fixture.environment.git_executable().expect("git");
+        run(git, &created.worktree_root, &["add", "."]);
+        run(
+            git,
+            &created.worktree_root,
+            &[
+                "-c",
+                "user.name=Pi Wizard Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "commit",
+                "-m",
+                "task commit",
+            ],
+        );
+
+        assert!(matches!(
+            cleanup_pristine_worktree(&plan, &fixture.environment, RuntimeLimits::default()).await,
+            Err(WorktreeError::CleanupContainsCommits { .. })
+        ));
+        assert!(target.exists());
+        assert!(matches!(
+            probe_worktree_recovery(&plan, &fixture.environment, RuntimeLimits::default())
+                .await
+                .expect("committed recovery probe"),
+            WorktreeRecoveryProbe::Exact { .. }
+        ));
     }
 
     #[tokio::test]

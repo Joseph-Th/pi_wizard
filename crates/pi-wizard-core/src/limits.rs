@@ -9,6 +9,7 @@ const HARD_MAX_STREAM_CONTENT_BLOCKS: usize = 4096;
 const HARD_MAX_RECOVERED_QUEUE_MESSAGES: usize = 4096;
 const HARD_MAX_CAPABILITY_ENTRIES: usize = 16 * 1024;
 const HARD_MAX_PROJECT_REGISTRY_ENTRIES: usize = 64 * 1024;
+const HARD_MAX_PREFERENCES_BYTES: usize = 1024 * 1024;
 const HARD_MAX_SESSION_PAGE_ENTRIES: usize = 8 * 1024;
 const HARD_MAX_SESSION_CATALOG_CANDIDATES: usize = 64 * 1024;
 const HARD_MAX_SESSION_CATALOG_SCAN_FILES: usize = 8 * 1024;
@@ -18,6 +19,9 @@ const HARD_MAX_SESSION_HISTORY_PAGE_ITEMS: usize = 1024;
 const HARD_MAX_SESSION_HISTORY_LINE_BYTES: usize = 8 * 1024 * 1024;
 const HARD_MAX_SESSION_HISTORY_SCAN_BYTES: usize = 64 * 1024 * 1024;
 const HARD_MAX_RUNTIME_CHANNEL_ENTRIES: usize = 64 * 1024;
+const HARD_MAX_LIVE_RUNS: usize = 256;
+const HARD_MAX_RETAINED_TERMINAL_RUNS: usize = 4096;
+const HARD_MAX_CACHED_DRAFT_RECORDS: usize = 4096;
 const HARD_MAX_GIT_COMMAND_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
 const HARD_MAX_GIT_REF_BYTES: usize = 4 * 1024;
 const HARD_MAX_WORKTREE_PATH_BYTES: usize = 64 * 1024;
@@ -25,6 +29,9 @@ const HARD_MAX_WORKTREE_REGISTRY_ENTRIES: usize = 16 * 1024;
 const HARD_MAX_WORKTREE_RECOVERY_PAGE_ENTRIES: usize = 1024;
 const HARD_MAX_GIT_REVIEW_FILES: usize = 16 * 1024;
 const HARD_MAX_GIT_DIFF_BYTES: usize = 8 * 1024 * 1024;
+const HARD_MAX_GIT_DIFF_PAGE_BYTES: usize = 1024 * 1024;
+const HARD_MAX_GIT_DIFF_SCAN_BYTES: usize = 64 * 1024 * 1024;
+const HARD_MAX_GIT_DIFF_HUNKS_PER_PAGE: usize = 4096;
 
 /// Centralized resource ceilings for data Pi Wizard owns in memory.
 ///
@@ -52,10 +59,12 @@ pub struct RuntimeLimits {
     pub max_attachment_bytes_per_image: usize,
     pub max_attachment_bytes_per_prompt: usize,
     pub max_draft_bytes_per_session: usize,
+    pub max_cached_draft_records: usize,
     pub max_recovered_queue_messages_per_run: usize,
     pub max_recovered_queue_bytes_per_run: usize,
     pub max_project_registry_entries: usize,
     pub max_project_registry_bytes: usize,
+    pub max_preferences_bytes: usize,
     pub max_environment_probe_bytes: usize,
     pub max_version_probe_bytes: usize,
     pub max_capability_entries_per_run: usize,
@@ -76,6 +85,8 @@ pub struct RuntimeLimits {
     pub max_session_history_scan_bytes_per_page: usize,
     pub max_session_history_line_bytes: usize,
     pub max_session_history_item_text_bytes: usize,
+    pub max_live_runs: usize,
+    pub max_retained_terminal_runs: usize,
     pub max_runtime_command_queue: usize,
     pub max_process_event_queue: usize,
     pub max_git_command_output_bytes: usize,
@@ -86,6 +97,9 @@ pub struct RuntimeLimits {
     pub max_worktree_recovery_page_entries: usize,
     pub max_git_review_files: usize,
     pub max_git_diff_bytes: usize,
+    pub max_git_diff_page_bytes: usize,
+    pub max_git_diff_scan_bytes_per_page: usize,
+    pub max_git_diff_hunks_per_page: usize,
     pub environment_probe_deadline_ms: u64,
     pub version_probe_deadline_ms: u64,
     pub startup_rpc_deadline_ms: u64,
@@ -149,6 +163,7 @@ impl RuntimeLimits {
             "max_draft_bytes_per_session",
             self.max_draft_bytes_per_session,
         )?;
+        validate_nonzero("max_cached_draft_records", self.max_cached_draft_records)?;
         validate_nonzero(
             "max_recovered_queue_messages_per_run",
             self.max_recovered_queue_messages_per_run,
@@ -165,6 +180,7 @@ impl RuntimeLimits {
             "max_project_registry_bytes",
             self.max_project_registry_bytes,
         )?;
+        validate_nonzero("max_preferences_bytes", self.max_preferences_bytes)?;
         validate_nonzero(
             "max_environment_probe_bytes",
             self.max_environment_probe_bytes,
@@ -239,6 +255,11 @@ impl RuntimeLimits {
             "max_session_history_item_text_bytes",
             self.max_session_history_item_text_bytes,
         )?;
+        validate_nonzero("max_live_runs", self.max_live_runs)?;
+        validate_nonzero(
+            "max_retained_terminal_runs",
+            self.max_retained_terminal_runs,
+        )?;
         validate_nonzero("max_runtime_command_queue", self.max_runtime_command_queue)?;
         validate_nonzero("max_process_event_queue", self.max_process_event_queue)?;
         validate_nonzero(
@@ -261,6 +282,15 @@ impl RuntimeLimits {
         )?;
         validate_nonzero("max_git_review_files", self.max_git_review_files)?;
         validate_nonzero("max_git_diff_bytes", self.max_git_diff_bytes)?;
+        validate_nonzero("max_git_diff_page_bytes", self.max_git_diff_page_bytes)?;
+        validate_nonzero(
+            "max_git_diff_scan_bytes_per_page",
+            self.max_git_diff_scan_bytes_per_page,
+        )?;
+        validate_nonzero(
+            "max_git_diff_hunks_per_page",
+            self.max_git_diff_hunks_per_page,
+        )?;
         validate_nonzero_u64(
             "environment_probe_deadline_ms",
             self.environment_probe_deadline_ms,
@@ -312,6 +342,36 @@ impl RuntimeLimits {
                 self.max_git_diff_bytes,
                 HARD_MAX_GIT_DIFF_BYTES,
             ),
+            (
+                "max_preferences_bytes",
+                self.max_preferences_bytes,
+                HARD_MAX_PREFERENCES_BYTES,
+            ),
+            (
+                "max_git_diff_page_bytes",
+                self.max_git_diff_page_bytes,
+                HARD_MAX_GIT_DIFF_PAGE_BYTES,
+            ),
+            (
+                "max_git_diff_scan_bytes_per_page",
+                self.max_git_diff_scan_bytes_per_page,
+                HARD_MAX_GIT_DIFF_SCAN_BYTES,
+            ),
+            (
+                "max_git_diff_hunks_per_page",
+                self.max_git_diff_hunks_per_page,
+                HARD_MAX_GIT_DIFF_HUNKS_PER_PAGE,
+            ),
+            (
+                "max_retained_terminal_runs",
+                self.max_retained_terminal_runs,
+                HARD_MAX_RETAINED_TERMINAL_RUNS,
+            ),
+            (
+                "max_cached_draft_records",
+                self.max_cached_draft_records,
+                HARD_MAX_CACHED_DRAFT_RECORDS,
+            ),
         ] {
             if value > hard_maximum {
                 return Err(LimitsError::AboveHardMaximum {
@@ -320,6 +380,25 @@ impl RuntimeLimits {
                     hard_maximum,
                 });
             }
+        }
+        if self.max_live_runs > HARD_MAX_LIVE_RUNS {
+            return Err(LimitsError::AboveHardMaximum {
+                field: "max_live_runs",
+                value: self.max_live_runs,
+                hard_maximum: HARD_MAX_LIVE_RUNS,
+            });
+        }
+        if self.max_live_runs > self.max_cached_draft_records {
+            return Err(LimitsError::InvalidRelationship {
+                smaller: "max_live_runs",
+                larger: "max_cached_draft_records",
+            });
+        }
+        if self.max_git_diff_page_bytes > self.max_git_diff_scan_bytes_per_page {
+            return Err(LimitsError::InvalidRelationship {
+                smaller: "max_git_diff_page_bytes",
+                larger: "max_git_diff_scan_bytes_per_page",
+            });
         }
         if self.max_worktree_recovery_page_entries > self.max_worktree_registry_entries {
             return Err(LimitsError::InvalidRelationship {
@@ -639,10 +718,12 @@ impl Default for RuntimeLimits {
             max_attachment_bytes_per_image: 8 * 1024 * 1024,
             max_attachment_bytes_per_prompt: 12 * 1024 * 1024,
             max_draft_bytes_per_session: 1024 * 1024,
+            max_cached_draft_records: 256,
             max_recovered_queue_messages_per_run: 256,
             max_recovered_queue_bytes_per_run: 512 * 1024,
             max_project_registry_entries: 4096,
             max_project_registry_bytes: 2 * 1024 * 1024,
+            max_preferences_bytes: 64 * 1024,
             max_worktree_registry_entries: 2048,
             max_worktree_registry_bytes: 2 * 1024 * 1024,
             max_worktree_recovery_page_entries: 64,
@@ -666,6 +747,8 @@ impl Default for RuntimeLimits {
             max_session_history_scan_bytes_per_page: 4 * 1024 * 1024,
             max_session_history_line_bytes: 2 * 1024 * 1024,
             max_session_history_item_text_bytes: 64 * 1024,
+            max_live_runs: 8,
+            max_retained_terminal_runs: 32,
             max_runtime_command_queue: 256,
             max_process_event_queue: 1024,
             max_git_command_output_bytes: 256 * 1024,
@@ -673,6 +756,9 @@ impl Default for RuntimeLimits {
             max_worktree_path_bytes: 16 * 1024,
             max_git_review_files: 2048,
             max_git_diff_bytes: 1024 * 1024,
+            max_git_diff_page_bytes: 128 * 1024,
+            max_git_diff_scan_bytes_per_page: 8 * 1024 * 1024,
+            max_git_diff_hunks_per_page: 512,
             environment_probe_deadline_ms: 2_000,
             version_probe_deadline_ms: 2_000,
             startup_rpc_deadline_ms: 5_000,
@@ -725,6 +811,73 @@ mod tests {
         assert_eq!(
             RuntimeLimits::default().validate(),
             Ok(RuntimeLimits::default())
+        );
+
+        let draft_cache = RuntimeLimits {
+            max_cached_draft_records: HARD_MAX_CACHED_DRAFT_RECORDS + 1,
+            ..RuntimeLimits::default()
+        };
+        assert_eq!(
+            draft_cache.validate(),
+            Err(LimitsError::AboveHardMaximum {
+                field: "max_cached_draft_records",
+                value: HARD_MAX_CACHED_DRAFT_RECORDS + 1,
+                hard_maximum: HARD_MAX_CACHED_DRAFT_RECORDS,
+            })
+        );
+
+        let too_few_draft_slots = RuntimeLimits {
+            max_live_runs: 3,
+            max_cached_draft_records: 2,
+            ..RuntimeLimits::default()
+        };
+        assert_eq!(
+            too_few_draft_slots.validate(),
+            Err(LimitsError::InvalidRelationship {
+                smaller: "max_live_runs",
+                larger: "max_cached_draft_records",
+            })
+        );
+    }
+
+    #[test]
+    fn live_run_limit_has_nonzero_and_hard_maximum_bounds() {
+        let zero = RuntimeLimits {
+            max_live_runs: 0,
+            ..RuntimeLimits::default()
+        };
+        assert_eq!(
+            zero.validate(),
+            Err(LimitsError::Zero {
+                field: "max_live_runs"
+            })
+        );
+
+        let oversized = RuntimeLimits {
+            max_live_runs: HARD_MAX_LIVE_RUNS + 1,
+            max_cached_draft_records: HARD_MAX_LIVE_RUNS + 1,
+            ..RuntimeLimits::default()
+        };
+        assert_eq!(
+            oversized.validate(),
+            Err(LimitsError::AboveHardMaximum {
+                field: "max_live_runs",
+                value: HARD_MAX_LIVE_RUNS + 1,
+                hard_maximum: HARD_MAX_LIVE_RUNS,
+            })
+        );
+
+        let terminal_history = RuntimeLimits {
+            max_retained_terminal_runs: HARD_MAX_RETAINED_TERMINAL_RUNS + 1,
+            ..RuntimeLimits::default()
+        };
+        assert_eq!(
+            terminal_history.validate(),
+            Err(LimitsError::AboveHardMaximum {
+                field: "max_retained_terminal_runs",
+                value: HARD_MAX_RETAINED_TERMINAL_RUNS + 1,
+                hard_maximum: HARD_MAX_RETAINED_TERMINAL_RUNS,
+            })
         );
     }
 

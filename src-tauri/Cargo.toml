@@ -7,17 +7,18 @@ license.workspace = true
 publish = false
 
 [lib]
-name = "pi_wizard_desktop"
+name = "pi_wizard_desktop_lib"
 crate-type = ["lib", "cdylib", "staticlib"]
 
 [dependencies]
 pi-wizard-core = { path = "../crates/pi-wizard-core" }
 serde.workspace = true
-tauri = "2.11.5"
+tauri = { version = "2.11.5", features = [] }
+tauri-plugin-dialog = "2"
 tokio.workspace = true
 
 [build-dependencies]
-tauri-build = "2.6.3"
+tauri-build = { version = "2.6.3", features = [] }
 
 [dev-dependencies]
 serde_json.workspace = true

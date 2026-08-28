@@ -33,6 +33,13 @@
     }
   },
   "bundle": {
-    "active": false
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/icon.png",
+      "icons/icon.ico"
+    ],
+    "shortDescription": "Desktop control surface for the Pi coding harness",
+    "longDescription": "Pi Wizard runs and supervises upstream Pi coding sessions, supports Git worktree isolation, session recovery, and bounded change review without replacing Pi's agent runtime."
   }
 }

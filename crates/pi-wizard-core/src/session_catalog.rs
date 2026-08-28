@@ -835,6 +835,61 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "scale fixture; exercised by full verification"]
+    fn thousand_session_catalog_remains_page_and_scan_bounded() {
+        let (root, project) = fixture();
+        let sessions = root.join("sessions");
+        fs::create_dir_all(&sessions).expect("session dir");
+        let mut env = environment(&root.join("home"));
+        env.insert(
+            OsString::from("PI_CODING_AGENT_SESSION_DIR"),
+            sessions.as_os_str().to_owned(),
+        );
+        let canonical_project = project.canonicalize().expect("canonical project");
+        for index in 0..1_200usize {
+            let mut file = File::create(sessions.join(format!("session-{index:04}.jsonl")))
+                .expect("session file");
+            writeln!(
+                file,
+                "{}",
+                serde_json::json!({
+                    "type":"session",
+                    "version":3,
+                    "id":format!("scale-session-{index:04}"),
+                    "timestamp":"2026-08-27T00:00:00.000Z",
+                    "cwd":canonical_project
+                })
+            )
+            .unwrap();
+            writeln!(
+                file,
+                "{}",
+                serde_json::json!({
+                    "type":"message",
+                    "id":"m1",
+                    "parentId":null,
+                    "timestamp":"2026-08-27T00:00:01.000Z",
+                    "message":{"role":"user","content":format!("historical task {index}")}
+                })
+            )
+            .unwrap();
+        }
+
+        let limits = RuntimeLimits {
+            max_session_catalog_candidates: 1_500,
+            max_session_catalog_scan_files: 64,
+            max_session_catalog_page_entries: 32,
+            ..RuntimeLimits::default()
+        };
+        let page = list_project_sessions(&project, &env, None, limits).expect("scale catalog");
+        assert_eq!(page.candidate_files, 1_200);
+        assert!(page.scanned_files <= 64);
+        assert!(page.sessions.len() <= 32);
+        assert!(page.truncated);
+        fs::remove_dir_all(root).expect("cleanup fixture");
+    }
+
+    #[test]
     fn preview_reads_head_and_tail_without_materializing_middle_history() {
         let (root, project) = fixture();
         let session = root.join("session.jsonl");
