@@ -9,6 +9,156 @@
   text-rendering: optimizeLegibility;
 }
 
+.auto-retry-control {
+  display: grid;
+  gap: 0.3rem;
+  min-width: 0;
+}
+
+.auto-retry-control > span,
+.auto-retry-control small {
+  color: GrayText;
+  font-size: 0.75rem;
+}
+
+.auto-retry-control > div {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.35rem;
+}
+
+.auto-retry-control small {
+  grid-column: 1 / -1;
+}
+
+.pi-runtime-notices {
+  display: grid;
+  gap: 0.5rem;
+}
+
+.pi-runtime-notice {
+  padding: 0.7rem 0.8rem;
+  border: 1px solid color-mix(in srgb, CanvasText 14%, transparent);
+  border-radius: 0.45rem;
+  background: color-mix(in srgb, CanvasText 2%, transparent);
+}
+
+.pi-runtime-notice.runtime-warning {
+  border-color: color-mix(in srgb, CanvasText 24%, transparent);
+}
+
+.pi-runtime-notice summary {
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 0.8125rem;
+}
+
+.pi-runtime-notice[open] {
+  display: grid;
+  gap: 0.5rem;
+}
+
+.pi-runtime-notice p,
+.pi-runtime-notice pre {
+  margin: 0;
+}
+
+.pi-runtime-notice p {
+  color: GrayText;
+  font-size: 0.78rem;
+  line-height: 1.45;
+}
+
+.pi-runtime-notice pre {
+  max-width: 100%;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 0.75rem;
+}
+
+.runtime-diagnostics-actions {
+  display: grid;
+  gap: 0.25rem;
+  margin-block: 0.65rem;
+}
+
+.runtime-diagnostics-actions button {
+  justify-self: start;
+  padding: 0.3rem 0.55rem;
+  font: inherit;
+}
+
+.runtime-diagnostics-actions small,
+.runtime-diagnostic-run span {
+  color: GrayText;
+  font-size: 0.7rem;
+}
+
+.runtime-diagnostic-summary {
+  padding-top: 0.55rem;
+  border-top: 1px solid color-mix(in srgb, CanvasText 10%, transparent);
+}
+
+.runtime-diagnostic-runs {
+  margin-block: 0.65rem;
+}
+
+.runtime-diagnostic-runs > summary {
+  font-size: 0.75rem;
+}
+
+.runtime-diagnostic-run {
+  display: grid;
+  gap: 0.2rem;
+  padding-block: 0.45rem;
+  border-bottom: 1px solid color-mix(in srgb, CanvasText 8%, transparent);
+}
+
+.runtime-diagnostic-run strong,
+.runtime-diagnostic-run span {
+  overflow-wrap: anywhere;
+}
+
+.inspector-tabs {
+  display: flex;
+  gap: 0.45rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.inspector-tabs button {
+  padding: 0.4rem 0.6rem;
+  font: inherit;
+}
+
+.inspector-tabs button[aria-pressed="true"] {
+  font-weight: 700;
+  background: color-mix(in srgb, CanvasText 8%, transparent);
+}
+
+.run-details-inspector {
+  display: grid;
+  gap: 0.5rem;
+}
+
+.run-card-meta {
+  display: flex;
+  gap: 0.65rem;
+  align-items: center;
+  flex-wrap: wrap;
+  color: GrayText;
+}
+
+.run-card-meta small {
+  font-size: 0.7rem;
+}
+
+.review-stale {
+  text-decoration: underline dotted;
+  text-underline-offset: 0.15em;
+}
+
 .skip-link {
   position: fixed;
   z-index: 1000;
@@ -71,6 +221,15 @@
   font-size: 0.75rem;
 }
 
+.recent-project-path {
+  min-width: 0;
+  overflow: hidden;
+  color: GrayText;
+  font-size: 0.7rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .live-block pre {
   max-width: 100%;
   margin: 0;
@@ -118,6 +277,7 @@
 }
 
 .session-tree-node {
+  --tree-depth: 0;
   display: grid;
   gap: 0.35rem;
   min-width: 0;
@@ -126,6 +286,31 @@
   border-left: 2px solid color-mix(in srgb, CanvasText 18%, transparent);
   background: color-mix(in srgb, CanvasText 2.5%, transparent);
 }
+
+.tree-depth-1 { --tree-depth: 1; }
+.tree-depth-2 { --tree-depth: 2; }
+.tree-depth-3 { --tree-depth: 3; }
+.tree-depth-4 { --tree-depth: 4; }
+.tree-depth-5 { --tree-depth: 5; }
+.tree-depth-6 { --tree-depth: 6; }
+.tree-depth-7 { --tree-depth: 7; }
+.tree-depth-8 { --tree-depth: 8; }
+.tree-depth-9 { --tree-depth: 9; }
+.tree-depth-10 { --tree-depth: 10; }
+.tree-depth-11 { --tree-depth: 11; }
+.tree-depth-12 { --tree-depth: 12; }
+.tree-depth-13 { --tree-depth: 13; }
+.tree-depth-14 { --tree-depth: 14; }
+.tree-depth-15 { --tree-depth: 15; }
+.tree-depth-16 { --tree-depth: 16; }
+.tree-depth-17 { --tree-depth: 17; }
+.tree-depth-18 { --tree-depth: 18; }
+.tree-depth-19 { --tree-depth: 19; }
+.tree-depth-20 { --tree-depth: 20; }
+.tree-depth-21 { --tree-depth: 21; }
+.tree-depth-22 { --tree-depth: 22; }
+.tree-depth-23 { --tree-depth: 23; }
+.tree-depth-24 { --tree-depth: 24; }
 
 .session-tree-node.active-leaf {
   border-left-width: 4px;
@@ -181,12 +366,38 @@
   opacity: 0.8;
 }
 
+.live-thinking-collapsed summary,
+.history-collapsible summary {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.75rem;
+  align-items: center;
+  cursor: pointer;
+  list-style-position: inside;
+}
+
+.live-thinking-collapsed summary span,
+.history-collapsible summary span {
+  color: GrayText;
+  font-size: 0.7rem;
+}
+
 .history-timeline {
   display: grid;
   gap: 0.625rem;
   padding: 0.75rem 0;
   border-top: 1px solid color-mix(in srgb, CanvasText 10%, transparent);
   border-bottom: 1px solid color-mix(in srgb, CanvasText 10%, transparent);
+}
+
+.history-collapsible[open] summary {
+  margin-bottom: 0.4rem;
+}
+
+.history-collapsible summary > div {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
 }
 
 .history-toolbar {
@@ -356,6 +567,22 @@
   min-width: 0;
   padding: 0.45rem 0.55rem;
   font: inherit;
+}
+
+.primary-nav button {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.nav-count {
+  min-width: 1.35rem;
+  padding: 0.05rem 0.35rem;
+  border: 1px solid color-mix(in srgb, CanvasText 16%, transparent);
+  border-radius: 999px;
+  font-size: 0.68rem;
+  text-align: center;
 }
 
 .session-usage {
@@ -613,6 +840,10 @@
 
 .command-suggestions button:first-child {
   border-top: 0;
+}
+
+.command-suggestions button.selected {
+  background: color-mix(in srgb, CanvasText 7%, transparent);
 }
 
 .command-suggestions span,
@@ -901,6 +1132,70 @@ body {
   align-items: end;
 }
 
+.launch-model-controls,
+.launch-advanced,
+.launch-resource-preflight {
+  grid-column: 1 / -1;
+}
+
+.launch-resource-preflight {
+  display: grid;
+  gap: 0.45rem;
+  justify-items: start;
+}
+
+.launch-resource-preflight .launch-note,
+.launch-resource-preflight .error {
+  margin: 0;
+}
+
+.launch-model-controls {
+  display: grid;
+  grid-template-columns: minmax(16rem, 1fr) minmax(12rem, 0.55fr);
+  gap: 0.65rem 0.75rem;
+  padding: 0.75rem;
+  border: 1px solid color-mix(in srgb, CanvasText 12%, transparent);
+  border-radius: 0.5rem;
+}
+
+.launch-model-heading {
+  grid-column: 1 / -1;
+  display: flex;
+  justify-content: space-between;
+  gap: 0.75rem;
+  align-items: center;
+}
+
+.launch-model-heading > span {
+  font-size: 0.8125rem;
+  font-weight: 600;
+}
+
+.launch-model-controls .error {
+  grid-column: 1 / -1;
+  margin: 0;
+}
+
+.launch-advanced {
+  padding: 0.65rem 0.75rem;
+  border: 1px solid color-mix(in srgb, CanvasText 10%, transparent);
+  border-radius: 0.5rem;
+}
+
+.launch-advanced summary {
+  cursor: pointer;
+  font-size: 0.8125rem;
+}
+
+.launch-advanced[open] {
+  display: grid;
+  gap: 0.65rem;
+}
+
+.launch-advanced .launch-note {
+  margin: 0;
+}
+
 .worktree-plan {
   grid-column: 1 / -1;
   display: grid;
@@ -1007,6 +1302,35 @@ body {
   font-size: 0.75rem;
 }
 
+.session-page-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  align-items: center;
+  color: GrayText;
+  font-size: 0.75rem;
+}
+
+.session-page-actions button {
+  padding: 0.4rem 0.6rem;
+  font: inherit;
+}
+
+.session-lookup-error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.session-lookup-error .error {
+  margin: 0;
+}
+
+.session-lookup-error button {
+  flex: 0 0 auto;
+}
+
 .session-row {
   padding: 0.625rem 0;
   border-top: 1px solid color-mix(in srgb, CanvasText 10%, transparent);
@@ -1032,7 +1356,8 @@ body {
 
 @media (max-width: 720px) {
   .project-launcher form,
-  .worktree-plan {
+  .worktree-plan,
+  .launch-model-controls {
     grid-template-columns: 1fr;
   }
 
@@ -1040,8 +1365,18 @@ body {
     grid-column: 1;
   }
 
+  .launch-model-heading {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
   .session-search {
     grid-template-columns: 1fr;
+  }
+
+  .session-lookup-error {
+    align-items: stretch;
+    flex-direction: column;
   }
 
   .recovery-heading,
@@ -1374,10 +1709,122 @@ body {
 }
 
 .active-run-surface,
-.dashboard {
+.dashboard,
+.recent-sessions-surface,
+.attention-queue-surface {
   display: grid;
   gap: 1rem;
   width: min(70rem, 100%);
+}
+
+.recent-session-controls {
+  display: grid;
+  grid-template-columns: minmax(16rem, 0.6fr) minmax(22rem, 1fr);
+  gap: 0.75rem;
+  align-items: start;
+}
+
+.recent-session-controls > label,
+.session-launch-options label {
+  display: grid;
+  gap: 0.3rem;
+}
+
+.recent-session-controls label > span,
+.session-launch-options label > span {
+  color: GrayText;
+  font-size: 0.75rem;
+}
+
+.recent-session-controls select,
+.session-launch-options select {
+  min-width: 0;
+  padding: 0.5rem;
+  font: inherit;
+}
+
+.session-launch-options {
+  padding: 0.65rem 0.75rem;
+  border: 1px solid color-mix(in srgb, CanvasText 12%, transparent);
+  border-radius: 0.5rem;
+}
+
+.session-launch-options summary {
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 0.8125rem;
+}
+
+.session-launch-options[open] {
+  display: grid;
+  gap: 0.65rem;
+}
+
+.session-launch-options > div {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.65rem;
+}
+
+.session-launch-options p {
+  margin: 0;
+  color: GrayText;
+  font-size: 0.75rem;
+  line-height: 1.4;
+}
+
+.recent-sessions-surface > .session-browser {
+  margin-top: 0;
+}
+
+.attention-total {
+  flex: 0 0 auto;
+  padding: 0.25rem 0.5rem;
+  border: 1px solid color-mix(in srgb, CanvasText 14%, transparent);
+  border-radius: 999px;
+  font-size: 0.75rem;
+}
+
+.attention-queue {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.attention-queue-item {
+  display: grid;
+  gap: 0.65rem;
+  min-width: 0;
+  padding: 0.85rem;
+  border: 1px solid color-mix(in srgb, CanvasText 16%, transparent);
+  border-radius: 0.5rem;
+}
+
+.attention-queue-item > header {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.75rem;
+  align-items: center;
+}
+
+.attention-queue-item > header > div {
+  display: grid;
+  gap: 0.2rem;
+  min-width: 0;
+}
+
+.attention-queue-item > header span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: GrayText;
+  font-size: 0.75rem;
+}
+
+.attention-queue-item > header button {
+  flex: 0 0 auto;
+  padding: 0.45rem 0.65rem;
+  font: inherit;
 }
 
 .active-run-surface > .composer-card {
@@ -1387,6 +1834,27 @@ body {
 .run-surface-heading p {
   max-width: 52rem;
   overflow-wrap: anywhere;
+}
+
+.run-identity-strip {
+  display: flex;
+  gap: 0.4rem;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-top: 0.45rem;
+}
+
+.run-identity-strip > span:not(.run-state) {
+  min-width: 0;
+  max-width: 24rem;
+  padding: 0.15rem 0.4rem;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, CanvasText 12%, transparent);
+  border-radius: 999px;
+  color: GrayText;
+  font-size: 0.7rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .run-grid {
@@ -1438,6 +1906,15 @@ body {
   font-size: 0.75rem;
 }
 
+.run-activity {
+  min-width: 0;
+  overflow: hidden;
+  color: CanvasText;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .empty-state {
   display: grid;
   justify-items: start;
@@ -1450,6 +1927,226 @@ body {
 
 .empty-state span {
   color: GrayText;
+}
+
+.automation-surface {
+  display: grid;
+  gap: 1rem;
+  width: min(78rem, 100%);
+}
+
+.automation-layout {
+  display: grid;
+  grid-template-columns: minmax(11rem, 15rem) minmax(0, 1fr);
+  gap: 0.9rem;
+  align-items: start;
+}
+
+.automation-library,
+.automation-builder,
+.automation-executions,
+.automation-execution {
+  display: grid;
+  gap: 0.65rem;
+}
+
+.automation-library {
+  position: sticky;
+  top: 0;
+  max-height: min(42rem, 72vh);
+  overflow: auto;
+  padding: 0.75rem;
+  border: 1px solid color-mix(in srgb, CanvasText 14%, transparent);
+  border-radius: 0.5rem;
+}
+
+.automation-library > button {
+  display: grid;
+  gap: 0.15rem;
+  width: 100%;
+  padding: 0.5rem 0.6rem;
+  text-align: left;
+  font: inherit;
+}
+
+.automation-library > button.active {
+  background: color-mix(in srgb, Highlight 16%, Canvas);
+  border-color: color-mix(in srgb, Highlight 45%, CanvasText 20%);
+}
+
+.automation-library > button span {
+  color: GrayText;
+  font-size: 0.72rem;
+}
+
+.automation-builder {
+  min-width: 0;
+  padding: 0.85rem;
+  border: 1px solid color-mix(in srgb, CanvasText 14%, transparent);
+  border-radius: 0.5rem;
+}
+
+.automation-name,
+.automation-launch-grid > label:not(.automation-checkbox) {
+  display: grid;
+  gap: 0.3rem;
+}
+
+.automation-name > span,
+.automation-launch-grid label > span {
+  color: GrayText;
+  font-size: 0.75rem;
+}
+
+.automation-name input,
+.automation-launch-grid input,
+.automation-launch-grid select,
+.automation-prompt-card textarea {
+  min-width: 0;
+  padding: 0.55rem 0.6rem;
+  font: inherit;
+}
+
+.automation-prompts,
+.automation-step-list {
+  display: grid;
+  gap: 0.55rem;
+}
+
+.automation-prompt-card {
+  display: grid;
+  gap: 0.45rem;
+  min-width: 0;
+  padding: 0.65rem;
+  border: 1px solid color-mix(in srgb, CanvasText 12%, transparent);
+  border-radius: 0.45rem;
+}
+
+.automation-prompt-card header,
+.automation-execution > header {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.6rem;
+  align-items: center;
+}
+
+.automation-prompt-card header > div,
+.automation-builder-actions {
+  display: flex;
+  gap: 0.35rem;
+  flex-wrap: wrap;
+}
+
+.automation-prompt-card button,
+.automation-add-prompt,
+.automation-builder-actions button,
+.automation-execution button,
+.automation-step button {
+  padding: 0.4rem 0.55rem;
+  font: inherit;
+}
+
+.automation-prompt-card textarea {
+  width: 100%;
+  resize: vertical;
+  line-height: 1.45;
+}
+
+.automation-launch-grid {
+  display: grid;
+  grid-template-columns: minmax(12rem, 1fr) minmax(7rem, 0.35fr);
+  gap: 0.65rem 0.9rem;
+  align-items: end;
+}
+
+.automation-checkbox {
+  display: flex;
+  gap: 0.45rem;
+  align-items: center;
+  min-height: 2.35rem;
+}
+
+.automation-checkbox input {
+  flex: 0 0 auto;
+}
+
+.automation-builder-actions {
+  justify-content: flex-end;
+  padding-top: 0.2rem;
+}
+
+.automation-builder-actions .primary-action {
+  font-weight: 650;
+}
+
+.automation-executions {
+  padding-top: 0.25rem;
+}
+
+.automation-executions > h2 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.automation-execution {
+  padding: 0.8rem;
+  border: 1px solid color-mix(in srgb, CanvasText 14%, transparent);
+  border-radius: 0.5rem;
+}
+
+.automation-execution > header > div {
+  display: grid;
+  gap: 0.15rem;
+  min-width: 0;
+}
+
+.automation-execution > header span {
+  color: GrayText;
+  font-size: 0.75rem;
+  text-transform: capitalize;
+}
+
+.automation-step {
+  display: grid;
+  grid-template-columns: 2rem minmax(0, 1fr) auto auto;
+  gap: 0.55rem;
+  align-items: center;
+  min-width: 0;
+  padding: 0.5rem 0.6rem;
+  border-left: 2px solid color-mix(in srgb, CanvasText 18%, transparent);
+  background: color-mix(in srgb, CanvasText 2.5%, transparent);
+}
+
+.automation-step > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.automation-step > small:not(.error) {
+  color: GrayText;
+  font-size: 0.72rem;
+  text-transform: capitalize;
+}
+
+.automation-step > .error {
+  grid-column: 2 / -1;
+  overflow-wrap: anywhere;
+}
+
+.step-working,
+.step-needs_attention {
+  border-left-color: color-mix(in srgb, Highlight 60%, CanvasText 15%);
+}
+
+.step-failed {
+  border-left-width: 3px;
+}
+
+.step-completed,
+.step-cancelled {
+  opacity: 0.78;
 }
 
 .dashboard-attention,
@@ -1626,6 +2323,23 @@ body {
     grid-template-columns: 14rem minmax(0, 1fr);
   }
 
+  .recent-session-controls,
+  .session-launch-options > div,
+  .automation-layout,
+  .automation-launch-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .automation-library {
+    position: static;
+    max-height: 16rem;
+  }
+
+  .attention-queue-item > header {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
   .app-main {
     padding-inline: 1rem;
   }
@@ -1650,5 +2364,22 @@ body {
 
   .run-grid {
     grid-template-columns: 1fr;
+  }
+
+  .automation-prompt-card header,
+  .automation-execution > header {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .automation-step {
+    grid-template-columns: 2rem minmax(0, 1fr);
+  }
+
+  .automation-step > small,
+  .automation-step > button,
+  .automation-step > .error {
+    grid-column: 2;
+    justify-self: start;
   }
 }

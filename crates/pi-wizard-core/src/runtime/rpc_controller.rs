@@ -5,20 +5,22 @@ use thiserror::Error;
 
 use crate::bounded::BoundedText;
 use crate::rpc::{
-    ActiveRpcCommand, AssistantMessageBlockKind, AssistantMessageUpdate, ExtensionDialogRequest,
-    ExtensionFireAndForget, ExtensionNotifyType, ExtensionUiParseError, ExtensionUiRequest,
-    ExtensionWidgetPlacement, PendingRequest, PendingRequestError, PendingRequests, RpcCommand,
-    RpcCommandGate, RpcEvent, RpcEventKind, RpcEventPayloadError, RpcGateError, RpcRequest,
-    RpcResponse, RpcResponseOutcome, RpcResponsePayloadError, SessionEntriesPage,
+    ActiveRpcCommand, AssistantMessageBlockKind, AssistantMessageUpdate, ClearQueueResult,
+    ExtensionDialogRequest, ExtensionFireAndForget, ExtensionNotifyType, ExtensionUiParseError,
+    ExtensionUiRequest, ExtensionWidgetPlacement, PendingRequest, PendingRequestError,
+    PendingRequests, RpcCommand, RpcCommandGate, RpcEvent, RpcEventKind, RpcEventPayloadError,
+    RpcGateError, RpcRequest, RpcResponse, RpcResponseOutcome, RpcResponsePayloadError,
+    SessionEntriesPage,
 };
 use crate::{RequestId, RunId, RuntimeLimits};
 
 use super::{
     AssistantContentKind, ExtensionUiError, ExtensionUiState, ExtensionWidget, LiveProjection,
-    PendingExtensionDialogSnapshot, ProjectionError, QueueState, RunCapabilities, RunModelState,
-    RunMutation, RunRpcHydrationSnapshot, RunStateObservation, RuntimeError, RuntimeStore,
-    SessionSyncApplied, SessionSyncError, SessionSyncResync, SessionSyncState, ToolPreview,
-    WidgetPlacement,
+    PendingExtensionDialogSnapshot, ProjectionError, QueueState, RunCapabilities,
+    RunCompactionSnapshot, RunExtensionErrorSnapshot, RunModelState, RunMutation, RunRetrySnapshot,
+    RunRpcHydrationSnapshot, RunStateObservation, RunSummarizationRetrySnapshot, RuntimeError,
+    RuntimeStore, SessionSyncApplied, SessionSyncError, SessionSyncResync, SessionSyncState,
+    ToolPreview, WidgetPlacement,
 };
 
 /// Tauri-independent owner for one live run's RPC correlation and transient
@@ -40,6 +42,12 @@ pub struct RunRpcController {
     pending_dialog_bytes: usize,
     session_sync: SessionSyncState,
     session_sync_request: Option<PendingSessionSyncRequest>,
+    compaction: Option<RunCompactionSnapshot>,
+    retry: Option<RunRetrySnapshot>,
+    summarization_retry: Option<RunSummarizationRetrySnapshot>,
+    last_extension_error: Option<RunExtensionErrorSnapshot>,
+    stream_stalled: bool,
+    observed_queue_recovery: ClearQueueResult,
     limits: RuntimeLimits,
 }
 
@@ -57,6 +65,12 @@ impl RunRpcController {
             pending_dialog_bytes: 0,
             session_sync: SessionSyncState::default(),
             session_sync_request: None,
+            compaction: None,
+            retry: None,
+            summarization_retry: None,
+            last_extension_error: None,
+            stream_stalled: false,
+            observed_queue_recovery: ClearQueueResult::default(),
             limits,
         }
     }
@@ -146,6 +160,12 @@ impl RunRpcController {
         } else {
             None
         };
+
+        if pending.command == "bash" {
+            // A shell command may have mutated the execution root even when
+            // its eventual response is rejected/cancelled or reports failure.
+            store.apply(self.run_id, RunMutation::ChangesMayHaveChanged)?;
+        }
 
         let outcome = response.outcome();
         let mut capabilities_changed = false;
@@ -242,6 +262,18 @@ impl RunRpcController {
         let effect = match event.kind {
             RpcEventKind::AgentStart => {
                 self.live.clear_assistant_message();
+                if self
+                    .compaction
+                    .as_ref()
+                    .is_some_and(|compaction| compaction.finished && compaction.will_retry)
+                {
+                    self.compaction = None;
+                }
+                if self.retry.as_ref().is_some_and(|retry| retry.finished) {
+                    self.retry = None;
+                } else if let Some(retry) = self.retry.as_mut() {
+                    retry.waiting = false;
+                }
                 store.apply(self.run_id, RunMutation::AgentStarted)?;
                 RunRpcEffect::SemanticStateChanged
             }
@@ -250,24 +282,175 @@ impl RunRpcController {
                 RunRpcEffect::SemanticStateChanged
             }
             RpcEventKind::CompactionStart => {
+                let started = event
+                    .compaction_start()?
+                    .expect("compaction-start parser is gated by event kind");
+                let (reason, reason_truncated) = self.bound_detail(&started.reason);
+                self.compaction = Some(RunCompactionSnapshot {
+                    reason,
+                    reason_truncated,
+                    finished: false,
+                    aborted: false,
+                    will_retry: false,
+                    error_message: None,
+                    error_truncated: false,
+                });
                 store.apply(self.run_id, RunMutation::CompactionStarted)?;
                 RunRpcEffect::SemanticStateChanged
             }
             RpcEventKind::CompactionEnd => {
+                let ended = event
+                    .compaction_end()?
+                    .expect("compaction-end parser is gated by event kind");
+                let (reason, reason_truncated) = self.bound_detail(&ended.reason);
+                let (error_message, error_truncated) = ended
+                    .error_message
+                    .as_deref()
+                    .map(|value| self.bound_detail(value))
+                    .map_or((None, false), |(value, truncated)| (Some(value), truncated));
+                self.compaction = Some(RunCompactionSnapshot {
+                    reason,
+                    reason_truncated,
+                    finished: true,
+                    aborted: ended.aborted,
+                    will_retry: ended.will_retry,
+                    error_message,
+                    error_truncated,
+                });
                 store.apply(self.run_id, RunMutation::CompactionEnded)?;
                 RunRpcEffect::SemanticStateChanged
             }
+            RpcEventKind::AutoRetryStart => {
+                let retry = event
+                    .auto_retry_start()?
+                    .expect("auto-retry parser is gated by event kind");
+                let (error_message, error_truncated) = self.bound_detail(&retry.error_message);
+                self.retry = Some(RunRetrySnapshot {
+                    attempt: retry.attempt,
+                    max_attempts: retry.max_attempts,
+                    delay_ms: retry.delay_ms,
+                    error_message,
+                    error_truncated,
+                    waiting: true,
+                    finished: false,
+                    success: None,
+                    final_error: None,
+                    final_error_truncated: false,
+                });
+                store.apply(self.run_id, RunMutation::AutoRetryStarted)?;
+                RunRpcEffect::SemanticStateChanged
+            }
+            RpcEventKind::AutoRetryEnd => {
+                let ended = event
+                    .auto_retry_end()?
+                    .expect("auto-retry-end parser is gated by event kind");
+                let (final_error, final_error_truncated) = ended
+                    .final_error
+                    .as_deref()
+                    .map(|value| self.bound_detail(value))
+                    .map_or((None, false), |(value, truncated)| (Some(value), truncated));
+                let retry = self.retry.get_or_insert_with(|| RunRetrySnapshot {
+                    attempt: ended.attempt,
+                    max_attempts: ended.attempt,
+                    delay_ms: 0,
+                    error_message: String::new(),
+                    error_truncated: false,
+                    waiting: false,
+                    finished: false,
+                    success: None,
+                    final_error: None,
+                    final_error_truncated: false,
+                });
+                retry.attempt = ended.attempt;
+                retry.waiting = false;
+                retry.finished = true;
+                retry.success = Some(ended.success);
+                retry.final_error = final_error;
+                retry.final_error_truncated = final_error_truncated;
+                store.apply(self.run_id, RunMutation::AutoRetryEnded)?;
+                RunRpcEffect::SemanticStateChanged
+            }
+            RpcEventKind::SummarizationRetryScheduled => {
+                let retry = event
+                    .summarization_retry_scheduled()?
+                    .expect("summarization-retry parser is gated by event kind");
+                let (error_message, error_truncated) = self.bound_detail(&retry.error_message);
+                self.summarization_retry = Some(RunSummarizationRetrySnapshot {
+                    attempt: retry.attempt,
+                    max_attempts: retry.max_attempts,
+                    delay_ms: retry.delay_ms,
+                    error_message,
+                    error_truncated,
+                    source: None,
+                    reason: None,
+                    finished: false,
+                });
+                store.apply(self.run_id, RunMutation::SummarizationRetryStarted)?;
+                RunRpcEffect::SemanticStateChanged
+            }
+            RpcEventKind::SummarizationRetryAttemptStart => {
+                let attempt = event
+                    .summarization_retry_attempt_start()?
+                    .expect("summarization-attempt parser is gated by event kind");
+                let (source, source_truncated) = self.bound_detail(&attempt.source);
+                let (reason, reason_truncated) = attempt
+                    .reason
+                    .as_deref()
+                    .map(|value| self.bound_detail(value))
+                    .map_or((None, false), |(value, truncated)| (Some(value), truncated));
+                let retry =
+                    self.summarization_retry
+                        .get_or_insert_with(|| RunSummarizationRetrySnapshot {
+                            attempt: 0,
+                            max_attempts: 0,
+                            delay_ms: 0,
+                            error_message: String::new(),
+                            error_truncated: false,
+                            source: None,
+                            reason: None,
+                            finished: false,
+                        });
+                retry.source = Some(source);
+                retry.reason = reason;
+                retry.error_truncated |= source_truncated || reason_truncated;
+                retry.finished = false;
+                store.apply(self.run_id, RunMutation::SummarizationRetryStarted)?;
+                RunRpcEffect::SemanticStateChanged
+            }
+            RpcEventKind::SummarizationRetryFinished => {
+                if let Some(retry) = self.summarization_retry.as_mut() {
+                    retry.finished = true;
+                }
+                store.apply(self.run_id, RunMutation::SummarizationRetryEnded)?;
+                RunRpcEffect::SemanticStateChanged
+            }
+            RpcEventKind::ExtensionError => {
+                let error = event
+                    .extension_error()?
+                    .expect("extension-error parser is gated by event kind");
+                let (extension_path, path_truncated) = self.bound_detail(&error.extension_path);
+                let (event_name, event_truncated) = self.bound_detail(&error.event);
+                let (detail, detail_truncated) = self.bound_detail(&error.error);
+                self.last_extension_error = Some(RunExtensionErrorSnapshot {
+                    extension_path,
+                    event: event_name,
+                    error: detail,
+                    detail_truncated: path_truncated || event_truncated || detail_truncated,
+                });
+                RunRpcEffect::SemanticStateChanged
+            }
             RpcEventKind::QueueUpdate => {
-                let counts = event
-                    .queue_update_counts()?
+                let observed = event
+                    .queue_update_recovery(self.limits)?
                     .expect("queue_update parser is gated by event kind");
                 store.apply(
                     self.run_id,
                     RunMutation::QueueChanged(QueueState {
-                        steering: counts.steering,
-                        follow_up: counts.follow_up,
+                        steering: observed.steering.len(),
+                        follow_up: observed.follow_up.len(),
                     }),
                 )?;
+                self.observed_queue_recovery = observed;
                 RunRpcEffect::SemanticStateChanged
             }
             RpcEventKind::SessionInfoChanged => {
@@ -345,6 +528,20 @@ impl RunRpcController {
                 };
                 RunRpcEffect::AssistantBlockUpdated { content_index }
             }
+            RpcEventKind::MessageEnd => {
+                let blocks = event
+                    .assistant_message_end()?
+                    .expect("message-end parser is gated by event kind");
+                self.live
+                    .reconcile_assistant_message(blocks.into_iter().map(|block| {
+                        (
+                            block.content_index,
+                            assistant_kind(block.kind),
+                            block.content,
+                        )
+                    }))?;
+                RunRpcEffect::SemanticStateChanged
+            }
             RpcEventKind::ToolExecutionStart => {
                 let update = event
                     .tool_execution_start()?
@@ -371,6 +568,10 @@ impl RunRpcController {
                 self.live
                     .replace_tool_output(&update.tool_call_id, &update.final_text)?;
                 let preview = self.live.finish_tool(&update.tool_call_id)?;
+                // Tool semantics are Pi-owned and extensions may define tools,
+                // so do not guess which names mutate files. Any completed tool
+                // is a conservative repository-review invalidation boundary.
+                store.apply(self.run_id, RunMutation::ChangesMayHaveChanged)?;
                 RunRpcEffect::ToolFinished {
                     tool_call_id: update.tool_call_id,
                     tool_name: update.tool_name,
@@ -466,6 +667,11 @@ impl RunRpcController {
             live: self.live.snapshot(),
             extension_ui: self.extension_ui.snapshot(),
             pending_dialogs,
+            compaction: self.compaction.clone(),
+            retry: self.retry.clone(),
+            summarization_retry: self.summarization_retry.clone(),
+            last_extension_error: self.last_extension_error.clone(),
+            stream_stalled: self.stream_stalled,
         }
     }
 
@@ -473,6 +679,31 @@ impl RunRpcController {
         self.pending_dialogs
             .values()
             .map(|pending| &pending.request)
+    }
+
+    #[must_use]
+    pub fn has_pending_extension_dialogs(&self) -> bool {
+        !self.pending_dialogs.is_empty()
+    }
+
+    /// Private bounded copy of the most recent user-visible Pi queue event.
+    /// It is intentionally excluded from hydration and is used only when Pi
+    /// explicitly rejects native `clear_queue`, after which Stop terminates
+    /// the exact process so queued work cannot continue.
+    #[must_use]
+    pub fn observed_queue_recovery(&self) -> &ClearQueueResult {
+        &self.observed_queue_recovery
+    }
+
+    /// Sets a local, non-authoritative quiet-stream advisory. This bit is
+    /// presentation/recovery guidance only and never changes Pi commands or
+    /// process lifecycle state.
+    pub fn set_stream_stalled(&mut self, stalled: bool) -> bool {
+        if self.stream_stalled == stalled {
+            return false;
+        }
+        self.stream_stalled = stalled;
+        true
     }
 
     #[must_use]
@@ -494,6 +725,17 @@ impl RunRpcController {
         self.pending_dialogs.clear();
         self.pending_dialog_bytes = 0;
         self.session_sync_request = None;
+        self.compaction = None;
+        self.retry = None;
+        self.summarization_retry = None;
+        self.stream_stalled = false;
+        self.observed_queue_recovery = ClearQueueResult::default();
+    }
+
+    fn bound_detail(&self, value: &str) -> (String, bool) {
+        let mut bounded = BoundedText::new(self.limits.max_failure_detail_bytes);
+        bounded.replace(value);
+        (bounded.as_str().to_owned(), bounded.dropped_bytes() > 0)
     }
 
     /// Call only after an extension_ui_response was successfully written. The
@@ -1113,6 +1355,7 @@ mod tests {
             )
             .expect("bash response");
         assert_eq!(completed.outcome, RpcResponseOutcome::Accepted);
+        assert_eq!(store.get(run_id).expect("run").change_revision(), 1);
         assert_eq!(
             completed
                 .direct_bash_preview
@@ -1164,6 +1407,51 @@ mod tests {
     }
 
     #[test]
+    fn message_end_reconciles_final_assistant_content_over_stream_preview() {
+        let run_id = RunId::new();
+        let mut store = ready_store(run_id);
+        let mut controller = RunRpcController::new(run_id, RuntimeLimits::default());
+
+        controller
+            .apply_event(&event(br#"{"type":"message_start"}"#), &mut store)
+            .expect("message start");
+        controller
+            .apply_event(
+                &event(br#"{"type":"message_update","assistantMessageEvent":{"type":"text_start","contentIndex":0}}"#),
+                &mut store,
+            )
+            .expect("text start");
+        controller
+            .apply_event(
+                &event(br#"{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"stale preview"}}"#),
+                &mut store,
+            )
+            .expect("text delta");
+
+        let effect = controller
+            .apply_event(
+                &event(br#"{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"final answer"},{"type":"thinking","thinking":"final reasoning"}]}}"#),
+                &mut store,
+            )
+            .expect("message end");
+        assert!(matches!(effect, RunRpcEffect::SemanticStateChanged));
+        let snapshot = controller.live_projection().snapshot();
+        assert_eq!(snapshot.assistant_blocks.len(), 2);
+        assert_eq!(snapshot.assistant_blocks[0].text, "final answer");
+        assert_eq!(
+            snapshot.assistant_blocks[0].kind,
+            AssistantContentKind::Text
+        );
+        assert!(snapshot.assistant_blocks[0].complete);
+        assert_eq!(snapshot.assistant_blocks[1].text, "final reasoning");
+        assert_eq!(
+            snapshot.assistant_blocks[1].kind,
+            AssistantContentKind::Thinking
+        );
+        assert!(snapshot.assistant_blocks[1].complete);
+    }
+
+    #[test]
     fn event_projection_preserves_accumulated_tool_output_and_semantic_state() {
         let run_id = RunId::new();
         let mut store = ready_store(run_id);
@@ -1204,6 +1492,7 @@ mod tests {
             panic!("expected finished tool");
         };
         assert_eq!(preview.output.as_str(), "final");
+        assert_eq!(store.get(run_id).expect("run").change_revision(), 1);
 
         controller
             .apply_event(
@@ -1218,12 +1507,158 @@ mod tests {
                 follow_up: 2
             }
         );
+        assert_eq!(controller.observed_queue_recovery().steering, ["one"]);
+        assert_eq!(
+            controller.observed_queue_recovery().follow_up,
+            ["two", "three"]
+        );
+        assert_eq!(
+            serde_json::to_value(controller.hydration_snapshot(Instant::now()))
+                .expect("serialize hydration")
+                .get("observedQueueRecovery"),
+            None,
+            "emergency queue text must never enter renderer hydration"
+        );
         controller
             .apply_event(&event(br#"{"type":"agent_settled"}"#), &mut store)
             .expect("settled");
         assert_eq!(
             store.get(run_id).expect("run").activity_state(),
             ActivityState::Idle
+        );
+    }
+
+    #[test]
+    fn retry_summarization_and_extension_errors_are_bounded_in_hydration() {
+        let run_id = RunId::new();
+        let mut store = ready_store(run_id);
+        let limits = RuntimeLimits {
+            max_failure_detail_bytes: 8,
+            ..RuntimeLimits::default()
+        };
+        let mut controller = RunRpcController::new(run_id, limits);
+
+        controller
+            .apply_event(
+                &event(br#"{"type":"auto_retry_start","attempt":1,"maxAttempts":4,"delayMs":2000,"errorMessage":"retry-detail-is-long"}"#),
+                &mut store,
+            )
+            .expect("retry scheduled");
+        assert!(store.get(run_id).expect("run").is_retry_waiting());
+        let snapshot = controller.hydration_snapshot(Instant::now());
+        let retry = snapshot.retry.expect("retry snapshot");
+        assert!(retry.waiting);
+        assert_eq!(retry.attempt, 1);
+        assert!(retry.error_truncated);
+        assert!(retry.error_message.len() <= 8);
+
+        controller
+            .apply_event(&event(br#"{"type":"agent_start"}"#), &mut store)
+            .expect("retry attempt start");
+        assert!(!store.get(run_id).expect("run").is_retry_waiting());
+        assert!(
+            !controller
+                .hydration_snapshot(Instant::now())
+                .retry
+                .expect("retry remains visible while attempt runs")
+                .waiting
+        );
+
+        controller
+            .apply_event(
+                &event(br#"{"type":"summarization_retry_scheduled","attempt":2,"maxAttempts":3,"delayMs":500,"errorMessage":"summary-detail-is-long"}"#),
+                &mut store,
+            )
+            .expect("summary retry");
+        assert!(store.get(run_id).expect("run").has_summarization_retry());
+
+        controller
+            .apply_event(
+                &event(br#"{"type":"extension_error","extensionPath":"C:/extensions/very-long-name.ts","event":"session_start","error":"extension-detail-is-long"}"#),
+                &mut store,
+            )
+            .expect("extension error");
+        let snapshot = controller.hydration_snapshot(Instant::now());
+        let summary = snapshot
+            .summarization_retry
+            .expect("summary retry snapshot");
+        assert!(summary.error_truncated);
+        assert!(summary.error_message.len() <= 8);
+        let extension = snapshot
+            .last_extension_error
+            .expect("extension error snapshot");
+        assert!(extension.detail_truncated);
+        assert!(extension.extension_path.len() <= 8);
+        assert!(extension.error.len() <= 8);
+
+        controller
+            .apply_event(
+                &event(br#"{"type":"summarization_retry_finished"}"#),
+                &mut store,
+            )
+            .expect("summary retry finished");
+        assert!(!store.get(run_id).expect("run").has_summarization_retry());
+        assert!(
+            controller
+                .hydration_snapshot(Instant::now())
+                .summarization_retry
+                .expect("finished state retained for UI settlement")
+                .finished
+        );
+    }
+
+    #[test]
+    fn compaction_reason_and_failure_are_bounded_and_overflow_retry_clears_on_agent_restart() {
+        let run_id = RunId::new();
+        let mut store = ready_store(run_id);
+        let limits = RuntimeLimits {
+            max_failure_detail_bytes: 8,
+            ..RuntimeLimits::default()
+        };
+        let mut controller = RunRpcController::new(run_id, limits);
+
+        controller
+            .apply_event(
+                &event(br#"{"type":"compaction_start","reason":"overflow-is-long"}"#),
+                &mut store,
+            )
+            .expect("compaction start");
+        let active = controller
+            .hydration_snapshot(Instant::now())
+            .compaction
+            .expect("active compaction");
+        assert!(!active.finished);
+        assert!(active.reason_truncated);
+        assert!(active.reason.len() <= 8);
+
+        controller
+            .apply_event(
+                &event(br#"{"type":"compaction_end","reason":"overflow","result":null,"aborted":false,"willRetry":true,"errorMessage":"quota-error-is-long"}"#),
+                &mut store,
+            )
+            .expect("compaction end");
+        let ended = controller
+            .hydration_snapshot(Instant::now())
+            .compaction
+            .expect("finished compaction");
+        assert!(ended.finished);
+        assert!(ended.will_retry);
+        assert!(ended.error_truncated);
+        assert!(
+            ended
+                .error_message
+                .as_ref()
+                .is_some_and(|value| value.len() <= 8)
+        );
+
+        controller
+            .apply_event(&event(br#"{"type":"agent_start"}"#), &mut store)
+            .expect("overflow retry agent start");
+        assert!(
+            controller
+                .hydration_snapshot(Instant::now())
+                .compaction
+                .is_none()
         );
     }
 

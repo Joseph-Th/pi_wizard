@@ -11,15 +11,117 @@ type ExtensionDialogKind =
 type ComposerAction = "send" | "steer" | "followUp" | "runCommand";
 type ComposerAvailability = "ready" | "agent_working" | "blocked_by_compaction" | "unavailable";
 type ProjectTrustPolicy = "inherit" | "approve" | "ignore";
+type ContextFilesPolicy = "inherit" | "disabled";
+type ExtensionDiscoveryPolicy = "inherit" | "disabled";
 type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 type ExecutionMode = "local" | "worktree";
 type ExecutionIsolation = "local_checkout" | "git_worktree";
-type AppView = "dashboard" | "launcher" | "run";
+type AppView = "dashboard" | "automation" | "attention" | "sessions" | "launcher" | "run";
+type AutomationExecutionStatus =
+  | "starting"
+  | "running"
+  | "completed"
+  | "completed_with_errors"
+  | "cancelled"
+  | "failed";
+type AutomationStepStatus =
+  | "queued"
+  | "starting"
+  | "working"
+  | "needs_attention"
+  | "completed"
+  | "failed"
+  | "cancelled";
+
+interface AutomationChain {
+  id: string;
+  name: string;
+  prompts: string[];
+}
+
+interface AutomationStepSnapshot {
+  index: number;
+  promptPreview: string;
+  promptTruncated: boolean;
+  runId: string | null;
+  status: AutomationStepStatus;
+  error: string | null;
+}
+
+interface AutomationExecutionSnapshot {
+  id: string;
+  chainId: string;
+  chainName: string;
+  projectId: string;
+  concurrency: number;
+  worktrees: boolean;
+  supervisorEnabled: boolean;
+  supervisorRunId: string | null;
+  supervisorError: string | null;
+  supervisorCycles: number;
+  error: string | null;
+  status: AutomationExecutionStatus;
+  steps: AutomationStepSnapshot[];
+}
+
+interface DesktopAutomationSnapshot {
+  catalog: {
+    chains: AutomationChain[];
+    recoveryNotice: string | null;
+  };
+  executions: AutomationExecutionSnapshot[];
+}
+
+type AutomationChangedSignal = "catalog" | "executions";
 
 interface StartRunResult {
   runId: string;
   initialTaskSubmitted: boolean;
   initialTaskError: string | null;
+}
+
+interface ProjectResourcePreflight {
+  piSettings: boolean;
+  extensions: boolean;
+  skills: boolean;
+  prompts: boolean;
+  themes: boolean;
+  systemPrompt: boolean;
+  appendSystemPrompt: boolean;
+  ancestorAgentSkills: boolean;
+}
+
+function pathLeaf(path: string): string {
+  return path.split(/[\\/]/).filter(Boolean).at(-1) ?? path;
+}
+
+function projectResourceLabels(preflight: ProjectResourcePreflight): string[] {
+  const labels: string[] = [];
+  if (preflight.piSettings) labels.push(".pi/settings.json");
+  if (preflight.extensions) labels.push(".pi/extensions");
+  if (preflight.skills) labels.push(".pi/skills");
+  if (preflight.prompts) labels.push(".pi/prompts");
+  if (preflight.themes) labels.push(".pi/themes");
+  if (preflight.systemPrompt) labels.push(".pi/SYSTEM.md");
+  if (preflight.appendSystemPrompt) labels.push(".pi/APPEND_SYSTEM.md");
+  if (preflight.ancestorAgentSkills) labels.push("project/ancestor .agents/skills");
+  return labels;
+}
+
+function dialogTimeoutLabel(dialog: PendingExtensionDialog): string {
+  const remaining = dialog.remainingTimeoutMs;
+  if (remaining === null) return "No Pi-side timeout";
+  if (remaining < 1_000) return "Timed request · <1s remaining at last sync";
+  if (remaining < 60_000) return `Timed request · ~${Math.ceil(remaining / 1_000)}s remaining at last sync`;
+  return `Timed request · ~${Math.ceil(remaining / 60_000)}m remaining at last sync`;
+}
+
+interface ProjectLaunchOptions {
+  currentModel: ModelSummary | null;
+  currentThinkingLevel: ThinkingLevel;
+  models: ModelSummary[];
+  thinkingLevels: ThinkingLevel[];
+  clearQueueSupported: boolean;
 }
 
 interface DesktopProjectRecord {
@@ -78,6 +180,38 @@ interface RuntimeCapacitySnapshot {
   liveRunLimit: number;
   configuredMaxLiveRuns: number;
   preferenceRecoveryNotice: string | null;
+}
+
+interface RunRuntimeDiagnostics {
+  runId: string;
+  processOwned: boolean;
+  retainedRuntimeStateBytes: number;
+  pendingRpcRequests: number;
+  activeRpcCommands: number;
+  pendingExtensionDialogs: number;
+  assistantBlocks: number;
+  activeTools: number;
+  activeDirectBash: number;
+  uiBacklogBytes: number;
+  uiBacklogFrames: number;
+  uiCoalescedFrames: number;
+  uiDroppedDisplayFrames: number;
+  uiDeliveredEvents: number;
+  uiRehydrateRequired: boolean;
+  rpcEventsPerSecond: number;
+  rpcEventBytesPerSecond: number;
+}
+
+interface RuntimeDiagnosticsSnapshot {
+  runtimeRevision: number;
+  ownedProcesses: number;
+  runs: RunRuntimeDiagnostics[];
+}
+
+interface DesktopRuntimeDiagnostics {
+  runtime: RuntimeDiagnosticsSnapshot;
+  activeGitReviewJobs: number;
+  activeSessionCatalogJobs: number;
 }
 
 interface AssistantContentSnapshot {
@@ -180,6 +314,47 @@ interface ExtensionUiSnapshot {
   title: string | null;
 }
 
+interface RunRetrySnapshot {
+  attempt: number;
+  maxAttempts: number;
+  delayMs: number;
+  errorMessage: string;
+  errorTruncated: boolean;
+  waiting: boolean;
+  finished: boolean;
+  success: boolean | null;
+  finalError: string | null;
+  finalErrorTruncated: boolean;
+}
+
+interface RunSummarizationRetrySnapshot {
+  attempt: number;
+  maxAttempts: number;
+  delayMs: number;
+  errorMessage: string;
+  errorTruncated: boolean;
+  source: string | null;
+  reason: string | null;
+  finished: boolean;
+}
+
+interface RunCompactionSnapshot {
+  reason: string;
+  reasonTruncated: boolean;
+  finished: boolean;
+  aborted: boolean;
+  willRetry: boolean;
+  errorMessage: string | null;
+  errorTruncated: boolean;
+}
+
+interface RunExtensionErrorSnapshot {
+  extensionPath: string;
+  event: string;
+  error: string;
+  detailTruncated: boolean;
+}
+
 interface GitWorktreeIdentity {
   repositoryRoot: string;
   worktreeRoot: string;
@@ -201,7 +376,15 @@ interface RunHydration {
     executionIsolation: ExecutionIsolation;
     worktree: GitWorktreeIdentity | null;
     projectTrust: ProjectTrustPolicy;
+    startedUnixMs: number;
+    terminalUnixMs: number | null;
+    changeRevision: number;
     agentWorking: boolean;
+    compacting: boolean;
+    queue: {
+      steering: number;
+      followUp: number;
+    };
     process: "starting" | "ready" | "stopping" | "exited" | "failed" | "quarantined";
     exitCode: number | null;
     failure: RunFailureSnapshot | null;
@@ -214,6 +397,7 @@ interface RunHydration {
       thinkingLevel: ThinkingLevel | null;
       autoCompactionEnabled: boolean | null;
       messageCount: number | null;
+      pendingMessageCount: number | null;
     };
   };
   draft: DraftSnapshot | null;
@@ -225,6 +409,11 @@ interface RunHydration {
     pendingDialogs: PendingExtensionDialog[];
     live: LiveProjectionSnapshot;
     extensionUi: ExtensionUiSnapshot;
+    compaction: RunCompactionSnapshot | null;
+    retry: RunRetrySnapshot | null;
+    summarizationRetry: RunSummarizationRetrySnapshot | null;
+    lastExtensionError: RunExtensionErrorSnapshot | null;
+    streamStalled: boolean;
   } | null;
 }
 
@@ -345,7 +534,15 @@ interface SessionCatalogPage {
   candidateFiles: number;
   scannedFiles: number;
   truncated: boolean;
+  nextCursor: SessionCatalogCursor | null;
   directorySource: "environment" | "settings" | "default";
+}
+
+interface SessionCatalogCursor {
+  modifiedUnixMs: number;
+  path: string;
+  scopeSha256: string;
+  snapshotSha256: string;
 }
 
 interface SessionHistoryCursor {
@@ -408,6 +605,8 @@ interface RuntimeHydration {
   runtimeRevision: number;
   runs: RunHydration[];
 }
+
+const RUNTIME_HYDRATION_SCHEMA_VERSION = 9;
 
 function historyLabel(item: SessionTimelineItem): string {
   if (item.title) return item.title;
@@ -624,13 +823,21 @@ function HistoryTimeline(props: {
               {(loaded) => (
                 <div class="history-page">
                   <For each={loaded.page.items}>
-                    {(item) => (
-                      <article
-                        class={`history-item history-${item.kind}${item.isError ? " history-error" : ""}`}
-                      >
-                        <header>
+                    {(item) => {
+                      const collapseCompletedOutput =
+                        (item.kind === "tool" || item.kind === "bash") &&
+                        !item.isError &&
+                        item.text.length > 0;
+                      const itemClass = `history-item history-${item.kind}${item.isError ? " history-error" : ""}`;
+                      const itemHeader = (
+                        <>
                           <strong>{historyLabel(item)}</strong>
                           <div>
+                            <Show when={collapseCompletedOutput}>
+                              <span>
+                                Completed{item.textTruncated ? " · bounded output" : " · show output"}
+                              </span>
+                            </Show>
                             <Show when={historyTimestamp(item.timestamp)}>
                               {(timestamp) => <span>{timestamp()}</span>}
                             </Show>
@@ -644,15 +851,28 @@ function HistoryTimeline(props: {
                               </button>
                             </Show>
                           </div>
-                        </header>
-                        <Show when={item.text}>
+                        </>
+                      );
+                      return collapseCompletedOutput ? (
+                        <details class={`${itemClass} history-collapsible`} data-timeline-row="true">
+                          <summary>{itemHeader}</summary>
                           <pre>{item.text}</pre>
-                        </Show>
-                        <Show when={item.textTruncated}>
-                          <span class="truncation-note">History preview truncated</span>
-                        </Show>
-                      </article>
-                    )}
+                          <Show when={item.textTruncated}>
+                            <span class="truncation-note">History preview truncated</span>
+                          </Show>
+                        </details>
+                      ) : (
+                        <article class={itemClass} data-timeline-row="true">
+                          <header>{itemHeader}</header>
+                          <Show when={item.text}>
+                            <pre>{item.text}</pre>
+                          </Show>
+                          <Show when={item.textTruncated}>
+                            <span class="truncation-note">History preview truncated</span>
+                          </Show>
+                        </article>
+                      );
+                    }}
                   </For>
                   <Show when={loaded.page.items.length === 0}>
                     <p class="history-note">
@@ -680,6 +900,33 @@ function HistoryTimeline(props: {
   );
 }
 
+function runModelLabel(run: RunHydration): string {
+  const model = run.run.session.model;
+  if (!model) return "Model pending";
+  return model.name ? `${model.name} · ${model.provider}` : `${model.provider}/${model.id}`;
+}
+
+function runThinkingLabel(run: RunHydration): string {
+  return run.run.session.thinkingLevel ? `Thinking ${run.run.session.thinkingLevel}` : "Thinking pending";
+}
+
+function formatElapsedDuration(elapsedMs: number): string {
+  const totalMinutes = Math.floor(Math.max(0, elapsedMs) / 60_000);
+  if (totalMinutes < 1) return "<1m";
+  if (totalMinutes < 60) return `${totalMinutes}m`;
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  if (hours < 24) return minutes === 0 ? `${hours}h` : `${hours}h ${minutes}m`;
+  const days = Math.floor(hours / 24);
+  const remainingHours = hours % 24;
+  return remainingHours === 0 ? `${days}d` : `${days}d ${remainingHours}h`;
+}
+
+function runElapsedLabel(run: RunHydration, nowUnixMs: number): string {
+  const end = run.run.terminalUnixMs ?? nowUnixMs;
+  return `${formatElapsedDuration(end - run.run.startedUnixMs)} elapsed`;
+}
+
 function isTerminalRun(run: RunHydration): boolean {
   return ["exited", "failed", "quarantined"].includes(run.run.process);
 }
@@ -689,23 +936,11 @@ function SessionTreeInspector(props: {
   forkDisabled: boolean;
   onFork: (entryId: string) => Promise<unknown>;
 }) {
-  const [open, setOpen] = createSignal(false);
   const [tree, setTree] = createSignal<SessionTreeSnapshot>();
   const [loading, setLoading] = createSignal(false);
   const [error, setError] = createSignal<string>();
   let requestSequence = 0;
   let loadedSessionId: string | undefined;
-
-  createEffect(() => {
-    const sessionId = props.run.run.session.sessionId ?? undefined;
-    if (sessionId === loadedSessionId) return;
-    loadedSessionId = sessionId;
-    requestSequence += 1;
-    setOpen(false);
-    setTree(undefined);
-    setLoading(false);
-    setError(undefined);
-  });
 
   const load = async () => {
     const sessionId = props.run.run.session.sessionId;
@@ -731,14 +966,20 @@ function SessionTreeInspector(props: {
     }
   };
 
-  const toggle = () => {
-    if (open()) {
-      setOpen(false);
-      return;
-    }
-    setOpen(true);
-    if (!tree()) void load();
-  };
+  createEffect(() => {
+    const sessionId = props.run.run.session.sessionId ?? undefined;
+    if (sessionId === loadedSessionId) return;
+    loadedSessionId = sessionId;
+    requestSequence += 1;
+    setTree(undefined);
+    setLoading(false);
+    setError(undefined);
+    if (sessionId) void load();
+  });
+
+  onCleanup(() => {
+    requestSequence += 1;
+  });
 
   const nodeKind = (node: SessionTreeNode) => node.role ?? node.entryType.replaceAll("_", " ");
 
@@ -746,10 +987,8 @@ function SessionTreeInspector(props: {
     <Show when={props.run.run.session.sessionId}>
       <section class="session-tree-inspector" aria-label="Pi session tree">
         <div class="session-tree-toolbar">
-          <button type="button" onClick={toggle}>
-            {open() ? "Hide session tree" : "Session tree"}
-          </button>
-          <Show when={open() && tree()}>
+          <strong>Session tree</strong>
+          <Show when={tree()}>
             {(snapshot) => (
               <span>
                 {snapshot().nodes.length} entries
@@ -757,78 +996,74 @@ function SessionTreeInspector(props: {
               </span>
             )}
           </Show>
-          <Show when={open()}>
-            <button
-              type="button"
-              disabled={loading() || props.run.run.process !== "ready"}
-              onClick={() => void load()}
-            >
-              {loading() ? "Reading tree" : "Refresh"}
-            </button>
-          </Show>
+          <button
+            type="button"
+            disabled={loading() || props.run.run.process !== "ready"}
+            onClick={() => void load()}
+          >
+            {loading() ? "Reading tree" : "Refresh"}
+          </button>
         </div>
-        <Show when={open()}>
-          <Show when={tree()} fallback={<p class="history-note">Loading Pi session tree.</p>}>
-            {(snapshot) => (
-              <div class="session-tree-list">
-                <For each={snapshot().nodes}>
-                  {(node) => {
-                    const isLeaf = () => snapshot().leafId === node.id;
-                    const timestamp = () => historyTimestamp(node.timestamp ?? node.labelTimestamp);
-                    return (
-                      <article
-                        class={`session-tree-node${isLeaf() ? " active-leaf" : ""}`}
-                        style={`--tree-depth: ${Math.min(node.depth, 24)}`}
-                      >
-                        <div class="session-tree-node-main">
-                          <div>
-                            <strong>{node.label ?? nodeKind(node)}</strong>
-                            <span>
-                              {nodeKind(node)} · {node.id.slice(0, 12)}
-                              {node.childCount > 1 ? ` · ${node.childCount} branches` : ""}
-                              {isLeaf() ? " · active leaf" : ""}
-                            </span>
-                          </div>
-                          <div class="session-tree-node-actions">
-                            <Show when={timestamp()}>{(value) => <span>{value()}</span>}</Show>
-                            <Show when={node.entryType === "message" && node.role === "user"}>
-                              <button
-                                type="button"
-                                disabled={props.forkDisabled || loading()}
-                                onClick={() => void props.onFork(node.id)}
-                              >
-                                Fork here
-                              </button>
-                            </Show>
-                          </div>
+        <Show when={tree()} fallback={<p class="history-note">Loading Pi session tree.</p>}>
+          {(snapshot) => (
+            <div class="session-tree-list">
+              <For each={snapshot().nodes}>
+                {(node) => {
+                  const isLeaf = () => snapshot().leafId === node.id;
+                  const timestamp = () => historyTimestamp(node.timestamp ?? node.labelTimestamp);
+                  const depthClass = `tree-depth-${Math.min(node.depth, 24)}`;
+                  return (
+                    <article
+                      class={`session-tree-node ${depthClass}${isLeaf() ? " active-leaf" : ""}`}
+                    >
+                      <div class="session-tree-node-main">
+                        <div>
+                          <strong>{node.label ?? nodeKind(node)}</strong>
+                          <span>
+                            {nodeKind(node)} · {node.id.slice(0, 12)}
+                            {node.childCount > 1 ? ` · ${node.childCount} branches` : ""}
+                            {isLeaf() ? " · active leaf" : ""}
+                          </span>
                         </div>
-                        <Show when={node.preview}>
-                          {(preview) => <pre>{preview()}</pre>}
-                        </Show>
-                        <Show when={node.previewTruncated}>
-                          <span class="truncation-note">Tree preview truncated</span>
-                        </Show>
-                      </article>
-                    );
-                  }}
-                </For>
-                <Show when={snapshot().nodes.length === 0}>
-                  <p class="history-note">Pi returned an empty session tree.</p>
-                </Show>
-                <Show when={snapshot().truncated}>
-                  <p class="history-note">
-                    The inspector stopped at the configured renderer tree limit. Session history remains authoritative in Pi.
-                  </p>
-                </Show>
-                <span class="history-footnote">
-                  Retained {formatBytes(snapshot().encodedBytes)} of bounded tree metadata.
-                </span>
-              </div>
-            )}
-          </Show>
-          <Show when={error()}>
-            {(message) => <p class="error">Session tree failed: {message()}</p>}
-          </Show>
+                        <div class="session-tree-node-actions">
+                          <Show when={timestamp()}>{(value) => <span>{value()}</span>}</Show>
+                          <Show when={node.entryType === "message" && node.role === "user"}>
+                            <button
+                              type="button"
+                              disabled={props.forkDisabled || loading()}
+                              onClick={() => void props.onFork(node.id)}
+                            >
+                              Fork here
+                            </button>
+                          </Show>
+                        </div>
+                      </div>
+                      <Show when={node.preview}>
+                        {(preview) => <pre>{preview()}</pre>}
+                      </Show>
+                      <Show when={node.previewTruncated}>
+                        <span class="truncation-note">Tree preview truncated</span>
+                      </Show>
+                    </article>
+                  );
+                }}
+              </For>
+              <Show when={snapshot().nodes.length === 0}>
+                <p class="history-note">Pi returned an empty session tree.</p>
+              </Show>
+              <Show when={snapshot().truncated}>
+                <p class="history-note">
+                  The inspector stopped at the configured renderer tree limit. Session history remains authoritative in Pi.
+                </p>
+              </Show>
+              <span class="history-footnote">
+                Retained {formatBytes(snapshot().encodedBytes)} of bounded tree metadata.
+              </span>
+            </div>
+          )}
+        </Show>
+        <Show when={error()}>
+          {(message) => <p class="error">Session tree failed: {message()}</p>}
         </Show>
       </section>
     </Show>
@@ -1021,6 +1256,7 @@ function DroppedBytes(props: { count: number }) {
 }
 
 function LiveTimeline(props: { live: LiveProjectionSnapshot | undefined }) {
+  const VERBOSE_THINKING_BYTES = 480;
   const hasContent = () =>
     Boolean(
       props.live &&
@@ -1033,26 +1269,43 @@ function LiveTimeline(props: { live: LiveProjectionSnapshot | undefined }) {
     <Show when={hasContent()}>
       <section class="live-timeline" aria-label="Live Pi output">
         <For each={props.live?.assistantBlocks ?? []}>
-          {(block) => (
-            <article class={`live-block live-${block.kind}`}>
-              <header>
-                <strong>
-                  {block.kind === "thinking"
-                    ? "Thinking"
-                    : block.kind === "tool_call"
-                      ? "Tool call"
-                      : "Assistant"}
-                </strong>
-                <span>{block.complete ? "Complete" : "Streaming"}</span>
-              </header>
-              <pre>{block.text}</pre>
-              <DroppedBytes count={block.droppedBytes} />
-            </article>
-          )}
+          {(block) => {
+            const label =
+              block.kind === "thinking"
+                ? "Thinking"
+                : block.kind === "tool_call"
+                  ? "Tool call"
+                  : "Assistant";
+            const collapseThinking =
+              block.kind === "thinking" &&
+              block.complete &&
+              block.text.length > VERBOSE_THINKING_BYTES;
+            return collapseThinking ? (
+              <details class="live-block live-thinking live-thinking-collapsed" data-timeline-row="true">
+                <summary>
+                  <strong>{label}</strong>
+                  <span>
+                    Complete{block.droppedBytes > 0 ? " · bounded" : " · show reasoning"}
+                  </span>
+                </summary>
+                <pre>{block.text}</pre>
+                <DroppedBytes count={block.droppedBytes} />
+              </details>
+            ) : (
+              <article class={`live-block live-${block.kind}`} data-timeline-row="true">
+                <header>
+                  <strong>{label}</strong>
+                  <span>{block.complete ? "Complete" : "Streaming"}</span>
+                </header>
+                <pre>{block.text}</pre>
+                <DroppedBytes count={block.droppedBytes} />
+              </article>
+            );
+          }}
         </For>
         <For each={props.live?.activeTools ?? []}>
           {(tool) => (
-            <article class="live-block live-tool">
+            <article class="live-block live-tool" data-timeline-row="true">
               <header>
                 <strong>{tool.toolName}</strong>
                 <span>Tool running</span>
@@ -1064,7 +1317,7 @@ function LiveTimeline(props: { live: LiveProjectionSnapshot | undefined }) {
         </For>
         <For each={props.live?.directBash ?? []}>
           {(bash) => (
-            <article class="live-block live-bash">
+            <article class="live-block live-bash" data-timeline-row="true">
               <header>
                 <strong>Shell</strong>
                 <span>{bash.requestId.slice(0, 8)}</span>
@@ -1108,11 +1361,15 @@ function ComposerCard(props: {
   state: ComposerState;
   attachmentLimits: RuntimeAttachmentLimits | undefined;
   onResolved: () => Promise<unknown>;
+  onReviewSummary: (runId: string, summary: GitReviewSummary) => void;
 }) {
+  type InspectorKind = "details" | "changes" | "tree";
+  const [activeInspector, setActiveInspector] = createSignal<InspectorKind>();
   const [submitError, setSubmitError] = createSignal<string>();
   const [submitting, setSubmitting] = createSignal(false);
   const [stopping, setStopping] = createSignal(false);
   const [stopError, setStopError] = createSignal<string>();
+  const [stopNotice, setStopNotice] = createSignal<string>();
   const [controlBusy, setControlBusy] = createSignal(false);
   const [controlError, setControlError] = createSignal<string>();
   const [attaching, setAttaching] = createSignal(false);
@@ -1121,7 +1378,10 @@ function ComposerCard(props: {
   const [statsBusy, setStatsBusy] = createSignal(false);
   const [statsError, setStatsError] = createSignal<string>();
   const [lastCompaction, setLastCompaction] = createSignal<CompactionResult>();
+  const [lastAutoRetryCommand, setLastAutoRetryCommand] = createSignal<boolean>();
+  const [commandSuggestionIndex, setCommandSuggestionIndex] = createSignal(0);
   const [reviewSummary, setReviewSummary] = createSignal<GitReviewSummary>();
+  const [reviewChangeRevision, setReviewChangeRevision] = createSignal<number>();
   const [reviewBusy, setReviewBusy] = createSignal(false);
   const [reviewError, setReviewError] = createSignal<string>();
   const [reviewDiff, setReviewDiff] = createSignal<GitFileDiffPage>();
@@ -1137,6 +1397,7 @@ function ComposerCard(props: {
   let reviewRequestSequence = 0;
   let reviewDiffRequestSequence = 0;
   let fileInput!: HTMLInputElement;
+  let commandSuggestionList: HTMLDivElement | undefined;
 
   createEffect(() => props.state.applyBackend(props.run.draft));
   onCleanup(() => {
@@ -1160,6 +1421,45 @@ function ComposerCard(props: {
     if (!name) return undefined;
     return commands().find((command) => command.name === name);
   };
+
+  const setAutoRetry = async (enabled: boolean) => {
+    const accepted = await runControl("runtime_set_auto_retry", {
+      runId: props.run.run.id,
+      enabled,
+    });
+    if (accepted) setLastAutoRetryCommand(enabled);
+  };
+
+  const toggleInspector = (inspector: InspectorKind) => {
+    const current = activeInspector();
+    const next = current === inspector ? undefined : inspector;
+    if (current === "changes" && next !== "changes" && (reviewBusy() || reviewDiffPath())) {
+      void cancelReview();
+    }
+    setActiveInspector(next);
+    if (
+      next === "changes" &&
+      (!reviewSummary() || reviewChangeRevision() !== props.run.run.changeRevision) &&
+      !reviewBusy()
+    )
+      void refreshReview();
+  };
+
+  createEffect(() => {
+    const currentRevision = props.run.run.changeRevision;
+    const reviewedRevision = reviewChangeRevision();
+    if (reviewedRevision === undefined || reviewedRevision === currentRevision) return;
+
+    // A known Pi tool/Bash completion invalidates detail derived from the old
+    // working-tree observation. Keep the cheap summary visibly stale, but do
+    // not launch Git until the user explicitly opens/refreshes Changes.
+    reviewDiffRequestSequence += 1;
+    setReviewDiff(undefined);
+    setReviewDiffPath(undefined);
+    setReviewDiffCursor(null);
+    setReviewDiffBackCursors([]);
+    if (reviewBusy()) void cancelReview();
+  });
   const runningExtensionCommand = () =>
     props.run.composerAvailability === "agent_working" && exactCommand()?.source === "extension";
   const commandSuggestions = () => {
@@ -1172,6 +1472,22 @@ function ComposerCard(props: {
       .filter((command) => command.name.toLowerCase().startsWith(query))
       .slice(0, 8);
   };
+  const stageCommandSuggestion = (command: CommandSummary) => {
+    props.state.edit(`/${command.name} `);
+    setCommandSuggestionIndex(0);
+  };
+  const selectCommandSuggestion = (next: number) => {
+    setCommandSuggestionIndex(next);
+    queueMicrotask(() => {
+      commandSuggestionList
+        ?.querySelector<HTMLElement>(`[data-command-index="${next}"]`)
+        ?.scrollIntoView({ block: "nearest" });
+    });
+  };
+  createEffect(() => {
+    const count = commandSuggestions().length;
+    setCommandSuggestionIndex((current) => (count === 0 ? 0 : Math.min(current, count - 1)));
+  });
 
   const currentModelKey = () => {
     const model = props.run.run.session.model;
@@ -1323,7 +1639,11 @@ function ComposerCard(props: {
       const summary = await invokeDesktop<GitReviewSummary>("runtime_git_review_summary", {
         request: { runId: props.run.run.id },
       });
-      if (sequence === reviewRequestSequence) setReviewSummary(summary);
+      if (sequence === reviewRequestSequence) {
+        setReviewSummary(summary);
+        setReviewChangeRevision(props.run.run.changeRevision);
+        props.onReviewSummary(props.run.run.id, summary);
+      }
     } catch (error) {
       if (sequence === reviewRequestSequence) setReviewError(String(error));
     } finally {
@@ -1502,6 +1822,7 @@ function ComposerCard(props: {
     if (stopping()) return;
     setStopping(true);
     setStopError(undefined);
+    setStopNotice(undefined);
     let localSyncError: string | undefined;
     try {
       try {
@@ -1522,6 +1843,14 @@ function ComposerCard(props: {
         );
       } else if (localSyncError) {
         setStopError(`Stopped, but the local draft did not synchronize first: ${localSyncError}`);
+      } else if (result.quarantined) {
+        setStopError(
+          "Stop could not confirm Pi process termination. The run is quarantined and remains visible for inspection.",
+        );
+      } else if (result.processTerminated) {
+        setStopNotice(
+          "Stop required terminating this Pi process instead of leaving the RPC child reusable. Pi session history and any recovered queued draft text remain available for Resume.",
+        );
       }
       await props.onResolved();
     } catch (error) {
@@ -1556,7 +1885,7 @@ function ComposerCard(props: {
               `Run ${props.run.run.id.slice(0, 8)}`}
           </strong>
           <span title={props.run.run.executionRoot}>
-            {props.run.run.executionIsolation === "git_worktree" ? "Git worktree" : "Local checkout"}
+            {props.run.run.executionIsolation === "git_worktree" ? "Git-isolated worktree" : "Local checkout"}
             {" · "}{props.run.run.executionRoot}
           </span>
           <Show when={props.run.run.worktree}>
@@ -1577,7 +1906,33 @@ function ComposerCard(props: {
               : props.run.draft?.durability ?? "draft unavailable"}
         </span>
       </header>
-      <div class="run-controls" aria-label="Pi session controls">
+      <nav class="inspector-tabs" aria-label="Run inspectors">
+        <button
+          type="button"
+          aria-pressed={activeInspector() === "details"}
+          onClick={() => toggleInspector("details")}
+        >
+          Run details
+        </button>
+        <button
+          type="button"
+          aria-pressed={activeInspector() === "changes"}
+          onClick={() => toggleInspector("changes")}
+        >
+          Changes
+        </button>
+        <button
+          type="button"
+          aria-pressed={activeInspector() === "tree"}
+          disabled={!props.run.run.session.sessionId || props.run.run.process !== "ready"}
+          onClick={() => toggleInspector("tree")}
+        >
+          Session tree
+        </button>
+      </nav>
+      <Show when={activeInspector() === "details"}>
+        <section class="run-details-inspector" aria-label="Run details">
+        <div class="run-controls" aria-label="Pi session controls">
         <Show when={(props.run.rpc?.capabilities.models?.length ?? 0) > 0}>
           <label>
             <span>Model</span>
@@ -1609,6 +1964,31 @@ function ComposerCard(props: {
             </select>
           </label>
         </Show>
+        <div class="auto-retry-control" role="group" aria-label="Automatic provider retry">
+          <span>Automatic retry</span>
+          <div>
+            <button
+              type="button"
+              disabled={controlDisabled()}
+              onClick={() => void setAutoRetry(true)}
+            >
+              Enable
+            </button>
+            <button
+              type="button"
+              disabled={controlDisabled()}
+              onClick={() => void setAutoRetry(false)}
+            >
+              Disable
+            </button>
+          </div>
+          <small>
+            Pi RPC does not report the current retry-enabled flag in get_state.
+            {lastAutoRetryCommand() == null
+              ? " Choose an explicit policy for this live run if needed."
+              : ` Last accepted command in this view: ${lastAutoRetryCommand() ? "enabled" : "disabled"}.`}
+          </small>
+        </div>
         <Show when={(props.run.rpc?.capabilities.thinkingLevels?.length ?? 0) > 0}>
           <label>
             <span>Thinking</span>
@@ -1695,37 +2075,40 @@ function ComposerCard(props: {
         >
           {statsBusy() ? "Reading usage" : "Session usage"}
         </button>
-      </div>
+        </div>
+        <Show when={lastCompaction()}>
+          {(result) => (
+            <p class="session-usage-note">
+              Compacted {result().tokensBefore.toLocaleString()} → approximately{" "}
+              {result().estimatedTokensAfter.toLocaleString()} context tokens.
+            </p>
+          )}
+        </Show>
+        <Show when={sessionStats()}>
+          {(stats) => (
+            <div class="session-usage" aria-label="Pi session usage">
+              <strong>
+                {stats().contextUsage?.percent == null
+                  ? "Context usage unknown"
+                  : `${stats().contextUsage!.percent!.toFixed(1)}% context`}
+              </strong>
+              <span>
+                {stats().contextUsage?.tokens == null
+                  ? `window ${stats().contextUsage?.contextWindow.toLocaleString() ?? "unknown"}`
+                  : `${stats().contextUsage!.tokens!.toLocaleString()} / ${stats().contextUsage!.contextWindow.toLocaleString()} tokens`}
+              </span>
+              <span>
+                {stats().tokens.total.toLocaleString()} session tokens · ${stats().cost.toFixed(4)}
+              </span>
+            </div>
+          )}
+        </Show>
+        <Show when={statsError()}>{(error) => <p class="error">Session usage: {error()}</p>}</Show>
+        </section>
+      </Show>
       <Show when={controlError()}>{(error) => <p class="error">Session control: {error()}</p>}</Show>
-      <Show when={lastCompaction()}>
-        {(result) => (
-          <p class="session-usage-note">
-            Compacted {result().tokensBefore.toLocaleString()} → approximately{" "}
-            {result().estimatedTokensAfter.toLocaleString()} context tokens.
-          </p>
-        )}
-      </Show>
-      <Show when={sessionStats()}>
-        {(stats) => (
-          <div class="session-usage" aria-label="Pi session usage">
-            <strong>
-              {stats().contextUsage?.percent == null
-                ? "Context usage unknown"
-                : `${stats().contextUsage!.percent!.toFixed(1)}% context`}
-            </strong>
-            <span>
-              {stats().contextUsage?.tokens == null
-                ? `window ${stats().contextUsage?.contextWindow.toLocaleString() ?? "unknown"}`
-                : `${stats().contextUsage!.tokens!.toLocaleString()} / ${stats().contextUsage!.contextWindow.toLocaleString()} tokens`}
-            </span>
-            <span>
-              {stats().tokens.total.toLocaleString()} session tokens · ${stats().cost.toFixed(4)}
-            </span>
-          </div>
-        )}
-      </Show>
-      <Show when={statsError()}>{(error) => <p class="error">Session usage: {error()}</p>}</Show>
-      <div class="git-review">
+      <Show when={activeInspector() === "changes"}>
+        <div class="git-review" aria-label="Changes inspector">
         <div class="git-review-toolbar">
           <button type="button" onClick={() => void refreshReview()}>
             {reviewBusy()
@@ -1744,6 +2127,7 @@ function ComposerCard(props: {
               <span>
                 {summary().files.length} changed file{summary().files.length === 1 ? "" : "s"}
                 {summary().truncated ? " · bounded list" : ""}
+                {reviewChangeRevision() !== props.run.run.changeRevision ? " · may be stale" : ""}
               </span>
             )}
           </Show>
@@ -1856,12 +2240,15 @@ function ComposerCard(props: {
           )}
         </Show>
         <Show when={reviewError()}>{(error) => <p class="error">Change review: {error()}</p>}</Show>
-      </div>
-      <SessionTreeInspector
-        run={props.run}
-        forkDisabled={controlDisabled() || props.run.composerAvailability !== "ready"}
-        onFork={forkSession}
-      />
+        </div>
+      </Show>
+      <Show when={activeInspector() === "tree"}>
+        <SessionTreeInspector
+          run={props.run}
+          forkDisabled={controlDisabled() || props.run.composerAvailability !== "ready"}
+          onFork={forkSession}
+        />
+      </Show>
       <HistoryTimeline
         run={props.run}
         forkDisabled={controlDisabled() || props.run.composerAvailability !== "ready"}
@@ -1891,9 +2278,35 @@ function ComposerCard(props: {
           }
           placeholder="Message Pi"
           aria-label={`Composer for run ${props.run.run.id}`}
-          aria-keyshortcuts="Control+Enter Meta+Enter"
-          onInput={(event) => props.state.edit(event.currentTarget.value)}
+          aria-keyshortcuts="Control+Enter Meta+Enter ArrowUp ArrowDown"
+          onInput={(event) => {
+            setCommandSuggestionIndex(0);
+            props.state.edit(event.currentTarget.value);
+          }}
           onKeyDown={(event) => {
+            const suggestions = commandSuggestions();
+            if (
+              !composerDisabled() &&
+              !event.ctrlKey &&
+              !event.metaKey &&
+              !event.altKey &&
+              suggestions.length > 0
+            ) {
+              if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+                event.preventDefault();
+                const direction = event.key === "ArrowDown" ? 1 : -1;
+                selectCommandSuggestion(
+                  (commandSuggestionIndex() + direction + suggestions.length) % suggestions.length,
+                );
+                return;
+              }
+              if (event.key === "Enter") {
+                event.preventDefault();
+                const selected = suggestions[commandSuggestionIndex()] ?? suggestions[0];
+                if (selected) stageCommandSuggestion(selected);
+                return;
+              }
+            }
             if (event.key !== "Enter" || (!event.ctrlKey && !event.metaKey)) return;
             event.preventDefault();
             if (composerDisabled() || imageDraftBlocked()) return;
@@ -1968,13 +2381,17 @@ function ComposerCard(props: {
         </Show>
       </div>
       <Show when={commandSuggestions().length > 0}>
-        <div class="command-suggestions" aria-label="Pi commands">
+        <div ref={commandSuggestionList} class="command-suggestions" aria-label="Pi commands">
           <For each={commandSuggestions()}>
-            {(command) => (
+            {(command, index) => (
               <button
                 type="button"
                 disabled={composerDisabled()}
-                onClick={() => props.state.edit(`/${command.name} `)}
+                data-command-index={index()}
+                class={index() === commandSuggestionIndex() ? "selected" : undefined}
+                aria-current={index() === commandSuggestionIndex() ? "true" : undefined}
+                onMouseEnter={() => setCommandSuggestionIndex(index())}
+                onClick={() => stageCommandSuggestion(command)}
               >
                 <strong>/{command.name}</strong>
                 <span>{command.source}</span>
@@ -2028,10 +2445,7 @@ function ComposerCard(props: {
           </Show>
         </Show>
         <Show
-          when={
-            props.run.composerAvailability === "agent_working" ||
-            props.run.composerAvailability === "blocked_by_compaction"
-          }
+          when={runHasStoppableActivity(props.run)}
         >
           <button type="button" disabled={stopping()} onClick={() => void stop()}>
             Stop
@@ -2047,6 +2461,7 @@ function ComposerCard(props: {
       </Show>
       <Show when={submitError()}>{(error) => <p class="error">{error()}</p>}</Show>
       <Show when={stopError()}>{(error) => <p class="error">{error()}</p>}</Show>
+      <Show when={stopNotice()}>{(notice) => <p>{notice()}</p>}</Show>
       <Show when={attachmentError()}>
         {(error) => <p class="error">Image attachment: {error()}</p>}
       </Show>
@@ -2184,7 +2599,7 @@ function ExtensionDialogCard(props: {
     <article class="dialog-card" aria-labelledby={`dialog-${request().id}`}>
       <header>
         <strong id={`dialog-${request().id}`}>{request().kind.title}</strong>
-        <span>Extension request</span>
+        <span>{dialogTimeoutLabel(props.dialog)}</span>
       </header>
       {controls()}
       <div class="dialog-actions">
@@ -2225,6 +2640,7 @@ function needsHydration(events: RuntimeUiEvent[]): boolean {
 function ProjectManager(props: {
   refreshKey: number;
   onUse: (path: string) => void;
+  onProjects: (projects: DesktopProjectRecord[]) => void;
 }) {
   const [projects, setProjects] = createSignal<DesktopProjectRecord[]>([]);
   const [loading, setLoading] = createSignal(false);
@@ -2236,7 +2652,9 @@ function ProjectManager(props: {
     setLoading(true);
     setError(undefined);
     try {
-      setProjects(await invokeDesktop<DesktopProjectRecord[]>("runtime_list_projects"));
+      const next = await invokeDesktop<DesktopProjectRecord[]>("runtime_list_projects");
+      setProjects(next);
+      props.onProjects(next);
     } catch (loadError) {
       setError(String(loadError));
     } finally {
@@ -2311,7 +2729,7 @@ function ProjectManager(props: {
               title={project.canonicalRoot}
               onClick={() => props.onUse(project.canonicalRoot)}
             >
-              <strong>{project.canonicalRoot.split(/[\\/]/).filter(Boolean).at(-1) ?? project.canonicalRoot}</strong>
+              <strong>{pathLeaf(project.canonicalRoot)}</strong>
               <span>{project.status === "present" ? project.canonicalRoot : `Detached · ${project.canonicalRoot}`}</span>
             </button>
             <Show when={project.detail}>
@@ -2336,6 +2754,253 @@ function ProjectManager(props: {
   );
 }
 
+function SessionCatalogBrowser(props: {
+  projectPath: string;
+  piReady: boolean;
+  projectTrust: ProjectTrustPolicy;
+  contextFiles: ContextFilesPolicy;
+  extensionDiscovery: ExtensionDiscoveryPolicy;
+  onStarted: (result: StartRunResult) => Promise<unknown>;
+  onOpenRun: (runId: string) => void;
+  activeRunIdForExecutionRoot: (path: string) => string | undefined;
+  activeRunIdForSessionPath: (path: string) => string | undefined;
+}) {
+  const [sessionQuery, setSessionQuery] = createSignal("");
+  const [sessionPage, setSessionPage] = createSignal<SessionCatalogPage>();
+  const [sessionCursor, setSessionCursor] = createSignal<SessionCatalogCursor | null>(null);
+  const [sessionBackCursors, setSessionBackCursors] = createSignal<
+    Array<SessionCatalogCursor | null>
+  >([]);
+  const [sessionError, setSessionError] = createSignal<string>();
+  const [sessionPagingNeedsRestart, setSessionPagingNeedsRestart] = createSignal(false);
+  const [loadingSessions, setLoadingSessions] = createSignal(false);
+  const [resumingPath, setResumingPath] = createSignal<string>();
+  let catalogProjectPath = "";
+  let catalogRequestSequence = 0;
+
+  createEffect(() => {
+    const path = props.projectPath.trim();
+    if (path === catalogProjectPath) return;
+    catalogProjectPath = path;
+    catalogRequestSequence += 1;
+    setLoadingSessions(false);
+    setSessionPage(undefined);
+    setSessionCursor(null);
+    setSessionBackCursors([]);
+    setSessionError(undefined);
+    setSessionPagingNeedsRestart(false);
+  });
+
+  const loadSessionPage = async (
+    cursor: SessionCatalogCursor | null,
+    backCursors: Array<SessionCatalogCursor | null>,
+  ) => {
+    const path = props.projectPath.trim();
+    if (!path || loadingSessions()) return;
+    const requestSequence = ++catalogRequestSequence;
+    setLoadingSessions(true);
+    setSessionError(undefined);
+    if (!cursor) setSessionPagingNeedsRestart(false);
+    try {
+      const page = await invokeDesktop<SessionCatalogPage>("runtime_list_project_sessions", {
+        request: {
+          projectPath: path,
+          query: sessionQuery().trim() || null,
+          cursor,
+        },
+      });
+      if (requestSequence !== catalogRequestSequence || props.projectPath.trim() !== path) return;
+      setSessionPage(page);
+      setSessionCursor(cursor);
+      setSessionBackCursors(backCursors);
+      setSessionPagingNeedsRestart(false);
+    } catch (catalogError) {
+      if (requestSequence !== catalogRequestSequence || props.projectPath.trim() !== path) return;
+      setSessionError(String(catalogError));
+      if (cursor) setSessionPagingNeedsRestart(true);
+    } finally {
+      if (requestSequence === catalogRequestSequence) setLoadingSessions(false);
+    }
+  };
+
+  const findSessions = async () => loadSessionPage(null, []);
+
+  const nextSessionPage = async () => {
+    const next = sessionPage()?.nextCursor;
+    if (!next || loadingSessions()) return;
+    await loadSessionPage(next, [...sessionBackCursors(), sessionCursor()]);
+  };
+
+  const previousSessionPage = async () => {
+    const back = sessionBackCursors();
+    if (back.length === 0 || loadingSessions()) return;
+    const previous = back.at(-1) ?? null;
+    await loadSessionPage(previous, back.slice(0, -1));
+  };
+
+  const resume = async (session: SessionCatalogEntry) => {
+    const path = props.projectPath.trim();
+    if (!path || resumingPath()) return;
+    const activeSessionRunId = props.activeRunIdForSessionPath(session.path);
+    if (activeSessionRunId) {
+      props.onOpenRun(activeSessionRunId);
+      return;
+    }
+    const checkoutOwnerRunId = props.activeRunIdForExecutionRoot(path);
+    if (checkoutOwnerRunId) {
+      setSessionError(
+        "This checkout is already owned by a live run. Open that run and close it before resuming another session here.",
+      );
+      return;
+    }
+    setResumingPath(session.path);
+    setSessionError(undefined);
+    try {
+      const runId = await invokeDesktop<string>("runtime_resume_project_session", {
+        request: {
+          projectPath: path,
+          projectTrust: props.projectTrust,
+          contextFiles: props.contextFiles,
+          extensionDiscovery: props.extensionDiscovery,
+          sessionPath: session.path,
+        },
+      });
+      await props.onStarted({
+        runId,
+        initialTaskSubmitted: false,
+        initialTaskError: null,
+      });
+    } catch (resumeError) {
+      setSessionError(String(resumeError));
+    } finally {
+      setResumingPath(undefined);
+    }
+  };
+
+  return (
+    <div class="session-browser">
+      <div class="session-search">
+        <input
+          value={sessionQuery()}
+          disabled={loadingSessions() || !props.piReady || props.projectPath.trim().length === 0}
+          placeholder="Search session name, prompt, or ID"
+          aria-label="Search Pi sessions"
+          onInput={(event) => {
+            setSessionQuery(event.currentTarget.value);
+            setSessionPage(undefined);
+            setSessionCursor(null);
+            setSessionBackCursors([]);
+            setSessionError(undefined);
+            setSessionPagingNeedsRestart(false);
+          }}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") {
+              event.preventDefault();
+              void findSessions();
+            }
+          }}
+        />
+        <button
+          type="button"
+          disabled={loadingSessions() || !props.piReady || props.projectPath.trim().length === 0}
+          onClick={() => void findSessions()}
+        >
+          {loadingSessions() ? "Searching" : "Find sessions"}
+        </button>
+      </div>
+      <Show when={sessionPage()}>
+        {(page) => (
+          <div class="session-results">
+            <div class="session-results-meta">
+              <span>
+                {page().sessions.length} session{page().sessions.length === 1 ? "" : "s"} · {page().directorySource}
+                {` · scanned ${page().scannedFiles.toLocaleString()} detailed previews from ${page().candidateFiles.toLocaleString()} session files`}
+              </span>
+              <Show when={page().nextCursor}>
+                <span>More older candidates are available.</span>
+              </Show>
+            </div>
+            <For each={page().sessions}>
+              {(session) => {
+                const activeSessionRunId = () => props.activeRunIdForSessionPath(session.path);
+                const checkoutOwnerRunId = () =>
+                  props.activeRunIdForExecutionRoot(props.projectPath.trim());
+                const owningRunId = () => activeSessionRunId() ?? checkoutOwnerRunId();
+                return (
+                  <article class="session-row">
+                    <div>
+                      <strong>{session.name ?? session.firstMessage ?? session.id}</strong>
+                      <span>
+                        {new Date(session.modifiedUnixMs).toLocaleString()} · {session.id.slice(0, 12)}
+                        {session.previewIncomplete ? " · bounded preview" : ""}
+                      </span>
+                    </div>
+                    <button
+                      type="button"
+                      disabled={Boolean(resumingPath())}
+                      onClick={() => {
+                        const runId = owningRunId();
+                        if (runId) {
+                          props.onOpenRun(runId);
+                        } else {
+                          void resume(session);
+                        }
+                      }}
+                    >
+                      {activeSessionRunId()
+                        ? "Open"
+                        : checkoutOwnerRunId()
+                          ? "Open live run"
+                          : resumingPath() === session.path
+                            ? "Resuming"
+                            : "Resume"}
+                    </button>
+                  </article>
+                );
+              }}
+            </For>
+            <Show when={page().sessions.length === 0}>
+              <p class="launch-note">
+                No matching Pi sessions were found on this bounded page.
+                {page().nextCursor ? " Continue to older candidates to keep searching." : ""}
+              </p>
+            </Show>
+            <div class="session-page-actions">
+              <button
+                type="button"
+                disabled={loadingSessions() || sessionBackCursors().length === 0}
+                onClick={() => void previousSessionPage()}
+              >
+                Previous
+              </button>
+              <span>Page {sessionBackCursors().length + 1}</span>
+              <button
+                type="button"
+                disabled={loadingSessions() || !page().nextCursor}
+                onClick={() => void nextSessionPage()}
+              >
+                Next older
+              </button>
+            </div>
+          </div>
+        )}
+      </Show>
+      <Show when={sessionError()}>
+        {(message) => (
+          <div class="session-lookup-error" role="alert">
+            <p class="error">Session lookup failed: {message()}</p>
+            <Show when={sessionPagingNeedsRestart()}>
+              <button type="button" disabled={loadingSessions()} onClick={() => void findSessions()}>
+                Restart from newest
+              </button>
+            </Show>
+          </div>
+        )}
+      </Show>
+    </div>
+  );
+}
+
 function ProjectLauncher(props: {
   piReady: boolean;
   preferredProjectPath: string;
@@ -2348,6 +3013,18 @@ function ProjectLauncher(props: {
   const [projectPath, setProjectPath] = createSignal("");
   const [initialTask, setInitialTask] = createSignal("");
   const [projectTrust, setProjectTrust] = createSignal<ProjectTrustPolicy>("inherit");
+  const [contextFiles, setContextFiles] = createSignal<ContextFilesPolicy>("inherit");
+  const [extensionDiscovery, setExtensionDiscovery] =
+    createSignal<ExtensionDiscoveryPolicy>("inherit");
+  const [launchOptions, setLaunchOptions] = createSignal<ProjectLaunchOptions>();
+  const [launchOptionsLoading, setLaunchOptionsLoading] = createSignal(false);
+  const [launchOptionsError, setLaunchOptionsError] = createSignal<string>();
+  const [launchModelKey, setLaunchModelKey] = createSignal("");
+  const [launchThinking, setLaunchThinking] = createSignal<ThinkingLevel | "">("");
+  const [resourcePreflight, setResourcePreflight] = createSignal<ProjectResourcePreflight>();
+  const [resourcePreflightPath, setResourcePreflightPath] = createSignal("");
+  const [resourcePreflightLoading, setResourcePreflightLoading] = createSignal(false);
+  const [resourcePreflightError, setResourcePreflightError] = createSignal<string>();
   const [executionMode, setExecutionMode] = createSignal<ExecutionMode>("local");
   const [starting, setStarting] = createSignal(false);
   const [error, setError] = createSignal<string>();
@@ -2365,25 +3042,71 @@ function ProjectLauncher(props: {
   const [reconcilingRecovery, setReconcilingRecovery] = createSignal<string>();
   const [startingRecovery, setStartingRecovery] = createSignal<string>();
   const [cleaningRecovery, setCleaningRecovery] = createSignal<string>();
-  const [sessionQuery, setSessionQuery] = createSignal("");
-  const [sessionPage, setSessionPage] = createSignal<SessionCatalogPage>();
-  const [sessionError, setSessionError] = createSignal<string>();
-  const [loadingSessions, setLoadingSessions] = createSignal(false);
-  const [resumingPath, setResumingPath] = createSignal<string>();
 
   const localCheckoutActive = () =>
     executionMode() === "local" &&
     projectPath().trim().length > 0 &&
     props.isExecutionRootActive(projectPath().trim());
 
+  const resetLaunchOptions = () => {
+    setLaunchOptions(undefined);
+    setLaunchOptionsError(undefined);
+    setLaunchModelKey("");
+    setLaunchThinking("");
+  };
+
+  const resetResourcePreflight = () => {
+    setResourcePreflight(undefined);
+    setResourcePreflightPath("");
+    setResourcePreflightError(undefined);
+  };
+
+  const probeProjectResources = async () => {
+    const path = projectPath().trim();
+    if (!path || resourcePreflightLoading()) return;
+    setResourcePreflightLoading(true);
+    setResourcePreflightError(undefined);
+    try {
+      const preflight = await invokeDesktop<ProjectResourcePreflight>(
+        "runtime_probe_project_resources",
+        { request: { projectPath: path } },
+      );
+      if (projectPath().trim() !== path) return;
+      setResourcePreflight(preflight);
+      setResourcePreflightPath(path);
+    } catch (preflightError) {
+      if (projectPath().trim() === path) setResourcePreflightError(String(preflightError));
+    } finally {
+      if (projectPath().trim() === path) setResourcePreflightLoading(false);
+    }
+  };
+
+  const selectedLaunchModel = (): { provider: string; id: string } | undefined => {
+    const value = launchModelKey();
+    if (!value) return undefined;
+    try {
+      const parsed = JSON.parse(value);
+      if (
+        Array.isArray(parsed) &&
+        parsed.length === 2 &&
+        typeof parsed[0] === "string" &&
+        typeof parsed[1] === "string"
+      ) {
+        return { provider: parsed[0], id: parsed[1] };
+      }
+    } catch {
+      // The value comes from our own option list. Treat malformed state as no override.
+    }
+    return undefined;
+  };
+
   createEffect(() => {
     const preferred = props.preferredProjectPath.trim();
     if (!preferred || preferred === projectPath()) return;
     setProjectPath(preferred);
-    setSessionPage(undefined);
-    setSessionError(undefined);
     setWorktreeBase(undefined);
     setWorktreeError(undefined);
+    resetLaunchOptions();
   });
 
   const loadRecoveries = async () => {
@@ -2443,6 +3166,37 @@ function ProjectLauncher(props: {
 
   onMount(() => void loadRecoveries());
 
+  const probeLaunchOptions = async (model?: { provider: string; id: string }) => {
+    const path = projectPath().trim();
+    if (!path || launchOptionsLoading() || !props.piReady) return;
+    setLaunchOptionsLoading(true);
+    setLaunchOptionsError(undefined);
+    try {
+      const options = await invokeDesktop<ProjectLaunchOptions>(
+        "runtime_probe_project_launch_options",
+        {
+          request: {
+            projectPath: path,
+            projectTrust: projectTrust(),
+            contextFiles: contextFiles(),
+            provider: model?.provider ?? null,
+            model: model?.id ?? null,
+          },
+        },
+      );
+      setLaunchOptions(options);
+    } catch (probeError) {
+      if (model) {
+        setLaunchOptions((current) =>
+          current ? { ...current, thinkingLevels: [] } : current,
+        );
+      }
+      setLaunchOptionsError(String(probeError));
+    } finally {
+      setLaunchOptionsLoading(false);
+    }
+  };
+
   const start = async () => {
     const path = projectPath().trim();
     if (!path || starting()) return;
@@ -2465,12 +3219,18 @@ function ProjectLauncher(props: {
     setStarting(true);
     setError(undefined);
     try {
+      const launchModel = selectedLaunchModel();
       let result: StartRunResult;
       if (executionMode() === "worktree") {
         result = await invokeDesktop<StartRunResult>("runtime_start_project_worktree", {
           request: {
             projectPath: path,
             projectTrust: projectTrust(),
+            contextFiles: contextFiles(),
+            extensionDiscovery: extensionDiscovery(),
+            provider: launchModel?.provider ?? null,
+            model: launchModel?.id ?? null,
+            thinking: launchThinking() || null,
             base: worktreeBase(),
             branch: worktreeBranch().trim(),
             worktreePath: worktreePath().trim(),
@@ -2482,6 +3242,11 @@ function ProjectLauncher(props: {
           request: {
             projectPath: path,
             projectTrust: projectTrust(),
+            contextFiles: contextFiles(),
+            extensionDiscovery: extensionDiscovery(),
+            provider: launchModel?.provider ?? null,
+            model: launchModel?.id ?? null,
+            thinking: launchThinking() || null,
             initialTask: initialTask().trim() || null,
           },
         });
@@ -2525,7 +3290,15 @@ function ProjectLauncher(props: {
     setRecoveryError(undefined);
     try {
       const runId = await invokeDesktop<string>("runtime_start_recovered_worktree", {
-        request: { id: record.id, projectTrust: projectTrust() },
+        request: {
+          id: record.id,
+          projectTrust: projectTrust(),
+          contextFiles: contextFiles(),
+          extensionDiscovery: extensionDiscovery(),
+          provider: selectedLaunchModel()?.provider ?? null,
+          model: selectedLaunchModel()?.id ?? null,
+          thinking: launchThinking() || null,
+        },
       });
       await props.onStarted({
         runId,
@@ -2568,66 +3341,12 @@ function ProjectLauncher(props: {
       const selected = await pickDirectory(projectPath());
       if (!selected) return;
       setProjectPath(selected);
-      setSessionPage(undefined);
-      setSessionError(undefined);
       setWorktreeBase(undefined);
       setWorktreeError(undefined);
+      resetLaunchOptions();
+      resetResourcePreflight();
     } catch (browseError) {
       setError(`Could not choose project folder: ${String(browseError)}`);
-    }
-  };
-
-  const findSessions = async () => {
-    const path = projectPath().trim();
-    if (!path || loadingSessions()) return;
-    setLoadingSessions(true);
-    setSessionError(undefined);
-    try {
-      const page = await invokeDesktop<SessionCatalogPage>("runtime_list_project_sessions", {
-        request: { projectPath: path, query: sessionQuery().trim() || null },
-      });
-      setSessionPage(page);
-    } catch (catalogError) {
-      setSessionError(String(catalogError));
-    } finally {
-      setLoadingSessions(false);
-    }
-  };
-
-  const resume = async (session: SessionCatalogEntry) => {
-    const path = projectPath().trim();
-    if (!path || resumingPath()) return;
-    const activeSessionRunId = props.activeRunIdForSessionPath(session.path);
-    if (activeSessionRunId) {
-      props.onOpenRun(activeSessionRunId);
-      return;
-    }
-    const checkoutOwnerRunId = props.activeRunIdForExecutionRoot(path);
-    if (checkoutOwnerRunId) {
-      setSessionError(
-        "This checkout is already owned by a live run. Open that run and close it before resuming another session here.",
-      );
-      return;
-    }
-    setResumingPath(session.path);
-    setSessionError(undefined);
-    try {
-      const runId = await invokeDesktop<string>("runtime_resume_project_session", {
-        request: {
-          projectPath: path,
-          projectTrust: projectTrust(),
-          sessionPath: session.path,
-        },
-      });
-      await props.onStarted({
-        runId,
-        initialTaskSubmitted: false,
-        initialTaskError: null,
-      });
-    } catch (resumeError) {
-      setSessionError(String(resumeError));
-    } finally {
-      setResumingPath(undefined);
     }
   };
 
@@ -2649,10 +3368,10 @@ function ProjectLauncher(props: {
               placeholder="Absolute path to an existing project"
               onInput={(event) => {
                 setProjectPath(event.currentTarget.value);
-                setSessionPage(undefined);
-                setSessionError(undefined);
                 setWorktreeBase(undefined);
                 setWorktreeError(undefined);
+                resetLaunchOptions();
+                resetResourcePreflight();
               }}
             />
             <button type="button" disabled={starting()} onClick={() => void browseProject()}>
@@ -2674,6 +3393,119 @@ function ProjectLauncher(props: {
             <option value="worktree">New Git worktree</option>
           </select>
         </label>
+        <div class="launch-resource-preflight">
+          <button
+            type="button"
+            disabled={starting() || resourcePreflightLoading() || !projectPath().trim()}
+            onClick={() => void probeProjectResources()}
+          >
+            {resourcePreflightLoading() ? "Checking project resources" : "Check project resources"}
+          </button>
+          <Show
+            when={resourcePreflightPath() === projectPath().trim() ? resourcePreflight() : undefined}
+          >
+            {(preflight) => {
+              const labels = () => projectResourceLabels(preflight());
+              return (
+                <p class="launch-note">
+                  {labels().length > 0
+                    ? `Protected Pi resources detected: ${labels().join(", ")}. `
+                    : "No protected Pi project resources were detected in this snapshot. "}
+                  {projectTrust() === "approve"
+                    ? "Approve loads protected project resources for this run."
+                    : projectTrust() === "ignore"
+                      ? "Ignore skips protected resources for this run; context files remain a separate choice."
+                      : "Use Pi saved/default trust leaves the final decision to Pi; RPC mode does not show an interactive trust prompt."}
+                </p>
+              );
+            }}
+          </Show>
+          <Show when={resourcePreflightError()}>
+            {(message) => <p class="error">Project-resource check: {message()}</p>}
+          </Show>
+        </div>
+        <div class="launch-model-controls">
+          <div class="launch-model-heading">
+            <span>New-run model and thinking</span>
+            <button
+              type="button"
+              disabled={
+                launchOptionsLoading() ||
+                starting() ||
+                !props.piReady ||
+                projectPath().trim().length === 0
+              }
+              onClick={() => void probeLaunchOptions(selectedLaunchModel())}
+            >
+              {launchOptionsLoading()
+                ? "Reading Pi options"
+                : launchOptions()
+                  ? "Refresh Pi options"
+                  : "Load Pi options"}
+            </button>
+          </div>
+          <label>
+            <span>Model</span>
+            <select
+              value={launchModelKey()}
+              disabled={starting() || launchOptionsLoading()}
+              onChange={(event) => {
+                const value = event.currentTarget.value;
+                setLaunchModelKey(value);
+                setLaunchThinking("");
+                if (!value) {
+                  void probeLaunchOptions();
+                  return;
+                }
+                const model = selectedLaunchModel();
+                if (model) void probeLaunchOptions(model);
+              }}
+            >
+              <option value="">
+                {launchOptions()?.currentModel
+                  ? `Use Pi configured model (${launchOptions()!.currentModel!.provider}/${launchOptions()!.currentModel!.id})`
+                  : "Use Pi configured model"}
+              </option>
+              <For each={launchOptions()?.models ?? []}>
+                {(model) => (
+                  <option value={JSON.stringify([model.provider, model.id])}>
+                    {model.name ? `${model.name} · ` : ""}{model.provider}/{model.id}
+                  </option>
+                )}
+              </For>
+            </select>
+          </label>
+          <label>
+            <span>Thinking</span>
+            <select
+              value={launchThinking()}
+              disabled={starting() || launchOptionsLoading()}
+              onChange={(event) =>
+                setLaunchThinking(event.currentTarget.value as ThinkingLevel | "")
+              }
+            >
+              <option value="">
+                {launchOptions()
+                  ? `Use Pi configured/default thinking (${launchOptions()!.currentThinkingLevel})`
+                  : "Use Pi configured/default thinking"}
+              </option>
+              <For each={launchOptions()?.thinkingLevels ?? []}>
+                {(level) => <option value={level}>{level}</option>}
+              </For>
+            </select>
+          </label>
+          <Show when={launchOptions() && !launchOptions()!.clearQueueSupported}>
+            <p class="launch-note">
+              This Pi build does not expose RPC queue clearing. Stop remains safe: Pi Wizard
+              preserves the latest bounded user queue event and terminates the exact Pi process so
+              queued or extension-created continuation work cannot keep running. Resume the Pi
+              session afterward to continue.
+            </p>
+          </Show>
+          <Show when={launchOptionsError()}>
+            {(message) => <p class="error">Pi launch options: {message()}</p>}
+          </Show>
+        </div>
         <label class="initial-task-field">
           <span>Initial task</span>
           <textarea
@@ -2688,13 +3520,55 @@ function ProjectLauncher(props: {
           <select
             value={projectTrust()}
             disabled={starting()}
-            onChange={(event) => setProjectTrust(event.currentTarget.value as ProjectTrustPolicy)}
+            onChange={(event) => {
+              setProjectTrust(event.currentTarget.value as ProjectTrustPolicy);
+              resetLaunchOptions();
+            }}
           >
             <option value="inherit">Use Pi saved/default trust</option>
             <option value="approve">Approve for this run</option>
             <option value="ignore">Ignore protected project resources</option>
           </select>
         </label>
+        <details class="launch-advanced">
+          <summary>Advanced launch options</summary>
+          <label>
+            <span>Context instructions</span>
+            <select
+              value={contextFiles()}
+              disabled={starting()}
+              onChange={(event) => {
+                setContextFiles(event.currentTarget.value as ContextFilesPolicy);
+                resetLaunchOptions();
+              }}
+            >
+              <option value="inherit">Load AGENTS.md / CLAUDE.md using Pi settings</option>
+              <option value="disabled">Disable context files for this launch</option>
+            </select>
+          </label>
+          <p class="launch-note">
+            This is independent from project-resource trust and applies to new, resumed, and
+            recovered runs launched from this screen.
+          </p>
+          <label>
+            <span>Extensions</span>
+            <select
+              value={extensionDiscovery()}
+              disabled={starting()}
+              onChange={(event) =>
+                setExtensionDiscovery(event.currentTarget.value as ExtensionDiscoveryPolicy)
+              }
+            >
+              <option value="inherit">Load discovered Pi extensions</option>
+              <option value="disabled">Disable extensions for this launch</option>
+            </select>
+          </label>
+          <p class="launch-note">
+            Disabling extensions maps to Pi --no-extensions for this run only. It does not change
+            Pi’s global configuration, project trust, or context-file loading. The model/thinking
+            probe is always extension-free so a broken installed extension cannot block recovery.
+          </p>
+        </details>
         <Show when={executionMode() === "worktree"}>
           <div class="worktree-plan">
             <button
@@ -2769,6 +3643,7 @@ function ProjectLauncher(props: {
           type="submit"
           disabled={
             starting() ||
+            launchOptionsLoading() ||
             !props.piReady ||
             projectPath().trim().length === 0 ||
             localCheckoutActive() ||
@@ -2908,89 +3783,224 @@ function ProjectLauncher(props: {
         </Show>
       </div>
 
-      <div class="session-browser">
-        <div class="session-search">
-          <input
-            value={sessionQuery()}
-            disabled={loadingSessions() || !props.piReady}
-            placeholder="Search session name, prompt, or ID"
-            aria-label="Search Pi sessions"
-            onInput={(event) => setSessionQuery(event.currentTarget.value)}
-            onKeyDown={(event) => {
-              if (event.key === "Enter") {
-                event.preventDefault();
-                void findSessions();
-              }
-            }}
-          />
-          <button
-            type="button"
-            disabled={loadingSessions() || !props.piReady || projectPath().trim().length === 0}
-            onClick={() => void findSessions()}
-          >
-            {loadingSessions() ? "Searching" : "Find sessions"}
-          </button>
+      <SessionCatalogBrowser
+        projectPath={projectPath()}
+        piReady={props.piReady}
+        projectTrust={projectTrust()}
+        contextFiles={contextFiles()}
+        extensionDiscovery={extensionDiscovery()}
+        onStarted={props.onStarted}
+        onOpenRun={props.onOpenRun}
+        activeRunIdForExecutionRoot={props.activeRunIdForExecutionRoot}
+        activeRunIdForSessionPath={props.activeRunIdForSessionPath}
+      />
+    </section>
+  );
+}
+
+function RecentSessionsView(props: {
+  projects: DesktopProjectRecord[];
+  preferredProjectPath: string;
+  piReady: boolean;
+  onStarted: (result: StartRunResult) => Promise<unknown>;
+  onOpenRun: (runId: string) => void;
+  onNewRun: (projectPath: string) => void;
+  activeRunIdForExecutionRoot: (path: string) => string | undefined;
+  activeRunIdForSessionPath: (path: string) => string | undefined;
+}) {
+  const [projectPath, setProjectPath] = createSignal("");
+  const [projectTrust, setProjectTrust] = createSignal<ProjectTrustPolicy>("inherit");
+  const [contextFiles, setContextFiles] = createSignal<ContextFilesPolicy>("inherit");
+  const [extensionDiscovery, setExtensionDiscovery] =
+    createSignal<ExtensionDiscoveryPolicy>("inherit");
+
+  const availableProjects = () => props.projects.filter((project) => project.status === "present");
+
+  createEffect(() => {
+    const available = availableProjects();
+    const current = projectPath();
+    if (available.some((project) => project.canonicalRoot === current)) return;
+    const preferred = props.preferredProjectPath.trim();
+    const next = available.find((project) => project.canonicalRoot === preferred) ?? available[0];
+    setProjectPath(next?.canonicalRoot ?? "");
+  });
+
+  return (
+    <section class="recent-sessions-surface" aria-label="Recent Pi sessions">
+      <header class="surface-heading">
+        <div>
+          <h1>Recent sessions</h1>
+          <p>
+            Browse Pi’s authoritative session files on demand. Nothing is scanned while this view is
+            closed.
+          </p>
         </div>
-        <Show when={sessionPage()}>
-          {(page) => (
-            <div class="session-results">
-              <div class="session-results-meta">
-                <span>
-                  {page().sessions.length} session{page().sessions.length === 1 ? "" : "s"} · {page().directorySource}
-                </span>
-                <Show when={page().truncated}>
-                  <span>Bounded catalog window; some sessions may be omitted.</span>
-                </Show>
-              </div>
-              <For each={page().sessions}>
-                {(session) => {
-                  const activeSessionRunId = () => props.activeRunIdForSessionPath(session.path);
-                  const checkoutOwnerRunId = () =>
-                    props.activeRunIdForExecutionRoot(projectPath().trim());
-                  const owningRunId = () => activeSessionRunId() ?? checkoutOwnerRunId();
-                  return (
-                    <article class="session-row">
-                      <div>
-                        <strong>{session.name ?? session.firstMessage ?? session.id}</strong>
-                        <span>
-                          {new Date(session.modifiedUnixMs).toLocaleString()} · {session.id.slice(0, 12)}
-                          {session.previewIncomplete ? " · bounded preview" : ""}
-                        </span>
-                      </div>
-                      <button
-                        type="button"
-                        disabled={Boolean(resumingPath())}
-                        onClick={() => {
-                          const runId = owningRunId();
-                          if (runId) {
-                            props.onOpenRun(runId);
-                          } else {
-                            void resume(session);
-                          }
-                        }}
-                      >
-                        {activeSessionRunId()
-                          ? "Open"
-                          : checkoutOwnerRunId()
-                            ? "Open live run"
-                          : resumingPath() === session.path
-                            ? "Resuming"
-                            : "Resume"}
-                      </button>
-                    </article>
-                  );
-                }}
+        <button
+          type="button"
+          disabled={!projectPath()}
+          onClick={() => props.onNewRun(projectPath())}
+        >
+          New run
+        </button>
+      </header>
+
+      <Show
+        when={availableProjects().length > 0}
+        fallback={
+          <div class="empty-state">
+            <strong>No available project folders</strong>
+            <span>Register a project from New Run, or relocate a detached project from the sidebar.</span>
+          </div>
+        }
+      >
+        <div class="recent-session-controls">
+          <label>
+            <span>Project</span>
+            <select
+              value={projectPath()}
+              onChange={(event) => setProjectPath(event.currentTarget.value)}
+            >
+              <For each={availableProjects()}>
+                {(project) => (
+                  <option value={project.canonicalRoot}>
+                    {pathLeaf(project.canonicalRoot)}
+                  </option>
+                )}
               </For>
-              <Show when={page().sessions.length === 0}>
-                <p class="launch-note">No matching Pi sessions were found for this project.</p>
-              </Show>
+            </select>
+            <small class="recent-project-path" title={projectPath()}>{projectPath()}</small>
+          </label>
+          <details class="session-launch-options">
+            <summary>Resume launch options</summary>
+            <div>
+              <label>
+                <span>Project resources</span>
+                <select
+                  value={projectTrust()}
+                  onChange={(event) =>
+                    setProjectTrust(event.currentTarget.value as ProjectTrustPolicy)
+                  }
+                >
+                  <option value="inherit">Use Pi saved/default trust</option>
+                  <option value="approve">Approve for this run</option>
+                  <option value="ignore">Ignore protected project resources</option>
+                </select>
+              </label>
+              <label>
+                <span>Context instructions</span>
+                <select
+                  value={contextFiles()}
+                  onChange={(event) =>
+                    setContextFiles(event.currentTarget.value as ContextFilesPolicy)
+                  }
+                >
+                  <option value="inherit">Load AGENTS.md / CLAUDE.md using Pi settings</option>
+                  <option value="disabled">Disable context files for this launch</option>
+                </select>
+              </label>
+              <label>
+                <span>Extensions</span>
+                <select
+                  value={extensionDiscovery()}
+                  onChange={(event) =>
+                    setExtensionDiscovery(event.currentTarget.value as ExtensionDiscoveryPolicy)
+                  }
+                >
+                  <option value="inherit">Load discovered Pi extensions</option>
+                  <option value="disabled">Disable extensions for this launch</option>
+                </select>
+              </label>
             </div>
-          )}
-        </Show>
-        <Show when={sessionError()}>
-          {(message) => <p class="error">Session lookup failed: {message()}</p>}
-        </Show>
-      </div>
+            <p>
+              Trust controls protected Pi project resources. Context-file and extension loading are
+              independent launch choices. Disable extensions for a one-run recovery when an
+              installed Pi extension prevents startup.
+            </p>
+          </details>
+        </div>
+
+        <SessionCatalogBrowser
+          projectPath={projectPath()}
+          piReady={props.piReady}
+          projectTrust={projectTrust()}
+          contextFiles={contextFiles()}
+          extensionDiscovery={extensionDiscovery()}
+          onStarted={props.onStarted}
+          onOpenRun={props.onOpenRun}
+          activeRunIdForExecutionRoot={props.activeRunIdForExecutionRoot}
+          activeRunIdForSessionPath={props.activeRunIdForSessionPath}
+        />
+      </Show>
+    </section>
+  );
+}
+
+function NeedsAttentionView(props: {
+  runs: RunHydration[];
+  onOpenRun: (runId: string) => void;
+  onResolved: () => Promise<unknown>;
+  projectLabel: (run: RunHydration) => string;
+}) {
+  const pending = () =>
+    props.runs.flatMap((run) =>
+      (run.rpc?.pendingDialogs ?? []).map((dialog) => ({ run, dialog })),
+    ).sort((left, right) => {
+      const leftDeadline = left.dialog.remainingTimeoutMs ?? Number.POSITIVE_INFINITY;
+      const rightDeadline = right.dialog.remainingTimeoutMs ?? Number.POSITIVE_INFINITY;
+      if (leftDeadline !== rightDeadline) return leftDeadline - rightDeadline;
+      const runOrder = right.run.run.id.localeCompare(left.run.run.id);
+      if (runOrder !== 0) return runOrder;
+      return left.dialog.request.id.localeCompare(right.dialog.request.id);
+    });
+
+  return (
+    <section class="attention-queue-surface" aria-label="Needs attention queue">
+      <header class="surface-heading">
+        <div>
+          <h1>Needs attention</h1>
+          <p>Answer extension requests across live Pi runs without changing process ownership.</p>
+        </div>
+        <strong class="attention-total">
+          {pending().length} request{pending().length === 1 ? "" : "s"}
+        </strong>
+      </header>
+      <Show
+        when={pending().length > 0}
+        fallback={
+          <div class="empty-state">
+            <strong>Nothing needs attention</strong>
+            <span>Working runs continue independently while you use other views.</span>
+          </div>
+        }
+      >
+        <div class="attention-queue">
+          <For each={pending()}>
+            {(pendingRequest) => (
+              <section class="attention-queue-item">
+                <header>
+                  <div>
+                    <strong>{runTitle(pendingRequest.run)}</strong>
+                    <span title={pendingRequest.run.run.executionRoot}>
+                      {props.projectLabel(pendingRequest.run)} · {pendingRequest.run.run.executionIsolation === "git_worktree"
+                        ? "Git worktree"
+                        : "Local checkout"}
+                      {" · "}{pendingRequest.run.run.executionRoot}
+                    </span>
+                  </div>
+                  <button type="button" onClick={() => props.onOpenRun(pendingRequest.run.run.id)}>
+                    Open run
+                  </button>
+                </header>
+                <ExtensionDialogCard
+                  runId={pendingRequest.run.run.id}
+                  dialog={pendingRequest.dialog}
+                  onResolved={props.onResolved}
+                />
+              </section>
+            )}
+          </For>
+        </div>
+      </Show>
     </section>
   );
 }
@@ -3004,10 +4014,65 @@ function runTitle(run: RunHydration): string {
 }
 
 function runStateLabel(run: RunHydration): string {
+  if (run.run.process === "exited") return "done";
+  if (run.run.process === "failed") return "failed";
+  if (run.run.process === "quarantined") return "termination uncertain";
   if (run.run.process !== "ready") return run.run.process.replaceAll("_", " ");
   if ((run.rpc?.pendingDialogs.length ?? 0) > 0) return "needs attention";
+  if (run.rpc?.summarizationRetry && !run.rpc.summarizationRetry.finished) return "summary retry";
+  if (run.run.compacting) return "compacting";
+  if (run.rpc?.retry && !run.rpc.retry.finished) return "retrying";
+  if (run.rpc?.streamStalled) return "possibly stalled";
   if (run.run.agentWorking) return "working";
-  return "idle";
+  if (run.run.queue.steering + run.run.queue.followUp > 0) return "queued";
+  return "ready";
+}
+
+function runQueuedCount(run: RunHydration): number {
+  return run.run.queue.steering + run.run.queue.followUp;
+}
+
+function runActivityLabel(run: RunHydration): string {
+  const pending = run.rpc?.pendingDialogs[0];
+  if (pending) return `Waiting for input: ${pending.request.kind.title}`;
+  const summaryRetry = run.rpc?.summarizationRetry;
+  if (summaryRetry && !summaryRetry.finished) {
+    const source = summaryRetry.source === "branchSummary" ? "branch summary" : "context summary";
+    return summaryRetry.source
+      ? `Retrying ${source} ${summaryRetry.attempt}/${summaryRetry.maxAttempts}`
+      : `Summary retry ${summaryRetry.attempt}/${summaryRetry.maxAttempts} scheduled`;
+  }
+  if (run.run.compacting) {
+    const reason = run.rpc?.compaction?.reason;
+    return reason ? `Compacting context · ${reason}` : "Compacting context";
+  }
+  const retry = run.rpc?.retry;
+  if (retry && !retry.finished) {
+    return retry.waiting
+      ? `Provider retry ${retry.attempt}/${retry.maxAttempts} in ~${Math.ceil(retry.delayMs / 1_000)}s`
+      : `Provider retry ${retry.attempt}/${retry.maxAttempts} running`;
+  }
+  if (run.rpc?.streamStalled) return "No Pi RPC event for about 2 minutes";
+  const tool = run.rpc?.live.activeTools[0];
+  if (tool) return `Running tool: ${tool.toolName}`;
+  if ((run.rpc?.live.directBash.length ?? 0) > 0) return "Running shell command";
+  if (run.run.agentWorking) return "Pi is working";
+  const queued = runQueuedCount(run);
+  if (queued > 0) return `${queued} queued message${queued === 1 ? "" : "s"}`;
+  if (run.run.process === "ready") return "Ready for input";
+  if (run.run.process === "exited") return "Run finished";
+  if (run.run.process === "quarantined") return "Process termination is uncertain";
+  if (run.run.failure) return `${run.run.failure.kind.replaceAll("_", " ")} failure`;
+  return run.run.process.replaceAll("_", " ");
+}
+
+function runHasStoppableActivity(run: RunHydration): boolean {
+  return (
+    run.run.agentWorking ||
+    run.run.compacting ||
+    Boolean(run.rpc?.retry && !run.rpc.retry.finished) ||
+    Boolean(run.rpc?.summarizationRetry && !run.rpc.summarizationRetry.finished)
+  );
 }
 
 function canCloseRun(run: RunHydration): boolean {
@@ -3024,7 +4089,13 @@ function canCloseRun(run: RunHydration): boolean {
 
 function runDisplayPriority(run: RunHydration): number {
   if ((run.rpc?.pendingDialogs.length ?? 0) > 0) return 0;
-  if (run.run.process === "ready" && run.run.agentWorking) return 1;
+  if (
+    run.run.process === "ready" &&
+    (run.run.agentWorking ||
+      Boolean(run.rpc?.retry && !run.rpc.retry.finished) ||
+      Boolean(run.rpc?.summarizationRetry && !run.rpc.summarizationRetry.finished))
+  )
+    return 1;
   if (!["exited", "failed", "quarantined"].includes(run.run.process)) return 2;
   return 3;
 }
@@ -3066,40 +4137,561 @@ function ExtensionUiPanel(props: { snapshot: ExtensionUiSnapshot | undefined }) 
   );
 }
 
+function PiRuntimeNoticePanel(props: { rpc: RunHydration["rpc"] | undefined }) {
+  const compaction = () => props.rpc?.compaction;
+  const retry = () => props.rpc?.retry;
+  const summaryRetry = () => props.rpc?.summarizationRetry;
+  const extensionError = () => props.rpc?.lastExtensionError;
+  const streamStalled = () => Boolean(props.rpc?.streamStalled);
+  const visible = () =>
+    Boolean(
+      (retry() && (!retry()!.finished || retry()!.success === false)) ||
+        (compaction() &&
+          (compaction()!.aborted || Boolean(compaction()!.errorMessage) || compaction()!.willRetry)) ||
+        (summaryRetry() && !summaryRetry()!.finished) ||
+        extensionError() ||
+        streamStalled(),
+    );
+
+  return (
+    <Show when={visible()}>
+      <section class="pi-runtime-notices" aria-label="Pi runtime recovery status">
+        <Show
+          when={
+            compaction() &&
+            (compaction()!.aborted || Boolean(compaction()!.errorMessage) || compaction()!.willRetry)
+              ? compaction()
+              : undefined
+          }
+        >
+          {(state) => (
+            <details class="pi-runtime-notice runtime-warning" open>
+              <summary>
+                Compaction {state().reason}
+                {state().aborted
+                  ? " · aborted"
+                  : state().errorMessage
+                    ? " · failed"
+                    : state().willRetry
+                      ? " · prompt retry pending"
+                      : ""}
+              </summary>
+              <Show when={state().willRetry && !state().errorMessage}>
+                <p>
+                  Pi compacted after context overflow and reports that it will automatically retry
+                  the prompt. Pi Wizard waits for Pi’s subsequent events and does not resubmit it.
+                </p>
+              </Show>
+              <Show when={state().aborted}>
+                <p>Pi reports that this compaction was aborted. No successful summary is implied.</p>
+              </Show>
+              <Show when={state().errorMessage}>
+                {(error) => <pre>{error()}</pre>}
+              </Show>
+              <Show when={state().reasonTruncated || state().errorTruncated}>
+                <span class="truncation-note">Compaction detail truncated</span>
+              </Show>
+            </details>
+          )}
+        </Show>
+        <Show when={streamStalled()}>
+          <details class="pi-runtime-notice runtime-warning" open>
+            <summary>Pi stream quiet</summary>
+            <p>
+              No Pi RPC event has arrived for about two minutes while Pi still reports this run as
+              working. This can be a long provider/tool operation or a stalled stream. Pi Wizard did
+              not probe, retry, or resubmit anything automatically; the first new Pi event clears
+              this advisory and Stop remains available.
+            </p>
+          </details>
+        </Show>
+        <Show when={retry() && !retry()!.finished ? retry() : undefined}>
+          {(active) => (
+            <details class="pi-runtime-notice" open>
+              <summary>
+                {active().waiting ? "Provider retry scheduled" : "Provider retry running"} · {active().attempt}/{active().maxAttempts}
+              </summary>
+              <p>
+                {active().waiting
+                  ? `Pi is waiting about ${Math.ceil(active().delayMs / 1_000)} seconds before retrying. Stop cancels this retry delay through Pi’s abort_retry RPC.`
+                  : "The retry attempt has started. Stop uses Pi’s normal agent abort for the active provider stream."}
+              </p>
+              <pre>{active().errorMessage}</pre>
+              <Show when={active().errorTruncated}>
+                <span class="truncation-note">Retry error detail truncated</span>
+              </Show>
+            </details>
+          )}
+        </Show>
+        <Show when={retry()?.finished && retry()?.success === false ? retry() : undefined}>
+          {(failed) => (
+            <details class="pi-runtime-notice runtime-warning" open>
+              <summary>Provider retry exhausted · {failed().attempt} attempts</summary>
+              <pre>{failed().finalError ?? failed().errorMessage}</pre>
+              <Show when={failed().finalErrorTruncated || failed().errorTruncated}>
+                <span class="truncation-note">Retry error detail truncated</span>
+              </Show>
+            </details>
+          )}
+        </Show>
+        <Show when={summaryRetry() && !summaryRetry()!.finished ? summaryRetry() : undefined}>
+          {(active) => (
+            <details class="pi-runtime-notice runtime-warning" open>
+              <summary>
+                Summarization retry · {active().attempt}/{active().maxAttempts}
+                {active().source ? ` · ${active().source}` : ""}
+              </summary>
+              <p>
+                Pi is retrying a summary operation after a transient provider error. Pi does not
+                expose a dedicated RPC to cancel this retry loop, so Stop fails closed through the
+                exact owned process if it remains active.
+              </p>
+              <pre>{active().errorMessage}</pre>
+              <Show when={active().errorTruncated}>
+                <span class="truncation-note">Summarization error detail truncated</span>
+              </Show>
+            </details>
+          )}
+        </Show>
+        <Show when={extensionError()}>
+          {(lastError) => (
+            <details class="pi-runtime-notice runtime-warning">
+              <summary>
+                Last extension error · {pathLeaf(lastError().extensionPath)} · {lastError().event}
+              </summary>
+              <pre>{lastError().error}</pre>
+              <Show when={lastError().detailTruncated}>
+                <span class="truncation-note">Extension error detail truncated</span>
+              </Show>
+            </details>
+          )}
+        </Show>
+      </section>
+    </Show>
+  );
+}
+
+function AutomationView(props: {
+  snapshot: DesktopAutomationSnapshot | undefined;
+  projects: DesktopProjectRecord[];
+  capacity: RuntimeCapacitySnapshot | undefined;
+  onRefresh: () => Promise<unknown>;
+  onOpenRun: (runId: string) => void;
+}) {
+  const [chainId, setChainId] = createSignal<string>();
+  const [name, setName] = createSignal("");
+  const [prompts, setPrompts] = createSignal<string[]>([""]);
+  const [projectId, setProjectId] = createSignal("");
+  const [concurrency, setConcurrency] = createSignal("4");
+  const [worktrees, setWorktrees] = createSignal(true);
+  const [supervisor, setSupervisor] = createSignal(false);
+  const [busy, setBusy] = createSignal(false);
+  const [error, setError] = createSignal<string>();
+
+  createEffect(() => {
+    if (!projectId()) {
+      const project = props.projects.find((candidate) => candidate.status === "present");
+      if (project) setProjectId(project.id);
+    }
+  });
+
+  const loadChain = (chain: AutomationChain) => {
+    setChainId(chain.id);
+    setName(chain.name);
+    setPrompts([...chain.prompts]);
+    setError(undefined);
+  };
+
+  const newChain = () => {
+    setChainId(undefined);
+    setName("");
+    setPrompts([""]);
+    setError(undefined);
+  };
+
+  const updatePrompt = (index: number, value: string) =>
+    setPrompts((current) => current.map((prompt, currentIndex) => (currentIndex === index ? value : prompt)));
+
+  const removePrompt = (index: number) =>
+    setPrompts((current) => {
+      const next = current.filter((_, currentIndex) => currentIndex !== index);
+      return next.length > 0 ? next : [""];
+    });
+
+  const movePrompt = (index: number, direction: -1 | 1) =>
+    setPrompts((current) => {
+      const target = index + direction;
+      if (target < 0 || target >= current.length) return current;
+      const next = [...current];
+      const selected = next[index];
+      const adjacent = next[target];
+      if (selected === undefined || adjacent === undefined) return current;
+      next[index] = adjacent;
+      next[target] = selected;
+      return next;
+    });
+
+  const saveChain = async () => {
+    if (busy()) return;
+    setBusy(true);
+    setError(undefined);
+    try {
+      const saved = await invokeDesktop<AutomationChain>("runtime_save_automation_chain", {
+        request: {
+          id: chainId() ?? null,
+          name: name(),
+          prompts: prompts(),
+        },
+      });
+      setChainId(saved.id);
+      setName(saved.name);
+      setPrompts([...saved.prompts]);
+      await props.onRefresh();
+    } catch (caught) {
+      setError(String(caught));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const deleteChain = async () => {
+    const id = chainId();
+    if (!id || busy()) return;
+    setBusy(true);
+    setError(undefined);
+    try {
+      await invokeDesktop<boolean>("runtime_delete_automation_chain", { request: { id } });
+      newChain();
+      await props.onRefresh();
+    } catch (caught) {
+      setError(String(caught));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const startChain = async () => {
+    const id = chainId();
+    const project = projectId();
+    const workers = Number.parseInt(concurrency(), 10);
+    if (!id) {
+      setError("Save the chain before starting it.");
+      return;
+    }
+    if (!project || !Number.isInteger(workers)) return;
+    setBusy(true);
+    setError(undefined);
+    try {
+      await invokeDesktop<string>("runtime_start_automation", {
+        request: {
+          chainId: id,
+          projectId: project,
+          concurrency: workers,
+          worktrees: worktrees(),
+          supervisor: supervisor(),
+        },
+      });
+      await props.onRefresh();
+    } catch (caught) {
+      setError(String(caught));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const cancelExecution = async (id: string) => {
+    try {
+      await invokeDesktop<void>("runtime_cancel_automation", { request: { id } });
+      await props.onRefresh();
+    } catch (caught) {
+      setError(String(caught));
+    }
+  };
+
+  const maxWorkers = () => {
+    const live = props.capacity?.liveRunLimit ?? 8;
+    return Math.max(1, live - (supervisor() ? 1 : 0));
+  };
+
+  createEffect(() => {
+    const maximum = maxWorkers();
+    const current = Number.parseInt(concurrency(), 10);
+    if (Number.isInteger(current) && current > maximum) {
+      setConcurrency(String(maximum));
+    }
+  });
+
+  return (
+    <section class="automation-surface" aria-label="Automation chains">
+      <header class="surface-heading">
+        <div>
+          <h1>Automation</h1>
+          <p>Run a finite prompt list through new Pi sessions. Parallel workers use isolated Git worktrees.</p>
+        </div>
+        <button type="button" onClick={newChain}>New chain</button>
+      </header>
+
+      <Show when={props.snapshot?.catalog.recoveryNotice}>
+        {(notice) => <p class="app-error">Saved automation definitions were reset: {notice()}</p>}
+      </Show>
+      <Show when={error()}>{(message) => <p class="app-error">Automation: {message()}</p>}</Show>
+
+      <div class="automation-layout">
+        <aside class="automation-library" aria-label="Saved chains">
+          <strong>Saved chains</strong>
+          <For each={props.snapshot?.catalog.chains ?? []}>
+            {(chain) => (
+              <button
+                type="button"
+                class={chainId() === chain.id ? "active" : undefined}
+                onClick={() => loadChain(chain)}
+              >
+                <strong>{chain.name}</strong>
+                <span>{chain.prompts.length} prompt{chain.prompts.length === 1 ? "" : "s"}</span>
+              </button>
+            )}
+          </For>
+          <Show when={(props.snapshot?.catalog.chains.length ?? 0) === 0}>
+            <span class="sidebar-note">No saved chains.</span>
+          </Show>
+        </aside>
+
+        <div class="automation-builder">
+          <label class="automation-name">
+            <span>Chain name</span>
+            <input value={name()} onInput={(event) => setName(event.currentTarget.value)} />
+          </label>
+
+          <div class="automation-prompts" aria-label="Ordered prompts">
+            <For each={prompts()}>
+              {(prompt, index) => (
+                <article class="automation-prompt-card">
+                  <header>
+                    <strong>Prompt {index() + 1}</strong>
+                    <div>
+                      <button type="button" disabled={index() === 0} onClick={() => movePrompt(index(), -1)}>Up</button>
+                      <button type="button" disabled={index() === prompts().length - 1} onClick={() => movePrompt(index(), 1)}>Down</button>
+                      <button type="button" onClick={() => removePrompt(index())}>Remove</button>
+                    </div>
+                  </header>
+                  <textarea
+                    rows="5"
+                    value={prompt}
+                    aria-label={`Automation prompt ${index() + 1}`}
+                    onInput={(event) => updatePrompt(index(), event.currentTarget.value)}
+                  />
+                </article>
+              )}
+            </For>
+            <button type="button" class="automation-add-prompt" onClick={() => setPrompts((current) => [...current, ""])}>
+              Add prompt
+            </button>
+          </div>
+
+          <div class="automation-launch-grid">
+            <label>
+              <span>Project</span>
+              <select value={projectId()} onChange={(event) => setProjectId(event.currentTarget.value)}>
+                <option value="">Select project</option>
+                <For each={props.projects}>
+                  {(project) => (
+                    <option value={project.id} disabled={project.status !== "present"}>
+                      {pathLeaf(project.canonicalRoot)}{project.status === "present" ? "" : ` · ${project.status}`}
+                    </option>
+                  )}
+                </For>
+              </select>
+            </label>
+            <label>
+              <span>Workers</span>
+              <input
+                type="number"
+                min="1"
+                max={maxWorkers()}
+                value={concurrency()}
+                onInput={(event) => setConcurrency(event.currentTarget.value)}
+              />
+            </label>
+            <label class="automation-checkbox">
+              <input
+                type="checkbox"
+                checked={worktrees()}
+                onChange={(event) => {
+                  setWorktrees(event.currentTarget.checked);
+                  if (!event.currentTarget.checked) setConcurrency("1");
+                }}
+              />
+              <span>Git-isolated workers</span>
+            </label>
+            <label class="automation-checkbox">
+              <input type="checkbox" checked={supervisor()} onChange={(event) => setSupervisor(event.currentTarget.checked)} />
+              <span>LLM supervisor · uses one live slot</span>
+            </label>
+          </div>
+
+          <div class="automation-builder-actions">
+            <button type="button" disabled={busy()} onClick={() => void saveChain()}>{busy() ? "Working" : "Save"}</button>
+            <Show when={chainId()}>
+              <button type="button" disabled={busy()} onClick={() => void deleteChain()}>Delete</button>
+              <button type="button" class="primary-action" disabled={busy() || !projectId()} onClick={() => void startChain()}>
+                Start chain
+              </button>
+            </Show>
+          </div>
+        </div>
+      </div>
+
+      <section class="automation-executions" aria-label="Automation executions">
+        <h2>Executions</h2>
+        <For each={props.snapshot?.executions ?? []}>
+          {(execution) => (
+            <article class="automation-execution">
+              <header>
+                <div>
+                  <strong>{execution.chainName}</strong>
+                  <span>
+                    {execution.status.replaceAll("_", " ")} · {execution.concurrency} worker{execution.concurrency === 1 ? "" : "s"}
+                    {execution.supervisorEnabled ? " · supervised" : ""}
+                    {execution.supervisorCycles > 0 ? ` · ${execution.supervisorCycles} supervisor cycle${execution.supervisorCycles === 1 ? "" : "s"}` : ""}
+                  </span>
+                </div>
+                <Show when={!['completed', 'completed_with_errors', 'cancelled', 'failed'].includes(execution.status)}>
+                  <button type="button" onClick={() => void cancelExecution(execution.id)}>Cancel chain</button>
+                </Show>
+              </header>
+              <Show when={execution.error}>
+                {(message) => <p class="error">Execution failed: {message()}</p>}
+              </Show>
+              <Show when={execution.supervisorError}>
+                {(message) => <p class="error">Supervisor disabled: {message()}</p>}
+              </Show>
+              <div class="automation-step-list">
+                <For each={execution.steps}>
+                  {(step) => (
+                    <div class={`automation-step step-${step.status}`}>
+                      <strong>{step.index + 1}</strong>
+                      <span title={step.promptTruncated ? "Prompt preview truncated" : step.promptPreview}>
+                        {step.promptPreview}{step.promptTruncated ? "…" : ""}
+                      </span>
+                      <small>{step.status.replaceAll("_", " ")}</small>
+                      <Show when={step.runId}>
+                        {(runId) => <button type="button" onClick={() => props.onOpenRun(runId())}>Open</button>}
+                      </Show>
+                      <Show when={step.error}>{(message) => <small class="error">{message()}</small>}</Show>
+                    </div>
+                  )}
+                </For>
+              </div>
+            </article>
+          )}
+        </For>
+        <Show when={(props.snapshot?.executions.length ?? 0) === 0}>
+          <p class="empty-state">No automation executions yet.</p>
+        </Show>
+      </section>
+    </section>
+  );
+}
+
 export function App() {
   const [runtime, setRuntime] = createSignal<RuntimeHydration>();
   const [runtimeError, setRuntimeError] = createSignal<string>();
   const [capacity, setCapacity] = createSignal<RuntimeCapacitySnapshot>();
   const [capacityError, setCapacityError] = createSignal<string>();
+  const [automation, setAutomation] = createSignal<DesktopAutomationSnapshot>();
+  const [automationError, setAutomationError] = createSignal<string>();
   const [capacityBusy, setCapacityBusy] = createSignal(false);
   const [liveRunLimitDraft, setLiveRunLimitDraft] = createSignal("");
   const [piProbe, setPiProbe] = createSignal<PiProbeReport>();
   const [piProbeError, setPiProbeError] = createSignal<string>();
   const [attachmentLimits, setAttachmentLimits] = createSignal<RuntimeAttachmentLimits>();
   const [deliveredEvents, setDeliveredEvents] = createSignal(0);
+  const [diagnostics, setDiagnostics] = createSignal<DesktopRuntimeDiagnostics>();
+  const [diagnosticsBusy, setDiagnosticsBusy] = createSignal(false);
+  const [diagnosticsError, setDiagnosticsError] = createSignal<string>();
+  const [mountedTimelineRows, setMountedTimelineRows] = createSignal(0);
+  const [longTaskMetrics, setLongTaskMetrics] = createSignal({
+    count: 0,
+    maxDurationMs: 0,
+    lastDurationMs: 0,
+  });
   const [view, setView] = createSignal<AppView>("dashboard");
   const [selectedRunId, setSelectedRunId] = createSignal<string>();
   const [preferredProjectPath, setPreferredProjectPath] = createSignal("");
+  const [projects, setProjects] = createSignal<DesktopProjectRecord[]>([]);
   const [projectRefreshKey, setProjectRefreshKey] = createSignal(0);
   const [runActionError, setRunActionError] = createSignal<string>();
   const [closingRunId, setClosingRunId] = createSignal<string>();
   const [dismissingRunId, setDismissingRunId] = createSignal<string>();
   const [openingFolderRunId, setOpeningFolderRunId] = createSignal<string>();
   const [notifications, setNotifications] = createSignal<UiNotification[]>([]);
+  const [elapsedClockUnixMs, setElapsedClockUnixMs] = createSignal(Date.now());
+  const [knownChangeSummaries, setKnownChangeSummaries] = createSignal<
+    Record<string, { fileCount: number; truncated: boolean; changeRevision: number }>
+  >({});
   const drainingRuns = new Set<string>();
   const redrainRuns = new Set<string>();
   const hydrationNeededRuns = new Set<string>();
   const composerStates = new Map<string, ComposerState>();
   let hydrationRequestSequence = 0;
   let lastAppliedHydrationRequest = 0;
+  let automationRequestSequence = 0;
+  let lastAppliedAutomationRequest = 0;
   let notificationSequence = 0;
+  let elapsedClockTimer: number | undefined;
+  let longTaskObserver: PerformanceObserver | undefined;
   let disposed = false;
 
   const applyHydration = (snapshot: RuntimeHydration, requestSequence: number) => {
     if (disposed || requestSequence < lastAppliedHydrationRequest) return;
     lastAppliedHydrationRequest = requestSequence;
+    if (snapshot.schemaVersion !== RUNTIME_HYDRATION_SCHEMA_VERSION) {
+      setRuntimeError(
+        `Unsupported runtime hydration schema ${snapshot.schemaVersion}; this renderer requires schema ${RUNTIME_HYDRATION_SCHEMA_VERSION}. Reload the updated application instead of applying incompatible runtime state.`,
+      );
+      return;
+    }
     setRuntime(snapshot);
     setRuntimeError(undefined);
+  };
+
+  const refreshDiagnostics = async () => {
+    if (diagnosticsBusy()) return;
+    setDiagnosticsBusy(true);
+    setDiagnosticsError(undefined);
+    try {
+      const snapshot = await invokeDesktop<DesktopRuntimeDiagnostics>("runtime_diagnostics");
+      if (!disposed) {
+        setDiagnostics(snapshot);
+        setMountedTimelineRows(document.querySelectorAll('[data-timeline-row="true"]').length);
+      }
+    } catch (error) {
+      if (!disposed) setDiagnosticsError(String(error));
+    } finally {
+      if (!disposed) setDiagnosticsBusy(false);
+    }
+  };
+
+  const rememberChangeSummary = (runId: string, summary: GitReviewSummary) => {
+    const run = runById(runId);
+    if (!run) return;
+    setKnownChangeSummaries((current) => ({
+      ...current,
+      [runId]: {
+        fileCount: summary.files.length,
+        truncated: summary.truncated,
+        changeRevision: run.run.changeRevision,
+      },
+    }));
+  };
+
+  const forgetChangeSummary = (runId: string) => {
+    setKnownChangeSummaries((current) => {
+      if (!(runId in current)) return current;
+      const next = { ...current };
+      delete next[runId];
+      return next;
+    });
   };
 
   const refreshCapacity = async () => {
@@ -3116,6 +4708,43 @@ export function App() {
       return undefined;
     }
   };
+
+  const refreshAutomation = async () => {
+    const requestSequence = ++automationRequestSequence;
+    try {
+      const snapshot = await invokeDesktop<DesktopAutomationSnapshot>("runtime_automation_snapshot");
+      if (!disposed && requestSequence >= lastAppliedAutomationRequest) {
+        lastAppliedAutomationRequest = requestSequence;
+        setAutomation(snapshot);
+        setAutomationError(undefined);
+      }
+      return snapshot;
+    } catch (error) {
+      if (!disposed) setAutomationError(String(error));
+      return undefined;
+    }
+  };
+
+  const refreshAutomationExecutions = async () => {
+    if (!automation()) return refreshAutomation();
+    const requestSequence = ++automationRequestSequence;
+    try {
+      const executions = await invokeDesktop<AutomationExecutionSnapshot[]>("runtime_automation_executions");
+      if (!disposed && requestSequence >= lastAppliedAutomationRequest) {
+        lastAppliedAutomationRequest = requestSequence;
+        setAutomation((current) => current ? { ...current, executions } : current);
+        setAutomationError(undefined);
+      }
+      return executions;
+    } catch (error) {
+      if (!disposed) setAutomationError(String(error));
+      return undefined;
+    }
+  };
+
+  createEffect(() => {
+    if (view() === "automation") void refreshAutomation();
+  });
 
   const openRunFolder = async (run: RunHydration) => {
     if (openingFolderRunId()) return;
@@ -3161,7 +4790,10 @@ export function App() {
   };
 
   const refreshRuntimeState = async () => {
-    const [snapshot] = await Promise.all([refreshHydration(), refreshCapacity()]);
+    const [snapshot] = await Promise.all([
+      refreshHydration(),
+      refreshCapacity(),
+    ]);
     return snapshot;
   };
 
@@ -3196,6 +4828,14 @@ export function App() {
     });
 
   const runById = (runId: string) => runtime()?.runs.find((run) => run.run.id === runId);
+
+  const projectForRun = (run: RunHydration) =>
+    projects().find((project) => project.id === run.run.projectId);
+
+  const projectLabelForRun = (run: RunHydration) => {
+    const project = projectForRun(run);
+    return project ? pathLeaf(project.canonicalRoot) : `Project ${run.run.projectId.slice(0, 8)}`;
+  };
 
   const selectedRun = () => {
     const id = selectedRunId();
@@ -3245,6 +4885,7 @@ export function App() {
         request: { runId: run.run.id },
       });
       composerStates.delete(run.run.id);
+      forgetChangeSummary(run.run.id);
       await Promise.all([refreshHydration(), refreshCapacity()]);
       if (selectedRunId() === run.run.id) {
         setSelectedRunId(undefined);
@@ -3259,14 +4900,23 @@ export function App() {
   };
 
   const stopRunFromDashboard = async (run: RunHydration) => {
-    if (run.run.process !== "ready" || !run.run.agentWorking) return;
+    if (run.run.process !== "ready" || !runHasStoppableActivity(run)) return;
     setRunActionError(undefined);
     try {
       await composerState(run).flush();
-      await invokeDesktop<RuntimeStopResult>("runtime_stop", {
+      const result = await invokeDesktop<RuntimeStopResult>("runtime_stop", {
         request: { runId: run.run.id },
       });
       await refreshHydration();
+      if (result.quarantined) {
+        setRunActionError(
+          "Stop could not confirm Pi process termination. The run was quarantined for inspection.",
+        );
+      } else if (result.processTerminated) {
+        setRunActionError(
+          "Stop required terminating the Pi process. Its Pi session remains available from Recent Sessions.",
+        );
+      }
     } catch (error) {
       setRunActionError(String(error));
       await refreshHydration();
@@ -3310,6 +4960,27 @@ export function App() {
     if (!id || runById(id)) return;
     setSelectedRunId(undefined);
     setView("dashboard");
+  });
+
+  createEffect(() => {
+    const runs = runtime()?.runs ?? [];
+    const retainedIds = new Set(runs.map((run) => run.run.id));
+    setKnownChangeSummaries((current) => {
+      const stale = Object.keys(current).filter((runId) => !retainedIds.has(runId));
+      if (stale.length === 0) return current;
+      const next = { ...current };
+      for (const runId of stale) delete next[runId];
+      return next;
+    });
+
+    const hasLiveRun = runs.some((run) => !isTerminalRun(run));
+    if (hasLiveRun && elapsedClockTimer === undefined) {
+      setElapsedClockUnixMs(Date.now());
+      elapsedClockTimer = window.setInterval(() => setElapsedClockUnixMs(Date.now()), 60_000);
+    } else if (!hasLiveRun && elapsedClockTimer !== undefined) {
+      window.clearInterval(elapsedClockTimer);
+      elapsedClockTimer = undefined;
+    }
   });
 
   const refreshHydration = async () => {
@@ -3407,6 +5078,13 @@ export function App() {
             void refreshHydration();
           }),
         );
+        unlisteners.push(
+          await listen<AutomationChangedSignal>("automation://changed", ({ payload }) => {
+            if (view() !== "automation") return;
+            if (payload === "catalog") void refreshAutomation();
+            else void refreshAutomationExecutions();
+          }),
+        );
         await refreshRuntimeState();
       } catch (error) {
         if (!disposed) setRuntimeError(`Runtime listener setup failed: ${String(error)}`);
@@ -3425,9 +5103,36 @@ export function App() {
       if (!disposed) setAttachmentLimits(limits);
     });
 
+    if (import.meta.env.DEV && typeof PerformanceObserver !== "undefined") {
+      try {
+        longTaskObserver = new PerformanceObserver((list) => {
+          const entries = list.getEntries();
+          if (entries.length === 0 || disposed) return;
+          setLongTaskMetrics((current) => {
+            let maxDurationMs = current.maxDurationMs;
+            let lastDurationMs = current.lastDurationMs;
+            for (const entry of entries) {
+              maxDurationMs = Math.max(maxDurationMs, entry.duration);
+              lastDurationMs = entry.duration;
+            }
+            return {
+              count: current.count + entries.length,
+              maxDurationMs,
+              lastDurationMs,
+            };
+          });
+        });
+        longTaskObserver.observe({ entryTypes: ["longtask"] });
+      } catch {
+        longTaskObserver = undefined;
+      }
+    }
+
     onCleanup(() => {
       disposed = true;
       hydrationNeededRuns.clear();
+      if (elapsedClockTimer !== undefined) window.clearInterval(elapsedClockTimer);
+      longTaskObserver?.disconnect();
       for (const unlisten of unlisteners) unlisten();
     });
   });
@@ -3450,13 +5155,40 @@ export function App() {
             <button
               type="button"
               class={view() === "dashboard" ? "active" : undefined}
+              aria-current={view() === "dashboard" ? "page" : undefined}
               onClick={() => setView("dashboard")}
             >
               Dashboard
             </button>
             <button
               type="button"
+              class={view() === "automation" ? "active" : undefined}
+              aria-current={view() === "automation" ? "page" : undefined}
+              onClick={() => setView("automation")}
+            >
+              Automation
+            </button>
+            <button
+              type="button"
+              class={view() === "attention" ? "active" : undefined}
+              aria-current={view() === "attention" ? "page" : undefined}
+              onClick={() => setView("attention")}
+            >
+              <span>Needs attention</span>
+              <strong class="nav-count">{pendingDialogs().length}</strong>
+            </button>
+            <button
+              type="button"
+              class={view() === "sessions" ? "active" : undefined}
+              aria-current={view() === "sessions" ? "page" : undefined}
+              onClick={() => setView("sessions")}
+            >
+              Recent sessions
+            </button>
+            <button
+              type="button"
               class={view() === "launcher" ? "active" : undefined}
+              aria-current={view() === "launcher" ? "page" : undefined}
               onClick={() => setView("launcher")}
             >
               New run
@@ -3473,11 +5205,14 @@ export function App() {
                 <button
                   type="button"
                   class={`sidebar-run${selectedRunId() === run.run.id && view() === "run" ? " active" : ""}`}
+                  aria-current={selectedRunId() === run.run.id && view() === "run" ? "page" : undefined}
                   onClick={() => openRun(run.run.id)}
                 >
                   <strong>{runTitle(run)}</strong>
                   <span>{runStateLabel(run)}</span>
-                  <small title={run.run.executionRoot}>{run.run.executionRoot}</small>
+                  <small title={run.run.executionRoot}>
+                    {projectLabelForRun(run)} · {run.run.executionIsolation === "git_worktree" ? "worktree" : "local"}
+                  </small>
                 </button>
               )}
             </For>
@@ -3488,6 +5223,7 @@ export function App() {
 
           <ProjectManager
             refreshKey={projectRefreshKey()}
+            onProjects={setProjects}
             onUse={(path) => {
               setPreferredProjectPath(path);
               setView("launcher");
@@ -3504,6 +5240,62 @@ export function App() {
               <span>Pi</span>
               <strong>{piProbe()?.version.display ?? "probing"}</strong>
             </div>
+            <div class="runtime-diagnostics-actions">
+              <button type="button" disabled={diagnosticsBusy()} onClick={() => void refreshDiagnostics()}>
+                {diagnosticsBusy() ? "Reading diagnostics" : "Refresh diagnostics"}
+              </button>
+              <small>Explicit snapshot only. No diagnostic polling or logging.</small>
+            </div>
+            <Show when={diagnostics()}>
+              {(snapshot) => (
+                <>
+                  <div class="runtime-detail-grid runtime-diagnostic-summary">
+                    <span>Owned processes</span>
+                    <strong>{snapshot().runtime.ownedProcesses}</strong>
+                    <span>Git review jobs</span>
+                    <strong>{snapshot().activeGitReviewJobs}</strong>
+                    <span>Session catalog jobs</span>
+                    <strong>{snapshot().activeSessionCatalogJobs}</strong>
+                    <span>Mounted timeline rows</span>
+                    <strong>{mountedTimelineRows()}</strong>
+                    <span>Runtime revision</span>
+                    <strong>{snapshot().runtime.runtimeRevision}</strong>
+                    <Show when={import.meta.env.DEV}>
+                      <span>Renderer long tasks</span>
+                      <strong>
+                        {longTaskMetrics().count} · last {longTaskMetrics().lastDurationMs.toFixed(0)} ms · max {longTaskMetrics().maxDurationMs.toFixed(0)} ms
+                      </strong>
+                    </Show>
+                  </div>
+                  <details class="runtime-diagnostic-runs">
+                    <summary>Per-run counters</summary>
+                    <For each={snapshot().runtime.runs}>
+                      {(run) => (
+                        <article class="runtime-diagnostic-run">
+                          <strong title={run.runId}>{run.runId.slice(0, 8)}</strong>
+                          <span>
+                            {run.processOwned ? "process owned" : "no process"} · state {formatBytes(run.retainedRuntimeStateBytes)}
+                          </span>
+                          <span>
+                            RPC {run.rpcEventsPerSecond}/s · {formatBytes(run.rpcEventBytesPerSecond)}/s · {run.pendingRpcRequests} pending · {run.activeRpcCommands} active
+                          </span>
+                          <span>
+                            UI {formatBytes(run.uiBacklogBytes)} / {run.uiBacklogFrames} frames · {run.uiCoalescedFrames} coalesced · {run.uiDroppedDisplayFrames} dropped · {run.uiDeliveredEvents} delivered
+                          </span>
+                          <span>
+                            Live {run.assistantBlocks} blocks · {run.activeTools} tools · {run.activeDirectBash} shell · {run.pendingExtensionDialogs} dialogs
+                            {run.uiRehydrateRequired ? " · rehydration required" : ""}
+                          </span>
+                        </article>
+                      )}
+                    </For>
+                  </details>
+                </>
+              )}
+            </Show>
+            <Show when={diagnosticsError()}>
+              {(error) => <p class="error">Diagnostics: {error()}</p>}
+            </Show>
             <Show when={capacity()}>
               {(current) => (
                 <form
@@ -3590,6 +5382,19 @@ export function App() {
             {(error) => <p class="app-error">Runtime update failed: {error()}</p>}
           </Show>
 
+          <Show when={view() === "automation"}>
+            <Show when={automationError()}>
+              {(message) => <p class="app-error">Automation state failed: {message()}</p>}
+            </Show>
+            <AutomationView
+              snapshot={automation()}
+              projects={projects()}
+              capacity={capacity()}
+              onRefresh={refreshAutomation}
+              onOpenRun={openRun}
+            />
+          </Show>
+
           <Show when={view() === "launcher"}>
             <header class="surface-heading">
               <div>
@@ -3609,6 +5414,31 @@ export function App() {
             />
           </Show>
 
+          <Show when={view() === "sessions"}>
+            <RecentSessionsView
+              projects={projects()}
+              preferredProjectPath={preferredProjectPath()}
+              piReady={Boolean(piProbe())}
+              onStarted={handleStarted}
+              onOpenRun={openRun}
+              onNewRun={(path) => {
+                setPreferredProjectPath(path);
+                setView("launcher");
+              }}
+              activeRunIdForExecutionRoot={activeRunIdForExecutionRoot}
+              activeRunIdForSessionPath={activeRunIdForSessionPath}
+            />
+          </Show>
+
+          <Show when={view() === "attention"}>
+            <NeedsAttentionView
+              runs={runtime()?.runs ?? []}
+              onOpenRun={openRun}
+              onResolved={refreshHydration}
+              projectLabel={projectLabelForRun}
+            />
+          </Show>
+
           <Show when={view() === "run"}>
             <Show when={selectedRun()} fallback={<p class="empty-state">That run is no longer retained.</p>}>
               {(run) => (
@@ -3617,8 +5447,24 @@ export function App() {
                     <div>
                       <h1>{runTitle(run())}</h1>
                       <p title={run().run.executionRoot}>
-                        {runStateLabel(run())} · {run().run.executionIsolation === "git_worktree" ? "Git worktree" : "Local checkout"} · {run().run.executionRoot}
+                        {projectLabelForRun(run())} · {run().run.executionIsolation === "git_worktree" ? "Git-isolated worktree" : "Local checkout"} · {run().run.executionRoot}
                       </p>
+                      <div class="run-identity-strip" aria-label="Run identity">
+                        <span class={`run-state state-${runStateLabel(run()).replaceAll(" ", "-")}`}>
+                          {runStateLabel(run())}
+                        </span>
+                        <span>{runModelLabel(run())}</span>
+                        <span>{runThinkingLabel(run())}</span>
+                        <span title={`Started ${new Date(run().run.startedUnixMs).toLocaleString()}`}>
+                          {runElapsedLabel(run(), elapsedClockUnixMs())}
+                        </span>
+                        <Show when={run().run.worktree}>
+                          {(worktree) => <span>Branch {worktree().branch}</span>}
+                        </Show>
+                        <Show when={runQueuedCount(run()) > 0}>
+                          <span>{runQueuedCount(run())} queued</span>
+                        </Show>
+                      </div>
                     </div>
                     <div class="run-surface-actions">
                       <button
@@ -3688,6 +5534,8 @@ export function App() {
                     </section>
                   </Show>
 
+                  <PiRuntimeNoticePanel rpc={run().rpc} />
+
                   <ExtensionUiPanel snapshot={run().rpc?.extensionUi} />
 
                   <ComposerCard
@@ -3695,6 +5543,7 @@ export function App() {
                     state={composerState(run())}
                     attachmentLimits={attachmentLimits()}
                     onResolved={refreshHydration}
+                    onReviewSummary={rememberChangeSummary}
                   />
                 </section>
               )}
@@ -3729,11 +5578,33 @@ export function App() {
                           </span>
                         </div>
                         <span title={run.run.executionRoot} class="run-path">
-                          {run.run.executionIsolation === "git_worktree" ? "Git worktree" : "Local checkout"} · {run.run.executionRoot}
+                          {projectLabelForRun(run)} · {run.run.executionIsolation === "git_worktree" ? "Git-isolated worktree" : "Local checkout"} · {run.run.executionRoot}
                         </span>
                         <Show when={run.run.worktree}>
                           {(worktree) => <small>{worktree().branch} · {worktree().baseCommit.slice(0, 12)}</small>}
                         </Show>
+                        <small>{runModelLabel(run)} · {runThinkingLabel(run)}</small>
+                        <small class="run-activity">{runActivityLabel(run)}</small>
+                        <div class="run-card-meta">
+                          <small title={`Started ${new Date(run.run.startedUnixMs).toLocaleString()}`}>
+                            {runElapsedLabel(run, elapsedClockUnixMs())}
+                          </small>
+                          <Show when={knownChangeSummaries()[run.run.id]}>
+                            {(known) => (
+                              <small
+                                class={known().changeRevision === run.run.changeRevision ? undefined : "review-stale"}
+                                title={
+                                  known().changeRevision === run.run.changeRevision
+                                    ? "Last explicitly loaded Git review summary"
+                                    : "Pi completed tool or shell activity after this Git review; open Changes to refresh"
+                                }
+                              >
+                                {known().changeRevision === run.run.changeRevision ? "Last review" : "Review stale"} · {known().fileCount} changed file{known().fileCount === 1 ? "" : "s"}
+                                {known().truncated ? "+" : ""}
+                              </small>
+                            )}
+                          </Show>
+                        </div>
                         <Show when={(run.rpc?.pendingDialogs.length ?? 0) > 0}>
                           <strong class="attention-count">{run.rpc!.pendingDialogs.length} request{run.rpc!.pendingDialogs.length === 1 ? "" : "s"} need attention</strong>
                         </Show>
@@ -3746,7 +5617,12 @@ export function App() {
                           >
                             {openingFolderRunId() === run.run.id ? "Opening" : "Folder"}
                           </button>
-                          <Show when={run.run.process === "ready" && run.run.agentWorking}>
+                          <Show
+                            when={
+                              run.run.process === "ready" &&
+                              runHasStoppableActivity(run)
+                            }
+                          >
                             <button
                               type="button"
                               onClick={() => void stopRunFromDashboard(run)}

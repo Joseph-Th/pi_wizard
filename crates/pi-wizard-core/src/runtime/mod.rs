@@ -20,14 +20,16 @@ pub use extension_ui::{
     ExtensionWidget, ExtensionWidgetSnapshot, WidgetPlacement,
 };
 pub use hydration::{
-    PendingExtensionDialogSnapshot, RUNTIME_HYDRATION_SCHEMA_VERSION, RunHydrationSnapshot,
-    RunRpcHydrationSnapshot, RuntimeHydrationSnapshot,
+    PendingExtensionDialogSnapshot, RUNTIME_HYDRATION_SCHEMA_VERSION, RunCompactionSnapshot,
+    RunExtensionErrorSnapshot, RunHydrationSnapshot, RunRetrySnapshot, RunRpcHydrationSnapshot,
+    RunSummarizationRetrySnapshot, RuntimeHydrationSnapshot,
 };
 pub use manager::{
-    ComposerAction, ComposerSubmitResult, ManagedRpcCompletion, RunStartSpec,
-    RuntimeCapacitySnapshot, RuntimeCloseResult, RuntimeManagerError, RuntimeManagerHandle,
-    RuntimeManagerSignal, RuntimeShutdownReport, RuntimeStopResult, RuntimeUiDrain, RuntimeUiEvent,
-    SessionReplacementResult, spawn_runtime_manager, spawn_runtime_manager_with_draft_persistence,
+    ComposerAction, ComposerSubmitResult, ManagedRpcCompletion, RunRuntimeDiagnostics,
+    RunStartSpec, RuntimeCapacitySnapshot, RuntimeCloseResult, RuntimeDiagnosticsSnapshot,
+    RuntimeManagerError, RuntimeManagerHandle, RuntimeManagerSignal, RuntimeShutdownReport,
+    RuntimeStopResult, RuntimeUiDrain, RuntimeUiEvent, SessionReplacementResult,
+    spawn_runtime_manager, spawn_runtime_manager_with_draft_persistence,
 };
 pub use process_actor::{
     ProcessTerminationReport, RunProcessCommandError, RunProcessEnvelope, RunProcessEvent,

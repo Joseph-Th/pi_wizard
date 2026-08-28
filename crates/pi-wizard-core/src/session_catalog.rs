@@ -1,4 +1,5 @@
-use std::collections::BTreeMap;
+use std::cmp::Reverse;
+use std::collections::{BTreeMap, BinaryHeap};
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom};
@@ -7,6 +8,7 @@ use std::time::UNIX_EPOCH;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::RuntimeLimits;
@@ -17,6 +19,15 @@ pub enum SessionDirectorySource {
     Environment,
     Settings,
     Default,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionCatalogCursor {
+    pub modified_unix_ms: u64,
+    pub path: PathBuf,
+    pub scope_sha256: String,
+    pub snapshot_sha256: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -43,6 +54,7 @@ pub struct SessionCatalogPage {
     pub candidate_files: usize,
     pub scanned_files: usize,
     pub truncated: bool,
+    pub next_cursor: Option<SessionCatalogCursor>,
     pub directory_source: SessionDirectorySource,
 }
 
@@ -67,6 +79,18 @@ pub enum SessionCatalogError {
     },
     #[error("session catalog query is {actual} bytes; limit is {limit}")]
     QueryTooLarge { actual: usize, limit: usize },
+    #[error("session catalog cursor path is {actual} bytes; limit is {limit}")]
+    CursorTooLarge { actual: usize, limit: usize },
+    #[error("session catalog cursor digest is invalid")]
+    InvalidCursorDigest,
+    #[error("session catalog cursor belongs to another project, directory, or query")]
+    CursorScopeMismatch,
+    #[error("session catalog cursor no longer identifies a candidate in this catalog")]
+    CursorPositionMissing,
+    #[error("session catalog changed while paging; restart the search from the newest page")]
+    CatalogChanged,
+    #[error("one session catalog entry is {actual} bytes; page limit is {limit}")]
+    PageEntryTooLarge { actual: usize, limit: usize },
     #[error("failed to read session directory {path}: {source}")]
     ReadDirectory {
         path: PathBuf,
@@ -74,12 +98,17 @@ pub enum SessionCatalogError {
     },
     #[error("session file {path} is not a readable Pi session for this project")]
     InvalidProjectSession { path: PathBuf },
+    #[error(
+        "session file {path} does not end with an LF record delimiter; resume was refused because current Pi may corrupt the next append to an unterminated JSONL tail. The file was not modified"
+    )]
+    UnterminatedSessionTail { path: PathBuf },
 }
 
 pub fn list_project_sessions(
     project_root: &Path,
     environment: &BTreeMap<OsString, OsString>,
     query: Option<&str>,
+    cursor: Option<&SessionCatalogCursor>,
     limits: RuntimeLimits,
 ) -> Result<SessionCatalogPage, SessionCatalogError> {
     let project_root = project_root
@@ -94,18 +123,39 @@ pub fn list_project_sessions(
             limit: limits.max_session_catalog_query_bytes,
         });
     }
+    if let Some(cursor) = cursor {
+        let actual = cursor.path.as_os_str().len();
+        if actual > limits.max_session_cursor_bytes {
+            return Err(SessionCatalogError::CursorTooLarge {
+                actual,
+                limit: limits.max_session_cursor_bytes,
+            });
+        }
+        if !valid_digest(&cursor.scope_sha256) || !valid_digest(&cursor.snapshot_sha256) {
+            return Err(SessionCatalogError::InvalidCursorDigest);
+        }
+    }
 
     let directory = resolve_session_directory(&project_root, environment, limits)?;
+    let query_lower = query.map(str::to_lowercase);
+    let scope_sha256 = catalog_scope_sha256(&project_root, &directory.path, query_lower.as_deref());
+    if cursor.is_some_and(|cursor| cursor.scope_sha256.as_str() != scope_sha256.as_str()) {
+        return Err(SessionCatalogError::CursorScopeMismatch);
+    }
     let read_dir = match fs::read_dir(&directory.path) {
         Ok(read_dir) => read_dir,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && cursor.is_none() => {
             return Ok(SessionCatalogPage {
                 sessions: Vec::new(),
                 candidate_files: 0,
                 scanned_files: 0,
                 truncated: false,
+                next_cursor: None,
                 directory_source: directory.source,
             });
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(SessionCatalogError::CatalogChanged);
         }
         Err(source) => {
             return Err(SessionCatalogError::ReadDirectory {
@@ -115,17 +165,23 @@ pub fn list_project_sessions(
         }
     };
 
-    let mut candidates = Vec::new();
-    let mut candidate_overflow = false;
+    let cursor_key = cursor.map(|cursor| (cursor.modified_unix_ms, cursor.path.clone()));
+    let candidate_window_limit = limits.max_session_catalog_candidates.min(
+        limits
+            .max_session_catalog_scan_files
+            .saturating_mul(8)
+            .max(1),
+    );
+    let mut candidates = BinaryHeap::<Reverse<(u64, PathBuf)>>::new();
+    let mut candidate_files = 0usize;
+    let mut candidates_after_cursor = 0usize;
+    let mut snapshot_xor = [0_u8; 32];
+    let mut cursor_position_seen = cursor.is_none();
     for entry in read_dir {
         let Ok(entry) = entry else { continue };
         let path = entry.path();
         if path.extension() != Some(OsStr::new("jsonl")) {
             continue;
-        }
-        if candidates.len() >= limits.max_session_catalog_candidates {
-            candidate_overflow = true;
-            break;
         }
         let Ok(metadata) = entry.metadata() else {
             continue;
@@ -133,6 +189,7 @@ pub fn list_project_sessions(
         if !metadata.is_file() {
             continue;
         }
+        candidate_files = candidate_files.saturating_add(1);
         let modified = metadata
             .modified()
             .ok()
@@ -140,66 +197,157 @@ pub fn list_project_sessions(
             .map_or(0, |duration| {
                 u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
             });
-        candidates.push((modified, path));
+        xor_catalog_entry_digest(&mut snapshot_xor, modified, &path);
+        let key = (modified, path);
+        if cursor_key.as_ref().is_some_and(|cursor| key == *cursor) {
+            cursor_position_seen = true;
+        }
+        if cursor_key
+            .as_ref()
+            .is_some_and(|cursor| key.0 > cursor.0 || (key.0 == cursor.0 && key.1 >= cursor.1))
+        {
+            continue;
+        }
+        candidates_after_cursor = candidates_after_cursor.saturating_add(1);
+        if candidates.len() < candidate_window_limit {
+            candidates.push(Reverse(key));
+        } else if candidates.peek().is_some_and(|oldest_kept| {
+            key.0 > oldest_kept.0.0 || (key.0 == oldest_kept.0.0 && key.1 > oldest_kept.0.1)
+        }) {
+            candidates.pop();
+            candidates.push(Reverse(key));
+        }
     }
+    let snapshot_sha256 = catalog_snapshot_sha256(snapshot_xor, candidate_files);
+    if cursor.is_some_and(|cursor| cursor.snapshot_sha256 != snapshot_sha256) {
+        return Err(SessionCatalogError::CatalogChanged);
+    }
+    if !cursor_position_seen {
+        return Err(SessionCatalogError::CursorPositionMissing);
+    }
+    let mut candidates: Vec<_> = candidates.into_iter().map(|Reverse(key)| key).collect();
     candidates.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| right.1.cmp(&left.1)));
 
-    // Custom Pi session directories are flat and may contain sessions from
-    // many projects. Spend the small header-scan budget first so unrelated
-    // projects cannot consume the richer preview budget for this project.
-    let project_candidates: Vec<_> = candidates
-        .iter()
-        .filter(|(_, path)| {
-            session_header_matches_project(
-                path,
-                &project_root,
-                limits.max_session_header_scan_bytes,
-            )
-        })
-        .collect();
-
-    let query_lower = query.map(str::to_lowercase);
     let mut sessions = Vec::new();
     let mut page_bytes = 0usize;
     let mut scanned_files = 0usize;
-    let mut truncated = candidate_overflow;
-    for (modified_unix_ms, path) in project_candidates
-        .iter()
-        .take(limits.max_session_catalog_scan_files)
-    {
+    let mut last_consumed: Option<SessionCatalogCursor> = None;
+    let mut stopped_early = false;
+    for (modified_unix_ms, path) in &candidates {
+        let current_cursor = SessionCatalogCursor {
+            modified_unix_ms: *modified_unix_ms,
+            path: path.clone(),
+            scope_sha256: scope_sha256.clone(),
+            snapshot_sha256: snapshot_sha256.clone(),
+        };
+        // Custom Pi session directories are flat and may contain sessions from
+        // many projects. Header filtering is cheaper than a full metadata
+        // preview and does not consume the detailed per-page scan budget.
+        if !session_header_matches_project(
+            path,
+            &project_root,
+            limits.max_session_header_scan_bytes,
+        ) {
+            last_consumed = Some(current_cursor);
+            continue;
+        }
+        if scanned_files >= limits.max_session_catalog_scan_files {
+            stopped_early = true;
+            break;
+        }
         scanned_files = scanned_files.saturating_add(1);
         let Some(mut session) = read_session_preview(path, &project_root, limits)? else {
+            last_consumed = Some(current_cursor);
             continue;
         };
         session.modified_unix_ms = *modified_unix_ms;
         if let Some(query) = query_lower.as_deref()
             && !entry_matches(&session, query)
         {
+            last_consumed = Some(current_cursor);
             continue;
         }
         if sessions.len() >= limits.max_session_catalog_page_entries {
-            truncated = true;
+            stopped_early = true;
             break;
         }
         let encoded = serde_json::to_vec(&session).unwrap_or_default().len();
         if page_bytes.saturating_add(encoded) > limits.max_session_catalog_page_bytes {
-            truncated = true;
+            if sessions.is_empty() {
+                return Err(SessionCatalogError::PageEntryTooLarge {
+                    actual: encoded,
+                    limit: limits.max_session_catalog_page_bytes,
+                });
+            }
+            stopped_early = true;
             break;
         }
         page_bytes = page_bytes.saturating_add(encoded);
         sessions.push(session);
+        last_consumed = Some(current_cursor);
     }
-    if scanned_files < project_candidates.len() {
-        truncated = true;
-    }
+    let window_has_older = candidates_after_cursor > candidates.len();
+    let next_cursor = (stopped_early || window_has_older)
+        .then_some(last_consumed)
+        .flatten();
+    let truncated = next_cursor.is_some();
 
     Ok(SessionCatalogPage {
         sessions,
-        candidate_files: candidates.len(),
+        candidate_files,
         scanned_files,
         truncated,
+        next_cursor,
         directory_source: directory.source,
     })
+}
+
+fn valid_digest(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+}
+
+fn catalog_scope_sha256(project_root: &Path, directory: &Path, query: Option<&str>) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"pi-wizard-session-catalog-scope-v1\0");
+    hasher.update(project_root.as_os_str().to_string_lossy().as_bytes());
+    hasher.update(b"\0");
+    hasher.update(directory.as_os_str().to_string_lossy().as_bytes());
+    hasher.update(b"\0");
+    if let Some(query) = query {
+        hasher.update(query.as_bytes());
+    }
+    digest_hex(hasher.finalize().as_slice())
+}
+
+fn xor_catalog_entry_digest(accumulator: &mut [u8; 32], modified_unix_ms: u64, path: &Path) {
+    let mut hasher = Sha256::new();
+    hasher.update(b"pi-wizard-session-catalog-entry-v1\0");
+    hasher.update(modified_unix_ms.to_le_bytes());
+    hasher.update(path.as_os_str().to_string_lossy().as_bytes());
+    let digest = hasher.finalize();
+    for (target, byte) in accumulator.iter_mut().zip(digest) {
+        *target ^= byte;
+    }
+}
+
+fn catalog_snapshot_sha256(entry_xor: [u8; 32], candidate_files: usize) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"pi-wizard-session-catalog-snapshot-v1\0");
+    hasher.update(entry_xor);
+    hasher.update(candidate_files.to_le_bytes());
+    digest_hex(hasher.finalize().as_slice())
+}
+
+fn digest_hex(bytes: &[u8]) -> String {
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        use std::fmt::Write as _;
+        let _ = write!(output, "{byte:02x}");
+    }
+    output
 }
 
 fn session_header_matches_project(path: &Path, project_root: &Path, max_bytes: usize) -> bool {
@@ -248,8 +396,46 @@ pub fn validate_project_session(
             .map_err(|_| SessionCatalogError::InvalidProjectSession {
                 path: session_path.to_path_buf(),
             })?;
-    read_session_preview(&path, &project_root, limits)?
-        .ok_or(SessionCatalogError::InvalidProjectSession { path })
+    let preview = read_session_preview(&path, &project_root, limits)?
+        .ok_or_else(|| SessionCatalogError::InvalidProjectSession { path: path.clone() })?;
+    require_writable_jsonl_tail(&path)?;
+    Ok(preview)
+}
+
+/// Resume is a write-capable operation. Current Pi releases can accept an
+/// unterminated final JSONL record and then concatenate the next append onto
+/// that tail, corrupting later cold recovery. Listing/history remain read-only
+/// and tolerant; only the write-capable resume preflight requires an LF tail.
+fn require_writable_jsonl_tail(path: &Path) -> Result<(), SessionCatalogError> {
+    let mut file = File::open(path).map_err(|_| SessionCatalogError::InvalidProjectSession {
+        path: path.to_path_buf(),
+    })?;
+    let len = file
+        .metadata()
+        .map_err(|_| SessionCatalogError::InvalidProjectSession {
+            path: path.to_path_buf(),
+        })?
+        .len();
+    if len == 0 {
+        return Err(SessionCatalogError::InvalidProjectSession {
+            path: path.to_path_buf(),
+        });
+    }
+    file.seek(SeekFrom::End(-1))
+        .map_err(|_| SessionCatalogError::InvalidProjectSession {
+            path: path.to_path_buf(),
+        })?;
+    let mut last = [0_u8; 1];
+    file.read_exact(&mut last)
+        .map_err(|_| SessionCatalogError::InvalidProjectSession {
+            path: path.to_path_buf(),
+        })?;
+    if last[0] != b'\n' {
+        return Err(SessionCatalogError::UnterminatedSessionTail {
+            path: path.to_path_buf(),
+        });
+    }
+    Ok(())
 }
 
 pub fn resolve_session_directory(
@@ -624,7 +810,7 @@ fn scan_preview_lines(text: &str, name: &mut Option<String>, first_message: &mut
 fn extract_message_text(message: &Value) -> Option<String> {
     let content = message.get("content")?;
     if let Some(text) = content.as_str() {
-        return nonempty(text);
+        return catalog_user_preview(text);
     }
     let blocks = content.as_array()?;
     let mut combined = String::new();
@@ -638,17 +824,45 @@ fn extract_message_text(message: &Value) -> Option<String> {
         if !combined.is_empty() {
             combined.push(' ');
         }
-        combined.push_str(text);
+        let remaining = 1024usize.saturating_sub(combined.len());
+        if remaining == 0 {
+            break;
+        }
+        combined.push_str(&truncate_prefix(text, remaining));
         if combined.len() >= 1024 {
             break;
         }
     }
-    nonempty(&combined)
+    catalog_user_preview(&combined)
 }
 
-fn nonempty(value: &str) -> Option<String> {
+/// Pi expands `/skill:name args` before persisting the user message, so the
+/// first stored text can begin with a complete SKILL.md payload. Catalog rows
+/// should identify the user's task, not reproduce generated context. This is a
+/// read-model normalization only; the authoritative JSONL remains untouched.
+fn catalog_user_preview(value: &str) -> Option<String> {
     let value = value.trim();
-    (!value.is_empty()).then(|| value.to_owned())
+    if value.is_empty() {
+        return None;
+    }
+
+    if let Some(after_name) = value.strip_prefix("<skill name=\"")
+        && let Some(name_end) = after_name.find('"')
+        && let Some(skill_end) = value.find("</skill>")
+    {
+        let name = &after_name[..name_end];
+        let trailing = value[skill_end + "</skill>".len()..].trim();
+        let trailing = trailing
+            .strip_prefix("User:")
+            .map(str::trim)
+            .unwrap_or(trailing);
+        if !trailing.is_empty() {
+            return Some(truncate_prefix(trailing, 1024));
+        }
+        return Some(format!("[skill] {}", truncate_prefix(name, 256)));
+    }
+
+    Some(truncate_prefix(value, 1024))
 }
 
 fn truncate_prefix(value: &str, max_bytes: usize) -> String {
@@ -741,6 +955,134 @@ mod tests {
     }
 
     #[test]
+    fn writable_resume_refuses_valid_but_unterminated_jsonl_tail_without_modifying_it() {
+        let (root, project) = fixture();
+        let session = root.join("unterminated-valid.jsonl");
+        let canonical_project = project.canonicalize().expect("project");
+        let bytes = format!(
+            "{}\n{}",
+            serde_json::json!({"type":"session","version":3,"id":"tail-valid","timestamp":"x","cwd":canonical_project}),
+            serde_json::json!({"type":"message","id":"m1","parentId":null,"timestamp":"x","message":{"role":"user","content":"keep me"}})
+        );
+        fs::write(&session, bytes.as_bytes()).expect("write fixture");
+        let before = fs::read(&session).expect("read before");
+
+        assert!(matches!(
+            validate_project_session(&project, &session, RuntimeLimits::default()),
+            Err(SessionCatalogError::UnterminatedSessionTail { .. })
+        ));
+        assert_eq!(fs::read(&session).expect("read after"), before);
+        fs::remove_dir_all(root).expect("cleanup fixture");
+    }
+
+    #[test]
+    fn writable_resume_refuses_invalid_unterminated_fragment_tail_without_modifying_it() {
+        let (root, project) = fixture();
+        let session = root.join("unterminated-invalid.jsonl");
+        let canonical_project = project.canonicalize().expect("project");
+        let bytes = format!(
+            "{}\n{}\n{{\"type\":\"message\"",
+            serde_json::json!({"type":"session","version":3,"id":"tail-invalid","timestamp":"x","cwd":canonical_project}),
+            serde_json::json!({"type":"message","id":"m1","parentId":null,"timestamp":"x","message":{"role":"user","content":"keep me"}})
+        );
+        fs::write(&session, bytes.as_bytes()).expect("write fixture");
+        let before = fs::read(&session).expect("read before");
+
+        assert!(matches!(
+            validate_project_session(&project, &session, RuntimeLimits::default()),
+            Err(SessionCatalogError::UnterminatedSessionTail { .. })
+        ));
+        assert_eq!(fs::read(&session).expect("read after"), before);
+        fs::remove_dir_all(root).expect("cleanup fixture");
+    }
+
+    #[test]
+    fn catalog_cursor_is_bound_to_the_original_query() {
+        let (root, project) = fixture();
+        let sessions = root.join("sessions");
+        fs::create_dir_all(&sessions).expect("session dir");
+        let mut env = environment(&root.join("home"));
+        env.insert(
+            OsString::from("PI_CODING_AGENT_SESSION_DIR"),
+            sessions.as_os_str().to_owned(),
+        );
+        let canonical_project = project.canonicalize().expect("canonical project");
+        for index in 0..2usize {
+            let mut file =
+                File::create(sessions.join(format!("query-{index}.jsonl"))).expect("session file");
+            writeln!(
+                file,
+                "{}",
+                serde_json::json!({"type":"session","version":3,"id":format!("query-{index}"),"timestamp":"x","cwd":canonical_project})
+            )
+            .unwrap();
+            writeln!(
+                file,
+                "{}",
+                serde_json::json!({"type":"message","id":"m1","parentId":null,"timestamp":"x","message":{"role":"user","content":"alpha task"}})
+            )
+            .unwrap();
+        }
+        let limits = RuntimeLimits {
+            max_session_catalog_scan_files: 1,
+            max_session_catalog_page_entries: 1,
+            ..RuntimeLimits::default()
+        };
+        let first = list_project_sessions(&project, &env, Some("alpha"), None, limits)
+            .expect("first query page");
+        let cursor = first.next_cursor.expect("query should have another page");
+        assert!(matches!(
+            list_project_sessions(&project, &env, Some("beta"), Some(&cursor), limits),
+            Err(SessionCatalogError::CursorScopeMismatch)
+        ));
+        fs::remove_dir_all(root).expect("cleanup fixture");
+    }
+
+    #[test]
+    fn catalog_cursor_fails_stale_when_candidate_snapshot_changes() {
+        let (root, project) = fixture();
+        let sessions = root.join("sessions");
+        fs::create_dir_all(&sessions).expect("session dir");
+        let mut env = environment(&root.join("home"));
+        env.insert(
+            OsString::from("PI_CODING_AGENT_SESSION_DIR"),
+            sessions.as_os_str().to_owned(),
+        );
+        let canonical_project = project.canonicalize().expect("canonical project");
+        let write_session = |name: &str, id: &str| {
+            let mut file = File::create(sessions.join(name)).expect("session file");
+            writeln!(
+                file,
+                "{}",
+                serde_json::json!({"type":"session","version":3,"id":id,"timestamp":"x","cwd":canonical_project})
+            )
+            .unwrap();
+            writeln!(
+                file,
+                "{}",
+                serde_json::json!({"type":"message","id":"m1","parentId":null,"timestamp":"x","message":{"role":"user","content":"task"}})
+            )
+            .unwrap();
+        };
+        write_session("one.jsonl", "one");
+        write_session("two.jsonl", "two");
+        let limits = RuntimeLimits {
+            max_session_catalog_scan_files: 1,
+            max_session_catalog_page_entries: 1,
+            ..RuntimeLimits::default()
+        };
+        let first =
+            list_project_sessions(&project, &env, None, None, limits).expect("first catalog page");
+        let cursor = first.next_cursor.expect("catalog should have another page");
+        write_session("three.jsonl", "three");
+        assert!(matches!(
+            list_project_sessions(&project, &env, None, Some(&cursor), limits),
+            Err(SessionCatalogError::CatalogChanged)
+        ));
+        fs::remove_dir_all(root).expect("cleanup fixture");
+    }
+
+    #[test]
     fn unrelated_flat_directory_sessions_do_not_consume_detailed_scan_budget() {
         use std::time::Duration;
 
@@ -790,7 +1132,8 @@ mod tests {
             max_session_catalog_page_entries: 1,
             ..RuntimeLimits::default()
         };
-        let page = list_project_sessions(&project, &env, None, limits).expect("list sessions");
+        let page =
+            list_project_sessions(&project, &env, None, None, limits).expect("list sessions");
         assert_eq!(page.scanned_files, 1);
         assert_eq!(page.sessions.len(), 1);
         assert_eq!(page.sessions[0].id, "target-session");
@@ -827,8 +1170,14 @@ mod tests {
             )
             .unwrap();
         }
-        let page = list_project_sessions(&project, &env, Some("alpha"), RuntimeLimits::default())
-            .expect("list sessions");
+        let page = list_project_sessions(
+            &project,
+            &env,
+            Some("alpha"),
+            None,
+            RuntimeLimits::default(),
+        )
+        .expect("list sessions");
         assert_eq!(page.sessions.len(), 1);
         assert_eq!(page.sessions[0].id, "session-one");
         fs::remove_dir_all(root).expect("cleanup fixture");
@@ -881,11 +1230,98 @@ mod tests {
             max_session_catalog_page_entries: 32,
             ..RuntimeLimits::default()
         };
-        let page = list_project_sessions(&project, &env, None, limits).expect("scale catalog");
-        assert_eq!(page.candidate_files, 1_200);
-        assert!(page.scanned_files <= 64);
-        assert!(page.sessions.len() <= 32);
-        assert!(page.truncated);
+        let mut cursor = None;
+        let mut seen = Vec::with_capacity(1_200);
+        let mut pages = 0usize;
+        loop {
+            let page = list_project_sessions(&project, &env, None, cursor.as_ref(), limits)
+                .expect("scale catalog page");
+            pages = pages.saturating_add(1);
+            assert_eq!(page.candidate_files, 1_200);
+            assert!(page.scanned_files <= 64);
+            assert!(page.sessions.len() <= 32);
+            seen.extend(page.sessions.iter().map(|session| session.id.clone()));
+            cursor = page.next_cursor;
+            if cursor.is_none() {
+                break;
+            }
+            assert!(pages < 50, "catalog paging did not converge");
+        }
+        seen.sort();
+        seen.dedup();
+        assert_eq!(seen.len(), 1_200);
+        assert!(pages > 1, "scale fixture must exercise continuation paging");
+        fs::remove_dir_all(root).expect("cleanup fixture");
+    }
+
+    #[test]
+    fn catalog_cursor_pages_without_skipping_boundary_sessions() {
+        let (root, project) = fixture();
+        let sessions = root.join("sessions");
+        fs::create_dir_all(&sessions).expect("session dir");
+        let mut env = environment(&root.join("home"));
+        env.insert(
+            OsString::from("PI_CODING_AGENT_SESSION_DIR"),
+            sessions.as_os_str().to_owned(),
+        );
+        let canonical_project = project.canonicalize().expect("canonical project");
+        for index in 0..5usize {
+            let mut file = File::create(sessions.join(format!("session-{index}.jsonl")))
+                .expect("session file");
+            writeln!(
+                file,
+                "{}",
+                serde_json::json!({
+                    "type":"session",
+                    "version":3,
+                    "id":format!("paged-{index}"),
+                    "timestamp":"2026-08-27T00:00:00.000Z",
+                    "cwd":canonical_project
+                })
+            )
+            .unwrap();
+            writeln!(
+                file,
+                "{}",
+                serde_json::json!({
+                    "type":"message",
+                    "id":"m1",
+                    "parentId":null,
+                    "timestamp":"2026-08-27T00:00:01.000Z",
+                    "message":{"role":"user","content":format!("task {index}")}
+                })
+            )
+            .unwrap();
+        }
+
+        let limits = RuntimeLimits {
+            max_session_catalog_scan_files: 2,
+            max_session_catalog_page_entries: 2,
+            ..RuntimeLimits::default()
+        };
+        let mut cursor = None;
+        let mut ids = Vec::new();
+        for _ in 0..4 {
+            let page = list_project_sessions(&project, &env, None, cursor.as_ref(), limits)
+                .expect("paged catalog");
+            ids.extend(page.sessions.iter().map(|session| session.id.clone()));
+            cursor = page.next_cursor;
+            if cursor.is_none() {
+                break;
+            }
+        }
+        ids.sort();
+        ids.dedup();
+        assert_eq!(
+            ids,
+            (0..5)
+                .map(|index| format!("paged-{index}"))
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            cursor.is_none(),
+            "cursor should reach the end of the catalog"
+        );
         fs::remove_dir_all(root).expect("cleanup fixture");
     }
 
@@ -914,6 +1350,83 @@ mod tests {
         assert_eq!(preview.first_message.as_deref(), Some("first prompt"));
         assert_eq!(preview.name.as_deref(), Some("latest name"));
         assert!(preview.preview_incomplete);
+        fs::remove_dir_all(root).expect("cleanup fixture");
+    }
+
+    #[test]
+    fn skill_expansion_preview_keeps_user_task_instead_of_skill_body() {
+        let expanded = concat!(
+            "<skill name=\"agent-reach\" location=\"C:/skills/agent-reach/SKILL.md\">\n",
+            "# Agent Reach\n",
+            "generated instructions that should not identify the session\n",
+            "</skill>\n\n",
+            "User: research websocket reconnect failures"
+        );
+        assert_eq!(
+            catalog_user_preview(expanded).as_deref(),
+            Some("research websocket reconnect failures")
+        );
+
+        let bare = concat!(
+            "<skill name=\"pdf-tools\" location=\"C:/skills/pdf-tools/SKILL.md\">\n",
+            "large generated skill body\n",
+            "</skill>"
+        );
+        assert_eq!(
+            catalog_user_preview(bare).as_deref(),
+            Some("[skill] pdf-tools")
+        );
+    }
+
+    #[test]
+    fn catalog_search_uses_normalized_skill_arguments() {
+        let (root, project) = fixture();
+        let sessions = root.join("sessions");
+        fs::create_dir_all(&sessions).expect("sessions");
+        let canonical_project = project.canonicalize().expect("project");
+        let session = sessions.join("skill-session.jsonl");
+        let mut file = File::create(&session).expect("session file");
+        writeln!(
+            file,
+            "{}",
+            serde_json::json!({"type":"session","version":3,"id":"skill-search","timestamp":"x","cwd":canonical_project})
+        )
+        .unwrap();
+        writeln!(
+            file,
+            "{}",
+            serde_json::json!({
+                "type":"message",
+                "id":"m1",
+                "parentId":null,
+                "timestamp":"x",
+                "message":{
+                    "role":"user",
+                    "content":"<skill name=\"agent-reach\" location=\"C:/skills/a/SKILL.md\">\nnoise noise noise\n</skill>\n\nUser: investigate reconnect regression"
+                }
+            })
+        )
+        .unwrap();
+        drop(file);
+
+        let mut env = environment(&root.join("home"));
+        env.insert(
+            OsString::from("PI_CODING_AGENT_SESSION_DIR"),
+            sessions.as_os_str().to_os_string(),
+        );
+        let page = list_project_sessions(
+            &project,
+            &env,
+            Some("reconnect regression"),
+            None,
+            RuntimeLimits::default(),
+        )
+        .expect("catalog search");
+        assert_eq!(page.sessions.len(), 1);
+        assert_eq!(
+            page.sessions[0].first_message.as_deref(),
+            Some("investigate reconnect regression")
+        );
         fs::remove_dir_all(root).expect("cleanup fixture");
     }
 }

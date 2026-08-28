@@ -71,6 +71,7 @@ impl RpcCommand {
                 | Self::SetModel { .. }
                 | Self::SetThinkingLevel { .. }
                 | Self::SetAutoCompaction { .. }
+                | Self::SetAutoRetry { .. }
                 | Self::SetSessionName { .. }
         )
     }
@@ -261,7 +262,7 @@ fn base64_decoded_len(data: &str) -> Result<usize, AttachmentError> {
             0 => 0,
             2 => 1,
             3 => 2,
-            _ => unreachable!("remainder one was rejected"),
+            _ => return Err(AttachmentError::InvalidBase64),
         }))
 }
 
@@ -700,6 +701,24 @@ mod tests {
                 .expect("automatic compaction request"),
         );
         assert_eq!(value["type"], "set_auto_compaction");
+        assert_eq!(value["enabled"], false);
+        assert!(request.command.blocked_by_manual_compaction());
+        assert_eq!(
+            request.command.concurrency_class(),
+            RpcConcurrencyClass::Ordinary
+        );
+    }
+
+    #[test]
+    fn auto_retry_uses_pi_native_wire_shape_and_respects_manual_compaction_barrier() {
+        let request = RpcRequest::with_id(
+            RequestId::from_wire("auto-retry-1"),
+            RpcCommand::SetAutoRetry { enabled: false },
+        );
+        let value = decode(
+            &encode_request(&request, RuntimeLimits::default()).expect("automatic retry request"),
+        );
+        assert_eq!(value["type"], "set_auto_retry");
         assert_eq!(value["enabled"], false);
         assert!(request.command.blocked_by_manual_compaction());
         assert_eq!(

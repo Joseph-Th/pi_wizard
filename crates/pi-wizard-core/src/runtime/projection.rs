@@ -185,6 +185,42 @@ impl LiveProjection {
         self.assistant_resident_bytes = 0;
     }
 
+    /// Replaces the transient streamed assistant message with Pi's completed
+    /// authoritative content in one bounded transaction.
+    pub fn reconcile_assistant_message<I>(&mut self, blocks: I) -> Result<(), ProjectionError>
+    where
+        I: IntoIterator<Item = (usize, AssistantContentKind, String)>,
+    {
+        let mut next = BTreeMap::new();
+        let mut resident_bytes = 0usize;
+        for (content_index, kind, content) in blocks {
+            if next.contains_key(&content_index) {
+                return Err(ProjectionError::DuplicateAssistantBlock { content_index });
+            }
+            if next.len() >= self.max_assistant_blocks {
+                return Err(ProjectionError::TooManyAssistantBlocks {
+                    limit: self.max_assistant_blocks,
+                });
+            }
+            let mut bounded = BoundedText::new(self.max_assistant_bytes);
+            bounded.replace(&content);
+            resident_bytes = resident_bytes.saturating_add(bounded.len_bytes());
+            next.insert(
+                content_index,
+                AssistantContentBlock {
+                    content_index,
+                    kind,
+                    content: bounded,
+                    complete: true,
+                },
+            );
+        }
+        self.assistant_blocks = next;
+        self.assistant_resident_bytes = resident_bytes;
+        self.enforce_assistant_budget();
+        Ok(())
+    }
+
     pub fn start_tool(
         &mut self,
         tool_call_id: impl Into<String>,
@@ -288,6 +324,11 @@ impl LiveProjection {
                 output: preview.as_str().to_owned(),
                 dropped_bytes: preview.dropped_bytes(),
             })
+    }
+
+    #[must_use]
+    pub fn assistant_block_count(&self) -> usize {
+        self.assistant_blocks.len()
     }
 
     #[must_use]
@@ -586,6 +627,59 @@ mod tests {
         let block = projection.assistant_block(0).expect("block");
         assert!(block.complete);
         assert_eq!(block.content.as_str(), "authoritative block");
+    }
+
+    #[test]
+    fn completed_assistant_message_replaces_stream_preview_atomically_and_stays_bounded() {
+        let limits = RuntimeLimits {
+            max_stream_text_bytes_per_run: 10,
+            max_stream_content_blocks_per_message: 2,
+            ..RuntimeLimits::default()
+        };
+        let mut projection = LiveProjection::new(limits);
+        projection
+            .start_assistant_block(0, AssistantContentKind::Text)
+            .expect("stream block");
+        projection
+            .append_assistant_delta(0, AssistantContentKind::Text, "stale")
+            .expect("stream delta");
+
+        projection
+            .reconcile_assistant_message([
+                (0, AssistantContentKind::Text, "final".to_owned()),
+                (1, AssistantContentKind::Thinking, "reasoning".to_owned()),
+            ])
+            .expect("final message");
+        assert_eq!(projection.assistant_block_count(), 2);
+        assert_eq!(
+            projection
+                .assistant_block(0)
+                .expect("text")
+                .content
+                .as_str(),
+            "l"
+        );
+        assert_eq!(
+            projection
+                .assistant_block(1)
+                .expect("thinking")
+                .content
+                .as_str(),
+            "reasoning"
+        );
+        assert!(projection.assistant_blocks().all(|block| block.complete));
+        assert_eq!(projection.assistant_resident_bytes(), 10);
+
+        let before = projection.snapshot();
+        assert_eq!(
+            projection.reconcile_assistant_message([
+                (0, AssistantContentKind::Text, "one".to_owned()),
+                (1, AssistantContentKind::Thinking, "two".to_owned()),
+                (2, AssistantContentKind::Text, "three".to_owned()),
+            ]),
+            Err(ProjectionError::TooManyAssistantBlocks { limit: 2 })
+        );
+        assert_eq!(projection.snapshot(), before);
     }
 
     #[test]

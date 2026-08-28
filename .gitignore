@@ -3,6 +3,8 @@
 /node_modules/
 /.vite/
 /src-tauri/gen/schemas/
+__pycache__/
+*.py[cod]
 *.log
 *.tmp
 .DS_Store

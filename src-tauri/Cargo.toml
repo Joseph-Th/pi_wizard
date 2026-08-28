@@ -13,15 +13,13 @@ crate-type = ["lib", "cdylib", "staticlib"]
 [dependencies]
 pi-wizard-core = { path = "../crates/pi-wizard-core" }
 serde.workspace = true
+serde_json.workspace = true
 tauri = { version = "2.11.5", features = [] }
 tauri-plugin-dialog = "2"
 tokio.workspace = true
 
 [build-dependencies]
 tauri-build = { version = "2.6.3", features = [] }
-
-[dev-dependencies]
-serde_json.workspace = true
 
 [lints]
 workspace = true

@@ -68,6 +68,82 @@ pub struct RuntimeCapacitySnapshot {
     pub configured_max_live_runs: usize,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunRuntimeDiagnostics {
+    pub run_id: RunId,
+    pub process_owned: bool,
+    pub retained_runtime_state_bytes: usize,
+    pub pending_rpc_requests: usize,
+    pub active_rpc_commands: usize,
+    pub pending_extension_dialogs: usize,
+    pub assistant_blocks: usize,
+    pub active_tools: usize,
+    pub active_direct_bash: usize,
+    pub ui_backlog_bytes: usize,
+    pub ui_backlog_frames: usize,
+    pub ui_coalesced_frames: u64,
+    pub ui_dropped_display_frames: u64,
+    pub ui_delivered_events: u64,
+    pub ui_rehydrate_required: bool,
+    pub rpc_events_per_second: u64,
+    pub rpc_event_bytes_per_second: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeDiagnosticsSnapshot {
+    pub runtime_revision: u64,
+    pub owned_processes: usize,
+    pub runs: Vec<RunRuntimeDiagnostics>,
+}
+
+#[derive(Debug, Default)]
+struct RpcTrafficWindow {
+    started: Option<Instant>,
+    events: u64,
+    bytes: u64,
+}
+
+impl RpcTrafficWindow {
+    fn record(&mut self, now: Instant, bytes: usize) {
+        if self
+            .started
+            .is_none_or(|started| now.saturating_duration_since(started) >= Duration::from_secs(1))
+        {
+            self.started = Some(now);
+            self.events = 0;
+            self.bytes = 0;
+        }
+        self.events = self.events.saturating_add(1);
+        self.bytes = self
+            .bytes
+            .saturating_add(u64::try_from(bytes).unwrap_or(u64::MAX));
+    }
+
+    fn rates(&self, now: Instant) -> (u64, u64) {
+        let Some(started) = self.started else {
+            return (0, 0);
+        };
+        let elapsed = now.saturating_duration_since(started);
+        if elapsed >= Duration::from_secs(1) {
+            return (0, 0);
+        }
+        let elapsed_ms = elapsed.as_millis().clamp(100, 1_000);
+        let events = u128::from(self.events)
+            .saturating_mul(1_000)
+            .checked_div(elapsed_ms)
+            .unwrap_or(0)
+            .min(u128::from(u64::MAX)) as u64;
+        let bytes = u128::from(self.bytes)
+            .saturating_mul(1_000)
+            .checked_div(elapsed_ms)
+            .unwrap_or(0)
+            .min(u128::from(u64::MAX)) as u64;
+        (events, bytes)
+    }
+}
+
 struct PendingSessionReplacement {
     request: RpcRequest,
     session_id: String,
@@ -254,6 +330,7 @@ pub struct RuntimeManagerHandle {
     commands: mpsc::Sender<RuntimeManagerCommand>,
     controls: mpsc::Sender<RuntimeManagerControlCommand>,
     signals: broadcast::Sender<RuntimeManagerSignal>,
+    state_signals: broadcast::Sender<()>,
     limits: RuntimeLimits,
 }
 
@@ -277,6 +354,15 @@ impl RuntimeManagerHandle {
     pub async fn capacity(&self) -> Result<RuntimeCapacitySnapshot, RuntimeManagerError> {
         let (reply, response) = oneshot::channel();
         self.send(RuntimeManagerCommand::Capacity { reply }).await?;
+        receive(response).await
+    }
+
+    /// Returns an explicit bounded diagnostic snapshot. This command does not
+    /// start sampling, polling, persistence, or subprocess work.
+    pub async fn diagnostics(&self) -> Result<RuntimeDiagnosticsSnapshot, RuntimeManagerError> {
+        let (reply, response) = oneshot::channel();
+        self.send(RuntimeManagerCommand::Diagnostics { reply })
+            .await?;
         receive(response).await
     }
 
@@ -419,6 +505,25 @@ impl RuntimeManagerHandle {
             .request(run_id, RpcRequest::new(RpcCommand::GetState))
             .await?;
         require_accepted("reconcile automatic compaction state", &state)
+    }
+
+    /// Enables or disables Pi's native transient-error retry policy. Current
+    /// Pi RPC acknowledges this command but does not expose the enabled flag in
+    /// `get_state`, so the desktop deliberately does not invent a durable
+    /// mirror or claim a recoverable current value after renderer/process
+    /// replacement.
+    pub async fn set_auto_retry(
+        &self,
+        run_id: RunId,
+        enabled: bool,
+    ) -> Result<(), RuntimeManagerError> {
+        let changed = self
+            .request(
+                run_id,
+                RpcRequest::new(RpcCommand::SetAutoRetry { enabled }),
+            )
+            .await?;
+        require_accepted("set automatic retry", &changed)
     }
 
     /// Runs Pi's native manual compaction and reconciles authoritative state
@@ -672,6 +777,14 @@ impl RuntimeManagerHandle {
         self.signals.subscribe()
     }
 
+    /// Event-driven orchestration wake-up for semantic run-state transitions.
+    /// Unlike the renderer dirty stream, this is never emitted for coalesced
+    /// token/tool preview traffic.
+    #[must_use]
+    pub fn subscribe_state_changes(&self) -> broadcast::Receiver<()> {
+        self.state_signals.subscribe()
+    }
+
     async fn send(&self, command: RuntimeManagerCommand) -> Result<(), RuntimeManagerError> {
         self.commands
             .send(command)
@@ -750,6 +863,9 @@ enum RuntimeManagerCommand {
     },
     Capacity {
         reply: oneshot::Sender<Result<RuntimeCapacitySnapshot, String>>,
+    },
+    Diagnostics {
+        reply: oneshot::Sender<Result<RuntimeDiagnosticsSnapshot, String>>,
     },
     SetLiveRunLimit {
         limit: usize,
@@ -831,6 +947,7 @@ struct RuntimeUiQueue {
     rehydrate_required: bool,
     pending_editor_text: Option<String>,
     dirty_signaled: bool,
+    delivered_events: u64,
 }
 
 impl RuntimeUiQueue {
@@ -840,6 +957,7 @@ impl RuntimeUiQueue {
             rehydrate_required: false,
             pending_editor_text: None,
             dirty_signaled: false,
+            delivered_events: 0,
         }
     }
 
@@ -898,6 +1016,9 @@ impl RuntimeUiQueue {
         }
         let has_more = self.backlog.stats().frame_count > 0;
         let pending_editor_text = self.pending_editor_text.take();
+        self.delivered_events = self
+            .delivered_events
+            .saturating_add(u64::try_from(events.len()).unwrap_or(u64::MAX));
         if !has_more {
             self.dirty_signaled = false;
         }
@@ -945,6 +1066,8 @@ struct RuntimeManagerTask {
     controllers: HashMap<RunId, RunRpcController>,
     processes: HashMap<RunId, RunProcessHandle>,
     ui: HashMap<RunId, RuntimeUiQueue>,
+    rpc_traffic: HashMap<RunId, RpcTrafficWindow>,
+    stream_stall_deadlines: HashMap<RunId, Instant>,
     request_waiters:
         HashMap<(RunId, String), oneshot::Sender<Result<ManagedRpcCompletion, String>>>,
     extension_waiters: HashMap<(RunId, String), oneshot::Sender<Result<(), String>>>,
@@ -966,6 +1089,7 @@ struct RuntimeManagerTask {
     process_events: mpsc::Receiver<RunProcessEnvelope>,
     process_events_tx: mpsc::Sender<RunProcessEnvelope>,
     signals: broadcast::Sender<RuntimeManagerSignal>,
+    state_signals: broadcast::Sender<()>,
 }
 
 enum ManagerInput {
@@ -1007,6 +1131,7 @@ fn spawn_runtime_manager_inner(
         .transpose()
         .map_err(|error| RuntimeManagerError::Operation(error.to_string()))?;
     let (signals, _) = broadcast::channel(limits.max_runtime_command_queue);
+    let (state_signals, _) = broadcast::channel(limits.max_runtime_command_queue);
     let task = RuntimeManagerTask {
         limits,
         live_run_limit: limits.max_live_runs,
@@ -1015,6 +1140,8 @@ fn spawn_runtime_manager_inner(
         controllers: HashMap::new(),
         processes: HashMap::new(),
         ui: HashMap::new(),
+        rpc_traffic: HashMap::new(),
+        stream_stall_deadlines: HashMap::new(),
         request_waiters: HashMap::new(),
         extension_waiters: HashMap::new(),
         composer_submissions: HashMap::new(),
@@ -1035,12 +1162,14 @@ fn spawn_runtime_manager_inner(
         process_events,
         process_events_tx,
         signals: signals.clone(),
+        state_signals: state_signals.clone(),
     };
     runtime.spawn(task.run());
     Ok(RuntimeManagerHandle {
         commands: command_tx,
         controls: control_tx,
         signals,
+        state_signals,
         limits,
     })
 }
@@ -1130,6 +1259,9 @@ impl RuntimeManagerTask {
                 }
                 let _ = reply.send(Ok(snapshot));
             }
+            RuntimeManagerCommand::Diagnostics { reply } => {
+                let _ = reply.send(Ok(self.diagnostics_snapshot()));
+            }
             RuntimeManagerCommand::RecoverUi { run_id, reply } => {
                 let result = if let Some(queue) = self.ui.get_mut(&run_id) {
                     let preserve_editor_text = queue.reset_after_recovery();
@@ -1185,7 +1317,11 @@ impl RuntimeManagerTask {
             RuntimeManagerCommand::SetLiveRunLimit { limit, reply } => {
                 let result = self
                     .set_live_run_limit(limit)
-                    .map(|()| self.capacity_snapshot())
+                    .map(|()| {
+                        let snapshot = self.capacity_snapshot();
+                        let _ = self.state_signals.send(());
+                        snapshot
+                    })
                     .map_err(|error| error.to_string());
                 let _ = reply.send(result);
             }
@@ -1593,6 +1729,8 @@ impl RuntimeManagerTask {
         // session JSONL and session-scoped draft persistence are independent.
         self.controllers.remove(&run_id);
         self.ui.remove(&run_id);
+        self.rpc_traffic.remove(&run_id);
+        self.stream_stall_deadlines.remove(&run_id);
         self.processes.remove(&run_id);
         self.startups.remove(&run_id);
         self.pending_failures.remove(&run_id);
@@ -1606,6 +1744,51 @@ impl RuntimeManagerTask {
             .retain(|(owner, _), _| *owner != run_id);
         let _ = self.drafts.release_run(run_id);
         let _ = self.store.remove_terminal(run_id);
+    }
+
+    fn diagnostics_snapshot(&self) -> RuntimeDiagnosticsSnapshot {
+        let now = Instant::now();
+        let mut runs = Vec::with_capacity(self.store.len());
+        for run in self.store.records() {
+            let run_id = run.id();
+            let controller = self.controllers.get(&run_id);
+            let live = controller.map(RunRpcController::live_projection);
+            let queue = self.ui.get(&run_id);
+            let backlog = queue.map(|queue| queue.backlog.stats()).unwrap_or_default();
+            let (rpc_events_per_second, rpc_event_bytes_per_second) = self
+                .rpc_traffic
+                .get(&run_id)
+                .map_or((0, 0), |traffic| traffic.rates(now));
+            runs.push(RunRuntimeDiagnostics {
+                run_id,
+                process_owned: self.processes.contains_key(&run_id),
+                retained_runtime_state_bytes: run.retained_runtime_state_bytes_with_name(
+                    run.session_state().session_name.as_deref(),
+                ),
+                pending_rpc_requests: controller.map_or(0, RunRpcController::pending_request_count),
+                active_rpc_commands: controller.map_or(0, RunRpcController::active_command_count),
+                pending_extension_dialogs: controller.map_or(0, |controller| {
+                    controller.pending_extension_dialogs().count()
+                }),
+                assistant_blocks: live.map_or(0, super::LiveProjection::assistant_block_count),
+                active_tools: live.map_or(0, super::LiveProjection::active_tool_count),
+                active_direct_bash: live.map_or(0, super::LiveProjection::active_direct_bash_count),
+                ui_backlog_bytes: backlog.resident_bytes,
+                ui_backlog_frames: backlog.frame_count,
+                ui_coalesced_frames: backlog.coalesced_frames,
+                ui_dropped_display_frames: backlog.dropped_display_frames,
+                ui_delivered_events: queue.map_or(0, |queue| queue.delivered_events),
+                ui_rehydrate_required: queue.is_some_and(|queue| queue.rehydrate_required),
+                rpc_events_per_second,
+                rpc_event_bytes_per_second,
+            });
+        }
+        runs.sort_by_key(|run| run.run_id.to_string());
+        RuntimeDiagnosticsSnapshot {
+            runtime_revision: self.store.revision(),
+            owned_processes: self.processes.len(),
+            runs,
+        }
     }
 
     fn forget_evicted_draft_session(&mut self, session_id: Option<String>) {
@@ -2388,14 +2571,29 @@ impl RuntimeManagerTask {
     fn handle_inbound(&mut self, run_id: RunId, message: InboundMessage) -> Result<(), String> {
         match message {
             InboundMessage::Event(event) => {
+                let now = Instant::now();
+                let event_bytes = serde_json::to_vec(&event.raw).map_or(0, |payload| payload.len());
+                self.rpc_traffic
+                    .entry(run_id)
+                    .or_default()
+                    .record(now, event_bytes);
                 let settled = event.kind == crate::rpc::RpcEventKind::AgentSettled;
-                let effect = self
-                    .controllers
-                    .get_mut(&run_id)
-                    .ok_or_else(|| format!("run {run_id} has no RPC controller"))?
-                    .apply_event(&event, &mut self.store)
-                    .map_err(|error| error.to_string())?;
+                let (effect, cleared_stall) = {
+                    let controller = self
+                        .controllers
+                        .get_mut(&run_id)
+                        .ok_or_else(|| format!("run {run_id} has no RPC controller"))?;
+                    let cleared_stall = controller.set_stream_stalled(false);
+                    let effect = controller
+                        .apply_event(&event, &mut self.store)
+                        .map_err(|error| error.to_string())?;
+                    (effect, cleared_stall)
+                };
                 self.apply_rpc_effect(run_id, effect);
+                self.refresh_stream_stall_watch(run_id, now);
+                if cleared_stall {
+                    self.push_state_changed(run_id);
+                }
                 if settled {
                     self.handle_stop_settled(run_id);
                     self.queue_incremental_session_sync(run_id);
@@ -2449,6 +2647,13 @@ impl RuntimeManagerTask {
             self.store
                 .apply(run_id, RunMutation::ProcessReady)
                 .map_err(|error| error.to_string())?;
+        }
+        if completed.outcome == RpcResponseOutcome::Accepted && response.command == "get_state" {
+            // `get_state` can be the first authoritative observation after a
+            // missed event interval. If it discovers Working, arm the same
+            // one-shot quiet-stream advisory used by live events. If it
+            // discovers a non-working state, clear any stale local advisory.
+            self.refresh_stream_stall_watch(run_id, Instant::now());
         }
         let reconcile_replaced_session = completed.outcome == RpcResponseOutcome::Accepted
             && completed.active.class == RpcConcurrencyClass::SessionReplacement;
@@ -2683,7 +2888,8 @@ impl RuntimeManagerTask {
         let owns_response = self.stops.get(&run_id).is_some_and(|active| {
             let expected = match active.transaction.phase() {
                 StopPhase::AwaitingClearQueue { request_id }
-                | StopPhase::AwaitingAbort { request_id } => Some(request_id.as_str()),
+                | StopPhase::AwaitingAbort { request_id }
+                | StopPhase::AwaitingAbortRetry { request_id } => Some(request_id.as_str()),
                 _ => None,
             };
             expected == response.id.as_deref()
@@ -2692,6 +2898,19 @@ impl RuntimeManagerTask {
             return;
         }
         let mut active = self.stops.remove(&run_id).expect("stop exists");
+        if matches!(
+            active.transaction.phase(),
+            StopPhase::AwaitingClearQueue { .. }
+        ) && response.outcome() != RpcResponseOutcome::Accepted
+            && let Some(fallback) = self
+                .controllers
+                .get(&run_id)
+                .map(RunRpcController::observed_queue_recovery)
+        {
+            active
+                .transaction
+                .preserve_clear_queue_rejection_fallback(fallback);
+        }
         match active.transaction.on_response(response, &mut self.store) {
             Ok(directive) => {
                 self.stops.insert(run_id, active);
@@ -2735,8 +2954,58 @@ impl RuntimeManagerTask {
         self.apply_stop_directive(run_id, directive);
     }
 
+    fn should_watch_stream_stall(&self, run_id: RunId) -> bool {
+        let Some(run) = self.store.get(run_id) else {
+            return false;
+        };
+        if run.process_state() != ProcessState::Ready
+            || run.activity_state() != ActivityState::Working
+            || run.is_retry_waiting()
+            || run.has_summarization_retry()
+        {
+            return false;
+        }
+        self.controllers
+            .get(&run_id)
+            .is_some_and(|controller| !controller.has_pending_extension_dialogs())
+    }
+
+    fn refresh_stream_stall_watch(&mut self, run_id: RunId, now: Instant) {
+        if self.should_watch_stream_stall(run_id) {
+            self.stream_stall_deadlines.insert(
+                run_id,
+                now + Duration::from_millis(self.limits.stream_stall_advisory_ms),
+            );
+        } else {
+            self.stream_stall_deadlines.remove(&run_id);
+            if let Some(controller) = self.controllers.get_mut(&run_id) {
+                controller.set_stream_stalled(false);
+            }
+        }
+    }
+
     fn handle_deadlines(&mut self) {
         let now = Instant::now();
+        let quiet_runs: Vec<_> = self
+            .stream_stall_deadlines
+            .iter()
+            .filter(|(_, deadline)| **deadline <= now)
+            .map(|(run_id, _)| *run_id)
+            .collect();
+        for run_id in quiet_runs {
+            self.stream_stall_deadlines.remove(&run_id);
+            if !self.should_watch_stream_stall(run_id) {
+                continue;
+            }
+            if self
+                .controllers
+                .get_mut(&run_id)
+                .is_some_and(|controller| controller.set_stream_stalled(true))
+            {
+                self.push_state_changed(run_id);
+            }
+        }
+
         let expired_closes: Vec<_> = self
             .closes
             .iter()
@@ -2865,6 +3134,7 @@ impl RuntimeManagerTask {
                     .map(|pending| pending.deadline),
             )
             .chain(self.draft_save_deadlines.values().copied())
+            .chain(self.stream_stall_deadlines.values().copied())
             .chain(
                 self.shutdown
                     .as_ref()
@@ -2880,6 +3150,7 @@ impl RuntimeManagerTask {
 
     fn begin_transport_failure(&mut self, run_id: RunId, kind: RunFailureKind, detail: &str) {
         self.startups.remove(&run_id);
+        self.stream_stall_deadlines.remove(&run_id);
         let process = self.store.get(run_id).map(RunRecord::process_state);
         if process.is_none() || process.is_some_and(ProcessState::is_terminal) {
             return;
@@ -2905,6 +3176,7 @@ impl RuntimeManagerTask {
 
     fn finalize_natural_exit(&mut self, run_id: RunId, code: Option<i32>) {
         self.startups.remove(&run_id);
+        self.stream_stall_deadlines.remove(&run_id);
         let process_state = self.store.get(run_id).map(RunRecord::process_state);
         if process_state.is_none() || process_state.is_some_and(ProcessState::is_terminal) {
             self.processes.remove(&run_id);
@@ -2921,7 +3193,7 @@ impl RuntimeManagerTask {
             RunMutation::ProcessFailed {
                 failure: RunFailure::from_runtime_limits(
                     RunFailureKind::UnexpectedExit,
-                    &format!("Pi process exited unexpectedly with code {code:?}"),
+                    &unexpected_exit_detail(process_state, code),
                     self.limits,
                 ),
                 code,
@@ -2952,6 +3224,7 @@ impl RuntimeManagerTask {
 
     fn finalize_uncertain_termination(&mut self, run_id: RunId, detail: &str) {
         self.startups.remove(&run_id);
+        self.stream_stall_deadlines.remove(&run_id);
         let process = self.store.get(run_id).map(RunRecord::process_state);
         if process.is_none() || process.is_some_and(ProcessState::is_terminal) {
             self.processes.remove(&run_id);
@@ -3120,6 +3393,7 @@ impl RuntimeManagerTask {
                 runtime_revision: revision,
             },
         );
+        let _ = self.state_signals.send(());
     }
 
     fn push_semantic(&mut self, run_id: RunId, event: RuntimeUiEvent) {
@@ -3235,6 +3509,15 @@ impl RuntimeManagerTask {
         let _ = shutdown.reply.send(Ok(report));
         true
     }
+}
+
+fn unexpected_exit_detail(process: Option<ProcessState>, code: Option<i32>) -> String {
+    if process == Some(ProcessState::Starting) {
+        return format!(
+            "Pi process exited before the RPC readiness handshake completed with code {code:?}. If this followed a Pi update or extension change, retry the launch with extension discovery disabled; Pi can fail during startup when an installed extension cannot load"
+        );
+    }
+    format!("Pi process exited unexpectedly with code {code:?}")
 }
 
 fn extension_response_id(response: &ExtensionUiResponse) -> &str {
@@ -3583,6 +3866,277 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unsupported_clear_queue_hard_stops_but_restores_last_bounded_user_queue_event() {
+        let unsupported = FAKE_PI_JS.replace(
+            r#"    case "clear_queue":
+      respond(request, {steering: ["recover steering"], followUp: ["recover follow up"]});
+      emit({type: "queue_update", steering: [], followUp: []});
+      break;"#,
+            r#"    case "clear_queue":
+      reject(request, "Unknown command: clear_queue");
+      break;"#,
+        );
+        assert_ne!(
+            unsupported, FAKE_PI_JS,
+            "fixture must replace clear_queue behavior"
+        );
+        let fixture = ManagerFixture::new_with_script("stop-clear-unsupported", &unsupported);
+        let manager = spawn_runtime_manager(RuntimeLimits::default()).expect("manager");
+        let run_id = manager
+            .start_run(fixture.start_spec())
+            .await
+            .expect("start run");
+        synchronize(&manager, run_id, "stop-clear-unsupported-startup").await;
+
+        manager
+            .request(
+                run_id,
+                RpcRequest::with_id(
+                    RequestId::from_wire("stop-clear-unsupported-hold"),
+                    RpcCommand::Prompt {
+                        message: "hold".to_owned(),
+                        images: Vec::new(),
+                        streaming_behavior: None,
+                    },
+                ),
+            )
+            .await
+            .expect("hold prompt accepted");
+        synchronize(&manager, run_id, "stop-clear-unsupported-working").await;
+        manager
+            .edit_draft(run_id, "already typed".to_owned())
+            .await
+            .expect("unsent editor draft");
+
+        let stopped = manager
+            .stop_run(run_id)
+            .await
+            .expect("unsupported clear_queue uses hard Stop");
+        assert!(stopped.process_terminated);
+        assert!(!stopped.quarantined);
+        assert_eq!(stopped.recovered_steering, ["recover steering"]);
+        assert_eq!(stopped.recovered_follow_up, ["recover follow up"]);
+        assert!(stopped.draft_restored);
+
+        let terminal = manager.hydrate().await.expect("terminal hydration");
+        let run = terminal
+            .runs
+            .iter()
+            .find(|run| run.run.id() == run_id)
+            .expect("retained stopped run");
+        assert_eq!(run.run.process_state(), ProcessState::Exited);
+        assert_eq!(
+            run.draft.as_ref().expect("restored draft").text,
+            "recover steering\nrecover follow up\nalready typed"
+        );
+        manager.shutdown().await.expect("shutdown");
+    }
+
+    #[tokio::test]
+    async fn steady_idle_runtime_has_no_periodic_dirty_wakeup_or_revision_churn() {
+        let fixture = ManagerFixture::new("idle-no-poll");
+        let manager = spawn_runtime_manager(RuntimeLimits::default()).expect("manager");
+        let mut signals = manager.subscribe();
+        let run_id = manager
+            .start_run(fixture.start_spec())
+            .await
+            .expect("start idle run");
+        synchronize(&manager, run_id, "idle-no-poll-startup").await;
+        let _ = drain_all(&manager, run_id).await;
+        while signals.try_recv().is_ok() {}
+
+        // Give any startup-only async work a chance to settle, clear its
+        // advisory wakeup if one arrived, then observe a steady idle window.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let _ = drain_all(&manager, run_id).await;
+        while signals.try_recv().is_ok() {}
+        let before = manager
+            .hydrate()
+            .await
+            .expect("idle baseline")
+            .runtime_revision;
+
+        assert!(
+            timeout(Duration::from_millis(250), signals.recv())
+                .await
+                .is_err(),
+            "an idle Ready runtime emitted periodic work"
+        );
+        let after = manager.hydrate().await.expect("idle after window");
+        assert_eq!(after.runtime_revision, before);
+        assert_eq!(after.runs[0].run.process_state(), ProcessState::Ready);
+        assert_eq!(after.runs[0].run.activity_state(), ActivityState::Idle);
+        manager.shutdown().await.expect("shutdown");
+    }
+
+    #[tokio::test]
+    async fn quiet_working_stream_sets_one_shot_advisory_and_clears_on_next_pi_event() {
+        let fixture = ManagerFixture::new("stream-stall-advisory");
+        let limits = RuntimeLimits {
+            stream_stall_advisory_ms: 40,
+            ..RuntimeLimits::default()
+        };
+        let manager = spawn_runtime_manager(limits).expect("manager");
+        let mut signals = manager.subscribe();
+        let run_id = manager
+            .start_run(fixture.start_spec())
+            .await
+            .expect("start run");
+        synchronize(&manager, run_id, "stall-advisory-startup").await;
+        let _ = drain_all(&manager, run_id).await;
+        while signals.try_recv().is_ok() {}
+
+        manager
+            .request(
+                run_id,
+                RpcRequest::with_id(
+                    RequestId::from_wire("stall-hold"),
+                    RpcCommand::Prompt {
+                        message: "hold".to_owned(),
+                        images: Vec::new(),
+                        streaming_behavior: None,
+                    },
+                ),
+            )
+            .await
+            .expect("hold prompt accepted");
+        synchronize(&manager, run_id, "stall-advisory-working").await;
+        let working = manager.hydrate().await.expect("working hydration");
+        assert_eq!(working.runs[0].run.activity_state(), ActivityState::Working);
+        assert!(!working.runs[0].rpc.as_ref().expect("rpc").stream_stalled);
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let stalled = manager.hydrate().await.expect("stalled hydration");
+        assert_eq!(stalled.runs[0].run.activity_state(), ActivityState::Working);
+        assert!(stalled.runs[0].rpc.as_ref().expect("rpc").stream_stalled);
+
+        // Consume the one advisory wakeup, then prove the watchdog does not
+        // become a periodic poll/resignal loop while the stream remains quiet.
+        let _ = drain_all(&manager, run_id).await;
+        while signals.try_recv().is_ok() {}
+        assert!(
+            timeout(Duration::from_millis(120), signals.recv())
+                .await
+                .is_err(),
+            "quiet-stream advisory repeated without a new Pi event"
+        );
+
+        let stopped = manager.stop_run(run_id).await.expect("stop quiet stream");
+        assert!(!stopped.quarantined);
+        let after = manager.hydrate().await.expect("after stop");
+        assert!(!after.runs[0].rpc.as_ref().expect("rpc").stream_stalled);
+        assert_eq!(after.runs[0].run.activity_state(), ActivityState::Idle);
+        manager.shutdown().await.expect("shutdown");
+    }
+
+    #[tokio::test]
+    async fn get_state_recovery_can_arm_quiet_stream_advisory_after_missed_agent_start() {
+        let fixture = ManagerFixture::new("state-only-stall-advisory");
+        let limits = RuntimeLimits {
+            stream_stall_advisory_ms: 40,
+            ..RuntimeLimits::default()
+        };
+        let manager = spawn_runtime_manager(limits).expect("manager");
+        let run_id = manager
+            .start_run(fixture.start_spec())
+            .await
+            .expect("start run");
+        synchronize(&manager, run_id, "state-only-stall-startup").await;
+
+        manager
+            .request(
+                run_id,
+                RpcRequest::with_id(
+                    RequestId::from_wire("state-only-stall-prompt"),
+                    RpcCommand::Prompt {
+                        message: "state-only-hold".to_owned(),
+                        images: Vec::new(),
+                        streaming_behavior: None,
+                    },
+                ),
+            )
+            .await
+            .expect("state-only hold accepted");
+
+        // The fake child intentionally emits no agent_start event here. Only
+        // authoritative get_state can repair the manager's activity state and
+        // arm the advisory deadline after that missed event interval.
+        synchronize(&manager, run_id, "state-only-stall-reconcile").await;
+        let recovered = manager.hydrate().await.expect("recovered working state");
+        assert_eq!(
+            recovered.runs[0].run.activity_state(),
+            ActivityState::Working
+        );
+        assert!(!recovered.runs[0].rpc.as_ref().expect("rpc").stream_stalled);
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let stalled = manager.hydrate().await.expect("stalled state");
+        assert!(stalled.runs[0].rpc.as_ref().expect("rpc").stream_stalled);
+
+        let stopped = manager
+            .stop_run(run_id)
+            .await
+            .expect("stop recovered stream");
+        assert!(!stopped.quarantined);
+        let after = manager.hydrate().await.expect("after stop");
+        assert_eq!(after.runs[0].run.activity_state(), ActivityState::Idle);
+        assert!(!after.runs[0].rpc.as_ref().expect("rpc").stream_stalled);
+        manager.shutdown().await.expect("shutdown");
+    }
+
+    #[tokio::test]
+    async fn runtime_diagnostics_are_pull_only_and_reflect_owned_bounded_state() {
+        let fixture = ManagerFixture::new("diagnostics");
+        let limits = RuntimeLimits::default();
+        let manager = spawn_runtime_manager(limits).expect("manager");
+        let run_id = manager
+            .start_run(fixture.start_spec())
+            .await
+            .expect("start run");
+        synchronize(&manager, run_id, "diagnostics-startup").await;
+
+        let initial = manager.diagnostics().await.expect("initial diagnostics");
+        assert_eq!(initial.owned_processes, 1);
+        assert_eq!(initial.runs.len(), 1);
+        let run = &initial.runs[0];
+        assert_eq!(run.run_id, run_id);
+        assert!(run.process_owned);
+        assert!(run.retained_runtime_state_bytes <= limits.max_runtime_state_bytes_per_run);
+        assert!(run.pending_rpc_requests <= limits.max_pending_rpc_requests_per_run);
+        assert!(run.active_tools <= limits.max_active_tools_per_run);
+        assert!(run.ui_backlog_bytes <= limits.max_ui_backlog_bytes_per_run);
+
+        manager
+            .request(
+                run_id,
+                RpcRequest::with_id(
+                    RequestId::from_wire("diagnostics-stream"),
+                    RpcCommand::Prompt {
+                        message: "stream".to_owned(),
+                        images: Vec::new(),
+                        streaming_behavior: None,
+                    },
+                ),
+            )
+            .await
+            .expect("diagnostic stream prompt");
+        synchronize(&manager, run_id, "diagnostics-stream-settled").await;
+        let _ = drain_all(&manager, run_id).await;
+
+        let after = manager.diagnostics().await.expect("post-drain diagnostics");
+        let run = after
+            .runs
+            .iter()
+            .find(|run| run.run_id == run_id)
+            .expect("run");
+        assert!(run.ui_delivered_events > 0);
+        assert!(run.ui_backlog_bytes <= limits.max_ui_backlog_bytes_per_run);
+        assert!(run.ui_backlog_frames <= limits.max_process_event_queue);
+        manager.shutdown().await.expect("shutdown");
+    }
+
+    #[tokio::test]
+    #[ignore = "Windows exact-tree confirmation fixture; exercised serially by full verification"]
     async fn close_idle_run_flushes_draft_terminates_process_and_releases_execution_root() {
         let fixture = ManagerFixture::new("close-idle");
         let persistence_root = fixture.root.join("app-state");
@@ -3843,15 +4397,19 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "scale fixture; exercised by full verification"]
-    async fn four_simulated_streaming_runs_remain_independently_bounded_and_responsive() {
+    async fn eight_simulated_streaming_runs_remain_independently_bounded_and_responsive() {
         let fixtures = [
-            ManagerFixture::new("scale-four-a"),
-            ManagerFixture::new("scale-four-b"),
-            ManagerFixture::new("scale-four-c"),
-            ManagerFixture::new("scale-four-d"),
+            ManagerFixture::new("scale-eight-a"),
+            ManagerFixture::new("scale-eight-b"),
+            ManagerFixture::new("scale-eight-c"),
+            ManagerFixture::new("scale-eight-d"),
+            ManagerFixture::new("scale-eight-e"),
+            ManagerFixture::new("scale-eight-f"),
+            ManagerFixture::new("scale-eight-g"),
+            ManagerFixture::new("scale-eight-h"),
         ];
         let limits = RuntimeLimits {
-            max_live_runs: 4,
+            max_live_runs: 8,
             ..RuntimeLimits::default()
         };
         let manager = spawn_runtime_manager(limits).expect("manager");
@@ -3861,11 +4419,11 @@ mod tests {
                 .start_run(fixture.start_spec())
                 .await
                 .expect("start scale run");
-            synchronize(&manager, run_id, &format!("scale-four-startup-{index}")).await;
+            synchronize(&manager, run_id, &format!("scale-eight-startup-{index}")).await;
             let _ = drain_all(&manager, run_id).await;
             run_ids.push(run_id);
         }
-        assert_eq!(manager.capacity().await.expect("capacity").active_runs, 4);
+        assert_eq!(manager.capacity().await.expect("capacity").active_runs, 8);
 
         let mut tasks = Vec::new();
         for (index, run_id) in run_ids.iter().copied().enumerate() {
@@ -3875,7 +4433,7 @@ mod tests {
                     .request(
                         run_id,
                         RpcRequest::with_id(
-                            RequestId::from_wire(format!("scale-four-stream-{index}")),
+                            RequestId::from_wire(format!("scale-eight-stream-{index}")),
                             RpcCommand::Prompt {
                                 message: "stream".to_owned(),
                                 images: Vec::new(),
@@ -3889,14 +4447,14 @@ mod tests {
         for task in tasks {
             let completion = timeout(Duration::from_secs(5), task)
                 .await
-                .expect("bounded four-run request deadline")
+                .expect("bounded eight-run request deadline")
                 .expect("request task")
                 .expect("request completion");
             assert_eq!(completion.response.outcome(), RpcResponseOutcome::Accepted);
         }
 
-        let snapshot = manager.hydrate().await.expect("four-run hydration");
-        assert_eq!(snapshot.runs.len(), 4);
+        let snapshot = manager.hydrate().await.expect("eight-run hydration");
+        assert_eq!(snapshot.runs.len(), 8);
         for run_id in run_ids {
             let events = drain_all(&manager, run_id).await;
             assert!(events.len() <= limits.max_runtime_command_queue);
@@ -4068,6 +4626,21 @@ mod tests {
         manager.shutdown().await.expect("shutdown");
     }
 
+    #[tokio::test]
+    async fn live_run_limit_changes_wake_event_driven_orchestration() {
+        let manager = spawn_runtime_manager(RuntimeLimits::default()).expect("manager");
+        let mut state_changes = manager.subscribe_state_changes();
+        manager
+            .set_live_run_limit(7)
+            .await
+            .expect("change admission limit");
+        timeout(Duration::from_secs(1), state_changes.recv())
+            .await
+            .expect("capacity change must wake orchestration")
+            .expect("state-change channel remains open");
+        manager.shutdown().await.expect("shutdown");
+    }
+
     #[test]
     fn runtime_capacity_wire_shape_matches_desktop_contract() {
         assert_eq!(
@@ -4083,6 +4656,66 @@ mod tests {
                 "configuredMaxLiveRuns":8
             })
         );
+    }
+
+    #[test]
+    fn runtime_diagnostics_wire_shape_is_bounded_counter_data() {
+        let run_id = RunId::new();
+        let value = serde_json::to_value(RuntimeDiagnosticsSnapshot {
+            runtime_revision: 9,
+            owned_processes: 1,
+            runs: vec![RunRuntimeDiagnostics {
+                run_id,
+                process_owned: true,
+                retained_runtime_state_bytes: 321,
+                pending_rpc_requests: 2,
+                active_rpc_commands: 1,
+                pending_extension_dialogs: 1,
+                assistant_blocks: 3,
+                active_tools: 1,
+                active_direct_bash: 0,
+                ui_backlog_bytes: 456,
+                ui_backlog_frames: 4,
+                ui_coalesced_frames: 8,
+                ui_dropped_display_frames: 2,
+                ui_delivered_events: 12,
+                ui_rehydrate_required: false,
+                rpc_events_per_second: 20,
+                rpc_event_bytes_per_second: 4_096,
+            }],
+        })
+        .expect("diagnostics wire shape");
+        assert_eq!(value["runtimeRevision"], 9);
+        assert_eq!(value["ownedProcesses"], 1);
+        assert_eq!(value["runs"][0]["runId"], run_id.to_string());
+        assert_eq!(value["runs"][0]["uiDroppedDisplayFrames"], 2);
+        assert_eq!(value["runs"][0]["rpcEventBytesPerSecond"], 4_096);
+    }
+
+    #[test]
+    fn rpc_traffic_window_is_fixed_size_and_decays_without_a_timer() {
+        let now = Instant::now();
+        let mut traffic = RpcTrafficWindow::default();
+        traffic.record(now, 250);
+        assert_eq!(traffic.rates(now + Duration::from_millis(100)), (10, 2_500));
+        traffic.record(now + Duration::from_millis(200), 50);
+        assert_eq!(traffic.rates(now + Duration::from_millis(200)), (10, 1_500));
+        assert_eq!(traffic.rates(now + Duration::from_secs(1)), (0, 0));
+
+        traffic.record(now + Duration::from_secs(2), 80);
+        assert_eq!(traffic.events, 1);
+        assert_eq!(traffic.bytes, 80);
+    }
+
+    #[test]
+    fn startup_exit_detail_points_to_extension_free_recovery_without_copying_stderr() {
+        let detail = unexpected_exit_detail(Some(ProcessState::Starting), Some(23));
+        assert!(detail.contains("before the RPC readiness handshake"));
+        assert!(detail.contains("extension discovery disabled"));
+        assert!(detail.contains("Some(23)"));
+
+        let ready = unexpected_exit_detail(Some(ProcessState::Ready), Some(17));
+        assert_eq!(ready, "Pi process exited unexpectedly with code Some(17)");
     }
 
     #[test]
@@ -4305,6 +4938,10 @@ mod tests {
             .set_auto_compaction(run_id, false)
             .await
             .expect("disable automatic compaction");
+        manager
+            .set_auto_retry(run_id, false)
+            .await
+            .expect("disable automatic retry");
         manager
             .set_session_name(run_id, "Control Surface".to_owned())
             .await
@@ -5508,9 +6145,11 @@ mod tests {
         let first = queue.drain(1);
         assert_eq!(first.events.len(), 1);
         assert!(first.has_more);
+        assert_eq!(queue.delivered_events, 1);
         let second = queue.drain(1);
         assert_eq!(second.events.len(), 1);
         assert!(!second.has_more);
+        assert_eq!(queue.delivered_events, 2);
     }
 
     #[test]
@@ -5631,15 +6270,22 @@ function handle(request) {
       autoCompactionEnabled = Boolean(request.enabled);
       respond(request);
       break;
+    case "set_auto_retry":
+      if (typeof request.enabled !== "boolean") {
+        reject(request, "enabled must be boolean");
+        break;
+      }
+      respond(request);
+      break;
     case "set_session_name":
       sessionName = String(request.name);
       respond(request);
       emit({type: "session_info_changed", name: sessionName || null});
       break;
     case "compact":
-      emit({type: "compaction_start"});
+      emit({type: "compaction_start", reason: "manual"});
       respond(request, {summary: "fixture compaction", firstKeptEntryId: "kept-entry", tokensBefore: 100, estimatedTokensAfter: 40});
-      emit({type: "compaction_end"});
+      emit({type: "compaction_end", reason: "manual", result: {summary: "fixture compaction"}, aborted: false, willRetry: false});
       break;
     case "get_session_stats":
       respond(request, {
@@ -5713,6 +6359,9 @@ function handle(request) {
       }
       respond(request);
       working = true;
+      if (request.message === "state-only-hold") {
+        break;
+      }
       emit({type: "agent_start"});
       if (request.message === "notify") {
         emit({

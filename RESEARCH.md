@@ -313,7 +313,7 @@ These findings do not justify importing Codex/OpenCode runtime semantics. They j
 
 ### Tauri renderer security
 
-The initial Tauri scaffold had `csp: null`, which left the static renderer without an application-level Content Security Policy. Current Tauri guidance recommends an explicit restrictive CSP and narrow IPC capabilities. Pi Wizard now sets a static CSP that permits its local assets, Tauri IPC transport, inline generated styles, and local/data/blob images while denying objects, external base URLs, and framing. Future renderer capabilities should remain purpose-built rather than exposing generic shell/filesystem authority.
+The initial Tauri scaffold had `csp: null`, which left the static renderer without an application-level Content Security Policy. Current Tauri guidance recommends an explicit restrictive CSP and narrow IPC capabilities. Pi Wizard now separates the packaged CSP from development CSP: production permits only local scripts/styles/assets plus the Tauri IPC transport and required local/data/blob images, with inline styles and script eval absent; loopback Vite HMR gets its style/WebSocket allowances only through `devCsp`. Session-tree indentation was moved from an inline CSS custom property to one of 25 bounded static depth classes so production does not need `'unsafe-inline'`. Objects, external base URLs, form submission, and framing remain denied. Future renderer capabilities should remain purpose-built rather than exposing generic shell/filesystem authority.
 
 Primary sources:
 
@@ -502,7 +502,7 @@ Primary source:
 
 The previous architecture correctly required GUI/terminal environment parity but had no executable owner for it. The resolver now selects one secret-bearing in-memory environment from explicit configuration, the desktop process, or a bounded shell-probe result. Pi and Git are discovered inside that same selected environment, and process spawn rejects a Pi executable that does not match the resolved identity. Diagnostics expose only path/provenance/count metadata, never provider keys or complete environment values.
 
-The platform-specific bounded shell probe itself remains to be wired. Separating probe acquisition from selection makes that future OS-specific code testable without moving environment precedence or secret-handling policy into Tauri.
+At that audit point the platform-specific bounded shell probe still remained to be wired. It is now implemented: Windows uses a bounded non-interactive PowerShell/pwsh environment probe only when the desktop environment cannot resolve Pi, and the resulting complete environment is fed back through the same Tauri-independent selection owner. The historical separation between probe acquisition and environment selection remains important because it keeps precedence and secret handling out of Tauri.
 
 ### Process supervision and renderer backpressure are now executable owners
 
@@ -796,8 +796,115 @@ Sources:
 
 ### A stuck Pi turn remains a Pi/runtime state, not a guessed desktop timeout
 
-A recent Pi RPC report describes a tool-completed turn that can remain streaming indefinitely until an abort is sent. Pi Wizard already has a user-visible Stop path that preserves queued text, sends Pi's abort, waits for settlement, and escalates only under its explicit process-stop contract. This audit deliberately did **not** add a passive “no output for N seconds means done” timer: builds, tools, extensions, and model calls can legitimately be quiet, and manufacturing Idle would violate the runtime authority boundary. A future stuck-turn diagnostic may offer an explicit state recheck or Stop affordance, but it must not silently rewrite Pi's streaming state.
+A recent Pi RPC report describes a tool-completed turn that can remain streaming indefinitely until an abort is sent. Pi Wizard already had a user-visible Stop path that preserves queued text, sends Pi's abort, waits for settlement, and escalates only under its explicit process-stop contract. This audit deliberately did **not** add a passive “no output for N seconds means done” state rewrite: builds, tools, extensions, and model calls can legitimately be quiet, and manufacturing Idle would violate the runtime authority boundary. A later audit implemented the safe diagnostic form anticipated here: a one-shot quiet-Working advisory driven by the existing deadline selector. It does not probe, retry, resubmit, cancel, or relabel the run, and Stop remains the explicit recovery control.
 
 Source:
 
 - https://github.com/earendil-works/pi/issues/7336
+
+## 20. Final hardening audit: pull diagnostics and catalog indexing evidence
+
+Audit date: **2026-08-28**.
+
+The final hardening pass rechecked two architecture requirements that are easy to satisfy in a way that creates more background work than the product itself: developer observability and large session-catalog navigation.
+
+### Diagnostics should observe bounded owners, not create another telemetry system
+
+The runtime already owns the useful bounded counters at the places where work is admitted or discarded: pending RPC requests, command gates, live assistant/tool/Bash projections, the renderer event backlog, exact process handles, and active Git/session-catalog jobs. A separate logging thread, periodic sampler, or durable trace store would add idle CPU and another retention problem merely to report those owners.
+
+Pi Wizard therefore exposes diagnostics as an explicit pull snapshot. Per-run state includes exact process ownership, retained `RuntimeStore` bytes, pending RPC/command/dialog counts, active live projections, backlog bytes/frames, cumulative coalesced/dropped/delivered UI counts, rehydration pressure, and a fixed one-second recent RPC event/byte window. The desktop adapter adds active Git-review and session-catalog job counts. The renderer samples mounted timeline-row count only when the user requests diagnostics, while development builds use the browser's event-driven `PerformanceObserver` for long-task measurements. No diagnostic timer, log file, or passive subprocess is introduced.
+
+### Exact stateless recent-session ordering requires lightweight metadata enumeration
+
+The original index-policy shorthand said to enumerate only enough metadata for the first visible page. Implementation evidence showed that this is too strong when three other requirements are kept simultaneously: recent sessions are globally ordered by current file modification time, Pi/CLI-created JSONL remains authoritative, and a continuation must fail closed if any candidate changes between pages. Without a derived index, knowing the newest files and computing that catalog snapshot necessarily requires one lightweight directory/metadata pass for an explicit page request.
+
+The implementation still keeps expensive work bounded: only a fixed candidate heap is retained, only a bounded number of session headers/previews are read in detail per page, page entries/bytes are capped, and no catalog work runs at startup or while the session view is passive. Continuation cursors bind project, resolved session directory, query, exact position, and the catalog metadata snapshot. Any external candidate addition/removal/mtime change invalidates the continuation rather than mixing observations.
+
+The existing Windows scale fixture creates 1,200 Pi session files and traverses the complete catalog through bounded pages. A focused run on 2026-08-28 completed the entire fixture in about **1.40 seconds**, including fixture creation and all continuation pages. That measurement does not justify adding SQLite, a filesystem watcher, or another persistent catalog owner. Such an index remains permitted only if larger real-world measurements show the stateless metadata pass is materially expensive; it must remain disposable and cannot weaken Pi JSONL authority or external-change detection.
+
+## 21. Current Pi 0.84.x and lightweight-harness reliability audit
+
+Audit date: **2026-08-28**.
+
+This pass rechecked the implemented application against the current Pi RPC contract, new Pi 0.84.x regressions, and current lightweight agent-desktop reliability patterns. The useful findings were recovery and presentation corrections, not evidence for expanding Pi Wizard into an editor, terminal, or multi-harness framework.
+
+### Writable Resume must reject an unterminated Pi JSONL tail
+
+A current Pi issue shows that if a session file ends with a valid JSON record but no final newline, a resumed Pi session can append the next entry directly to that record and corrupt subsequent recovery. Read-only history can safely tolerate a truncated/unterminated final line, but a GUI that is about to hand a historical file back to Pi for writing has a stronger boundary.
+
+Pi Wizard now validates the final byte during write-capable Resume. A non-empty session must end in LF before `--session` is launched. Both a syntactically valid unterminated final record and a malformed fragment fail closed, and the application never repairs the authoritative Pi file itself.
+
+Source:
+
+- https://github.com/earendil-works/pi/issues/8345
+
+### Broken extension discovery needs a one-run recovery path
+
+Pi 0.84.3 reports include startup failures caused by globally discovered extensions, while Pi itself provides `--no-extensions` / `-ne` as the supported way to bypass discovery. Treating that as a user installation problem would make a lightweight desktop less recoverable than the CLI.
+
+Pi Wizard therefore models extension discovery independently from project trust and context-file loading. Local, worktree, recovered-worktree, and resumed-session launches can disable extension discovery for that child only. The ephemeral launch-options probe is always extension-free so a broken extension cannot prevent the user from reaching model/thinking/recovery choices. Unexpected exit before the RPC readiness handshake also gives a bounded recovery hint without copying arbitrary stderr into durable failure state.
+
+Sources:
+
+- https://pi.dev/docs/latest/extensions
+- https://github.com/earendil-works/pi/issues/8620
+
+### Retry and compaction events carry real control semantics
+
+Current Pi RPC exposes `set_auto_retry`, `abort_retry`, provider retry start/end events, summarization retry events, extension errors, and compaction start/end outcomes. `abort_retry` is specifically for cancelling provider retry delay; after the retry attempt starts, ordinary agent `abort` is the relevant control. Pi does not expose an equivalent summarization-retry cancellation RPC. Compaction end also reports `aborted`, `willRetry`, and optional error text; for overflow recovery, `willRetry` tells the client that Pi owns automatic prompt retry.
+
+Pi Wizard now preserves those distinctions under bounded transient hydration. Stop uses `abort_retry` during provider backoff, normal `abort` after the provider attempt restarts, and exact-process escalation when Pi exposes no truthful RPC cancellation path. Overflow compaction never causes the desktop to replay a prompt. The native `set_auto_retry` command is exposed explicitly, but current `get_state` does not report the enabled flag, so the renderer does not manufacture a recovered current setting.
+
+Primary source:
+
+- https://pi.dev/docs/latest/rpc
+
+### Quiet streams deserve an advisory, not automatic replay
+
+Recent Pi and lightweight desktop reports continue to show turns that remain logically streaming while no useful events arrive for long periods. OpenChamber has added stall/reconnect recovery in this class of failure, but coding turns can also be legitimately quiet during model, tool, extension, or build work. A hard local timeout that retries the prompt would risk duplicate side effects.
+
+Pi Wizard now uses the existing runtime deadline selector for a one-shot two-minute advisory while Pi still reports a Ready/Working run and no explicit retry/summarization/dialog state explains the wait. It does not probe, retry, resubmit, cancel, or relabel the run. The first later Pi event clears the advisory and can arm another deadline. An authoritative `get_state` recovery that discovers Working after a missed `agent_start` can arm the same watch. This adds no interval polling and leaves the existing steady-idle no-periodic-work invariant intact.
+
+Sources:
+
+- https://github.com/earendil-works/pi/issues/8331
+- https://github.com/openchamber/openchamber/blob/main/CHANGELOG.md
+
+### Session list identity should not be generated skill context
+
+Pi persists expanded skill content inside the first user message. A Pi issue documents the resulting resume-list failure mode: the session label becomes a long SKILL.md block rather than the user's actual task. The persisted format supplies an explicit `<skill ...>...</skill>` wrapper, which is enough to normalize the catalog read model safely.
+
+Pi Wizard now strips only that explicit generated wrapper for session preview/search, preserving trailing user arguments or using a bounded `[skill] name` placeholder. The JSONL remains untouched. Generic prompt-template expansion is deliberately not reverse-engineered because it has no equally stable wrapper; guessing would create a second interpretation of Pi history.
+
+Source:
+
+- https://github.com/earendil-works/pi/issues/7424
+
+### Lightweight command-palette ergonomics fit; input-history ownership does not
+
+Current Pi desktop clients have converged on keyboard navigation for discovered slash-command palettes and keeping the selected row visible. That behavior is cheap, local, and bounded. Full prompt/input history is a different owner with retention/session semantics and is not necessary for Pi Wizard's command-center role.
+
+Pi Wizard now supports Arrow Up/Down and Enter staging for its at-most-eight Pi-discovered command suggestions, synchronizes pointer selection, and scrolls the selected row only within the mounted palette. It does not add a command-history database or another transcript-like store.
+
+Representative sources:
+
+- https://github.com/gustavonline/pi-desktop
+- https://github.com/gustavonline/pi-desktop/releases
+
+### Public latest RPC docs can lead the current stable package
+
+The final Stop audit found a concrete protocol skew. The current public RPC documentation describes `clear_queue` and recommends clients clear queued steering/follow-up work before `abort`. The installed/current stable 0.84.3 package contains the underlying `AgentSession.clearQueue()` implementation, which snapshots its user steering/follow-up arrays, clears them, calls the low-level agent `clearAllQueues()` to discard opaque custom continuations, and emits an empty `queue_update`. But 0.84.3's RPC-mode command dispatcher has no `clear_queue` case and returns `Unknown command: clear_queue`.
+
+This makes an abort-only compatibility fallback incorrect: queued work could continue after abort. It also makes rejecting all of 0.84.3 unnecessarily destructive because the rest of the tested RPC surface is usable. Pi Wizard instead treats an explicit `clear_queue` rejection as a compatibility degradation. The controller retains the most recent user-visible `queue_update` text under the existing recovered-message/byte ceilings, but never sends it to renderer hydration. On rejection, Stop copies that bounded snapshot into its existing recovery transaction and terminates the exact Pi process, which also destroys extension custom queues that are absent from `pendingMessageCount`. Timeouts and malformed accepted responses do not reuse the snapshot because the clear side effect would be unknown. On Pi builds where `clear_queue` succeeds, its response remains authoritative and the child remains reusable after ordinary Stop.
+
+The existing extension-free launch-options probe now tests `clear_queue` on its temporary no-session child and surfaces the result before a new run. The optional installed-Pi smoke performs the same non-billable compatibility check. On installed Pi 0.84.3 it reports `clear_queue` unavailable while all other smoke checks pass.
+
+Sources:
+
+- https://pi.dev/docs/latest/rpc
+- https://github.com/earendil-works/pi/issues/8349
+- installed `@earendil-works/pi-coding-agent` 0.84.3 `dist/core/agent-session.js` and `dist/modes/rpc/rpc-mode.js`, inspected 2026-08-28
+
+### Audit conclusion
+
+No current Pi/lightweight-harness evidence justifies weakening the established product boundary. Direct RPC Bash remains protocol support rather than an embedded terminal; arbitrary historical branch switching remains unavailable because current Pi RPC does not expose that mutation; automatic prompt replay is rejected because it could duplicate side effects; editor/file-explorer, branch-integration, remote, scheduler, daemon, and multi-harness work remain explicit later candidates rather than hidden gaps.

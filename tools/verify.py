@@ -25,7 +25,18 @@ def run(argv: list[str]) -> None:
 
 def quick() -> None:
     run([tool("cargo"), "fmt", "--all", "--", "--check"])
-    run([tool("cargo"), "test", "-p", "pi-wizard-core", "--locked"])
+    run(
+        [
+            tool("cargo"),
+            "test",
+            "-p",
+            "pi-wizard-core",
+            "--locked",
+            "--",
+            "--test-threads=4",
+        ]
+    )
+    run([sys.executable, "-B", str(ROOT / "tools" / "test_smoke_live_pi.py")])
     run([tool("npm"), "run", "test:renderer-recovery"])
     run([tool("npm"), "run", "test:accessibility"])
     run([tool("npm"), "run", "check"])

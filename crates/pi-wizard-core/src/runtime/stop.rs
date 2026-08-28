@@ -13,14 +13,17 @@ pub enum StopEscalationReason {
     ClearQueueRejected,
     ClearQueueInvalidResponse,
     AbortRejected,
+    AbortRetryRejected,
     RpcDeadlineExpired,
     CompactionHasNoRpcAbort,
+    SummarizationRetryHasNoRpcAbort,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum StopPhase {
     AwaitingClearQueue { request_id: RequestId },
     AwaitingAbort { request_id: RequestId },
+    AwaitingAbortRetry { request_id: RequestId },
     WaitingForAgentSettled,
     Complete,
     EscalationRequired,
@@ -110,6 +113,15 @@ impl StopTransaction {
         self.recovered.as_ref()
     }
 
+    /// Preserves a bounded queue-event snapshot only for an explicit
+    /// `clear_queue` rejection. The caller must not use this for timeouts or
+    /// malformed accepted responses, where command side effects are unknown.
+    pub fn preserve_clear_queue_rejection_fallback(&mut self, fallback: &ClearQueueResult) {
+        if matches!(self.phase, StopPhase::AwaitingClearQueue { .. }) && self.recovered.is_none() {
+            self.recovered = Some(fallback.clone());
+        }
+    }
+
     #[must_use]
     pub const fn rpc_deadline(&self) -> Instant {
         self.rpc_deadline
@@ -139,12 +151,19 @@ impl StopTransaction {
                     return Ok(self.complete());
                 }
 
-                let activity = store
+                let run = store
                     .get(self.run_id)
                     .ok_or(StopTransactionError::UnknownRun {
                         run_id: self.run_id,
-                    })?
-                    .activity_state();
+                    })?;
+                if run.has_summarization_retry() {
+                    return self
+                        .escalate(StopEscalationReason::SummarizationRetryHasNoRpcAbort, store);
+                }
+                if run.is_retry_waiting() {
+                    return Ok(self.make_abort_retry_request());
+                }
+                let activity = run.activity_state();
                 match activity {
                     ActivityState::Compacting => {
                         self.escalate(StopEscalationReason::CompactionHasNoRpcAbort, store)
@@ -169,6 +188,18 @@ impl StopTransaction {
                     Ok(StopDirective::WaitForAgentSettled)
                 }
             }
+            StopPhase::AwaitingAbortRetry { request_id } => {
+                require_response_id(response, &request_id)?;
+                if response.outcome() != RpcResponseOutcome::Accepted {
+                    return self.escalate(StopEscalationReason::AbortRetryRejected, store);
+                }
+                if self.agent_settled {
+                    Ok(self.complete())
+                } else {
+                    self.phase = StopPhase::WaitingForAgentSettled;
+                    Ok(StopDirective::WaitForAgentSettled)
+                }
+            }
             StopPhase::WaitingForAgentSettled
             | StopPhase::Complete
             | StopPhase::EscalationRequired => Ok(StopDirective::None),
@@ -183,7 +214,9 @@ impl StopTransaction {
     pub fn on_agent_settled(&mut self) -> StopDirective {
         self.agent_settled = true;
         match self.phase {
-            StopPhase::AwaitingAbort { .. } | StopPhase::WaitingForAgentSettled => self.complete(),
+            StopPhase::AwaitingAbort { .. }
+            | StopPhase::AwaitingAbortRetry { .. }
+            | StopPhase::WaitingForAgentSettled => self.complete(),
             _ => StopDirective::None,
         }
     }
@@ -207,6 +240,14 @@ impl StopTransaction {
     fn make_abort_request(&mut self) -> StopDirective {
         let request = RpcRequest::new(RpcCommand::Abort);
         self.phase = StopPhase::AwaitingAbort {
+            request_id: request.id.clone(),
+        };
+        StopDirective::Send(request)
+    }
+
+    fn make_abort_retry_request(&mut self) -> StopDirective {
+        let request = RpcRequest::new(RpcCommand::AbortRetry);
+        self.phase = StopPhase::AwaitingAbortRetry {
             request_id: request.id.clone(),
         };
         StopDirective::Send(request)
@@ -401,6 +442,169 @@ mod tests {
             store.get(run_id).expect("run").activity_state(),
             ActivityState::Idle
         );
+    }
+
+    #[test]
+    fn explicit_clear_queue_rejection_can_preserve_bounded_observed_queue_for_hard_stop() {
+        let run_id = RunId::new();
+        let mut store = store_with_activity(run_id, true, false);
+        let (mut stop, first) =
+            StopTransaction::begin(run_id, Instant::now(), RuntimeLimits::default(), &mut store)
+                .expect("begin");
+        let clear = sent_request(first);
+        let fallback = ClearQueueResult {
+            steering: vec!["observed steering".to_owned()],
+            follow_up: vec!["observed follow up".to_owned()],
+        };
+        stop.preserve_clear_queue_rejection_fallback(&fallback);
+        assert!(matches!(
+            stop.on_response(&rejected(&clear.id, "clear_queue"), &mut store)
+                .expect("escalate"),
+            StopDirective::TerminateProcess {
+                reason: StopEscalationReason::ClearQueueRejected,
+                recovered: Some(recovered),
+                ..
+            } if recovered == fallback
+        ));
+    }
+
+    #[test]
+    fn provider_retry_delay_uses_abort_retry_and_waits_for_agent_settled() {
+        let run_id = RunId::new();
+        let mut store = store_with_activity(run_id, true, false);
+        store
+            .apply(run_id, RunMutation::AutoRetryStarted)
+            .expect("retry delay");
+        let (mut stop, first) =
+            StopTransaction::begin(run_id, Instant::now(), RuntimeLimits::default(), &mut store)
+                .expect("begin");
+        let clear = sent_request(first);
+        let abort_retry = sent_request(
+            stop.on_response(
+                &success(
+                    &clear.id,
+                    "clear_queue",
+                    Some(json!({"steering":[],"followUp":[]})),
+                ),
+                &mut store,
+            )
+            .expect("clear queue"),
+        );
+        assert!(matches!(abort_retry.command, RpcCommand::AbortRetry));
+        assert!(matches!(
+            stop.phase(),
+            StopPhase::AwaitingAbortRetry { request_id } if request_id == &abort_retry.id
+        ));
+        assert_eq!(
+            stop.on_response(&success(&abort_retry.id, "abort_retry", None), &mut store,)
+                .expect("abort retry accepted"),
+            StopDirective::WaitForAgentSettled
+        );
+        store
+            .apply(run_id, RunMutation::AgentSettled)
+            .expect("settled");
+        assert!(matches!(
+            stop.on_agent_settled(),
+            StopDirective::Complete { .. }
+        ));
+        assert_eq!(
+            store.get(run_id).expect("run").process_state(),
+            ProcessState::Ready
+        );
+    }
+
+    #[test]
+    fn rejected_abort_retry_escalates_instead_of_claiming_retry_stopped() {
+        let run_id = RunId::new();
+        let mut store = store_with_activity(run_id, true, false);
+        store
+            .apply(run_id, RunMutation::AutoRetryStarted)
+            .expect("retry delay");
+        let (mut stop, first) =
+            StopTransaction::begin(run_id, Instant::now(), RuntimeLimits::default(), &mut store)
+                .expect("begin");
+        let clear = sent_request(first);
+        let abort_retry = sent_request(
+            stop.on_response(
+                &success(
+                    &clear.id,
+                    "clear_queue",
+                    Some(json!({"steering":[],"followUp":[]})),
+                ),
+                &mut store,
+            )
+            .expect("clear queue"),
+        );
+        assert!(matches!(
+            stop.on_response(&rejected(&abort_retry.id, "abort_retry"), &mut store)
+                .expect("escalate"),
+            StopDirective::TerminateProcess {
+                reason: StopEscalationReason::AbortRetryRejected,
+                ..
+            }
+        ));
+        assert_eq!(
+            store.get(run_id).expect("run").process_state(),
+            ProcessState::Stopping
+        );
+    }
+
+    #[test]
+    fn retry_attempt_after_agent_start_uses_normal_abort_not_abort_retry() {
+        let run_id = RunId::new();
+        let mut store = store_with_activity(run_id, true, false);
+        store
+            .apply(run_id, RunMutation::AutoRetryStarted)
+            .expect("retry scheduled");
+        store
+            .apply(run_id, RunMutation::AgentStarted)
+            .expect("retry attempt started");
+        assert!(!store.get(run_id).expect("run").is_retry_waiting());
+
+        let (mut stop, first) =
+            StopTransaction::begin(run_id, Instant::now(), RuntimeLimits::default(), &mut store)
+                .expect("begin");
+        let clear = sent_request(first);
+        let abort = sent_request(
+            stop.on_response(
+                &success(
+                    &clear.id,
+                    "clear_queue",
+                    Some(json!({"steering":[],"followUp":[]})),
+                ),
+                &mut store,
+            )
+            .expect("clear queue"),
+        );
+        assert!(matches!(abort.command, RpcCommand::Abort));
+    }
+
+    #[test]
+    fn summarization_retry_escalates_because_pi_has_no_retry_abort_rpc_for_it() {
+        let run_id = RunId::new();
+        let mut store = store_with_activity(run_id, false, false);
+        store
+            .apply(run_id, RunMutation::SummarizationRetryStarted)
+            .expect("summary retry");
+        let (mut stop, first) =
+            StopTransaction::begin(run_id, Instant::now(), RuntimeLimits::default(), &mut store)
+                .expect("begin");
+        let clear = sent_request(first);
+        assert!(matches!(
+            stop.on_response(
+                &success(
+                    &clear.id,
+                    "clear_queue",
+                    Some(json!({"steering":[],"followUp":[]})),
+                ),
+                &mut store,
+            )
+            .expect("summary retry escalation"),
+            StopDirective::TerminateProcess {
+                reason: StopEscalationReason::SummarizationRetryHasNoRpcAbort,
+                ..
+            }
+        ));
     }
 
     #[test]

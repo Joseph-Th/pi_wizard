@@ -4,6 +4,7 @@
 //! typed identities, and the live run state machine. Desktop framework types do
 //! not belong here.
 
+pub mod automation;
 pub mod bounded;
 pub mod compatibility;
 pub mod draft;
@@ -18,6 +19,7 @@ mod probe;
 pub mod process;
 pub mod project;
 pub mod project_registry;
+pub mod project_resources;
 pub mod rpc;
 pub mod runtime;
 pub mod session_activation;
@@ -26,5 +28,8 @@ pub mod session_history;
 pub mod worktree;
 pub mod worktree_registry;
 
-pub use ids::{DraftImageId, PiSessionId, ProjectId, RequestId, RunId, WorktreeId};
+pub use ids::{
+    AutomationChainId, AutomationExecutionId, DraftImageId, PiSessionId, ProjectId, RequestId,
+    RunId, WorktreeId,
+};
 pub use limits::{LimitsError, RuntimeLimits};

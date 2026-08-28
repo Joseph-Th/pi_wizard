@@ -36,9 +36,13 @@ Pi Wizard is not initially:
 - a new Pi extension/package manager;
 - a second model credential store;
 - a security sandbox implemented in UI labels;
-- a full background automation scheduler.
+- a cron-style or always-on background automation scheduler.
 
 These constraints are important. Existing agent desktops tend to accumulate editor, terminal, browser, preview, mobile, plugin, remote, and Git-management surfaces. Those can be useful, but they increase hot state, watchers, process count, renderer complexity, and failure coupling. Pi Wizard starts with the smallest surface that materially improves Pi orchestration.
+
+Finite user-started automation is now in scope. A saved chain is deliberately small: a name plus an ordered list of prompts. Starting a chain chooses the project, worker concurrency, and local/worktree execution policy. The runtime fills only available live-run slots, starts one new Pi session per prompt, and advances on backend run-state transitions rather than timers or repository polling. For concurrent work in one project, chains use unique Git worktrees; completed worker processes are closed to release capacity while their Pi session history and Git worktrees remain available for review.
+
+An optional **LLM supervisor** is also in scope as orchestration, not as a replacement agent engine. The supervisor is one ordinary Pi session counted against the same live-run ceiling. It receives bounded summaries of chain workers only when workflow state changes and may return a small validated set of Send/Steer/Follow-up directives addressed to exact RunIds. Unknown runs, oversized messages, malformed output, and unsupported actions are rejected rather than guessed. There is no token-level supervisor loop and no periodic “are you done?” polling.
 
 ## 4. Mental model
 
@@ -104,13 +108,19 @@ The dashboard is the orchestration home. It shows one compact card per live run:
 
 - task/session title;
 - project + worktree;
-- working / waiting / queued / done / failed / stopped;
+- working / needs attention / compacting / queued / ready / done / failed / termination uncertain;
 - current high-level activity;
 - elapsed time;
 - change summary when already known;
 - Stop and Open controls.
 
 It is not a miniature transcript grid. Detailed streams stay inside the session view.
+
+### Automation
+
+Automation is a first-class main view rather than another mode hidden inside the composer. It contains a compact saved-chain list, an ordered prompt-card editor, start controls for project/concurrency/isolation, an optional LLM supervisor toggle, and bounded current execution progress with links to live worker runs.
+
+Chains are finite. Cancel stops the chain from launching or directing more work but does not kill already-running Pi sessions. Worker failures are attached to their exact step and do not silently discard later prompts. Automation never auto-deletes task worktrees.
 
 ## 6. Session view
 
@@ -124,7 +134,7 @@ The timeline groups activity into semantic turns rather than exposing raw protoc
 - tool executions are compact cards;
 - successful completed tool cards collapse to a one-line summary by default;
 - active, failed, or explicitly expanded tools show a bounded output preview;
-- compaction/retry/session events are lightweight notices rather than full message blocks.
+- compaction/retry/session events are lightweight notices rather than full message blocks; compaction abort/failure/overflow-retry and provider/summarization retry state remain visible when they affect recovery, and a quiet Working stream may show a one-shot advisory without being relabeled failed or idle.
 
 Only a virtualized window of turn groups is mounted. Older content loads in bounded pages as the user navigates upward.
 
@@ -142,13 +152,15 @@ When the agent is running:
 - **Follow up** queues work for after the current run settles;
 - **Stop** clears queued work, preserves the cleared text for recovery, and aborts the active run.
 
+A successful ordinary Stop on a Pi build with native queue clearing does not create a terminal “stopped” process state. Pi remains alive and reusable, so the run returns to **Ready** after settlement. If the installed Pi RPC does not expose queue clearing, or Stop otherwise must escalate to process termination, the terminal state reflects the confirmed exit/failure or explicit termination uncertainty instead of pretending the reusable RPC abort succeeded. New Run capability discovery warns when the installed Pi build requires this process-terminating Stop path, and a completed hard Stop explains that the Pi session can be resumed.
+
 The user should never have to guess whether a message will interrupt, steer, or wait. Keyboard shortcuts can mirror Pi, but the semantic action is visible in the control.
 
-Slash-command autocomplete is populated from Pi's runtime command discovery rather than a hardcoded app list. Model and thinking selectors likewise come from Pi capabilities.
+Slash-command autocomplete is populated from Pi's runtime command discovery rather than a hardcoded app list. The bounded palette supports Arrow Up/Down selection plus Enter to stage the selected command, keeps the active row visible, and does not create an application-owned input-history store. Model and thinking selectors likewise come from Pi capabilities.
 
 The composer supports Pi-native image attachments with explicit count/per-image/aggregate limits. Picker, paste, drag/drop, IPC, and restored drafts all pass through the same backend validation; an oversized attachment is rejected before it can become a large reactive/IPC payload. When Pi explicitly declares the selected model text-only, the UI disables new image ingestion and blocks submission of existing image drafts while keeping those images removable/preserved. Missing capability metadata stays compatible rather than being guessed as unsupported.
 
-An idle session also exposes **Compact context**, which invokes Pi's native manual compaction. The label describes the user job, while Pi remains responsible for summary/context semantics and the runtime reconciles authoritative state after completion.
+An idle session also exposes **Compact context**, which invokes Pi's native manual compaction. The label describes the user job, while Pi remains responsible for summary/context semantics and the runtime reconciles authoritative state after completion. Run details may also send Pi's native automatic-provider-retry enable/disable command. Because current `get_state` does not report that flag, the UI never presents a cached choice as authoritative current state after reload/recovery.
 
 Draft text is session-scoped and durable. Switching sessions never carries a draft to another session and never silently discards it. The UI can remain visually quiet when persistence is healthy, but a failed save is visible and retryable. Extension-driven `set_editor_text` updates participate in the same draft state rather than replacing it behind the user's back.
 
@@ -171,7 +183,7 @@ The New Session sheet asks only for decisions that materially affect the run:
 3. Model and thinking level, defaulting to Pi configuration.
 4. Initial task.
 
-Advanced options are collapsed. Project trust is handled before launching RPC when Pi detects protected project resources and no applicable decision exists. The user can run the process with resources approved or ignored for that run. The UI explains that this controls project resource loading only.
+Advanced options are collapsed. Project trust is handled before launching RPC when Pi detects protected project resources and no applicable decision exists. The user can run the process with resources approved or ignored for that run. The UI explains that this controls project resource loading only. Extension discovery is a separate per-launch recovery choice: users may inherit normal Pi extension discovery or disable extensions for that child when a broken installed extension prevents startup. Disabling extensions is not described as trust, context-file, or sandbox policy.
 
 The normal trust selection is **Use Pi trust settings**, preserving Pi's saved canonical-directory decision and global fallback. One-run **Approve** and **Ignore protected resources** overrides remain available. The sheet explicitly notes that `AGENTS.md`/`CLAUDE.md` context instructions still load when protected resources are ignored; disabling context instructions is a separate advanced choice.
 
@@ -205,7 +217,7 @@ The Session Tree inspector supports:
 - forking through Pi-owned session operations, and direct historical branch switching only if Pi exposes a corresponding RPC operation;
 - session rename where Pi exposes it.
 
-Recent history should open on the latest bounded window. For a live Pi process, new history synchronizes incrementally with Pi's stable `get_entries(since)` entry cursor. Cold history is parsed from Pi JSONL incrementally as the user moves backward. Neither path hydrates an entire large transcript merely to open its latest turn.
+Recent history should open on the latest bounded window. For a live Pi process, new history synchronizes incrementally with Pi's stable `get_entries(since)` entry cursor. Cold history is parsed from Pi JSONL incrementally as the user moves backward. Neither path hydrates an entire large transcript merely to open its latest turn. Session catalog previews may normalize Pi's explicit persisted skill wrapper so generated skill instructions do not hide the user's actual task, but Pi JSONL remains untouched. Before a historical session is resumed for writing, an unterminated JSONL tail is rejected rather than allowing Pi's next append to concatenate records.
 
 ## 10. Features borrowed deliberately
 

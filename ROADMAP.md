@@ -58,7 +58,7 @@ Do not optimize for an end-to-end demo during this phase. A visible prompt-to-re
 
 ## Phase 2: runtime integration and Pi-native UX
 
-Status: **complete for the personal Windows application boundary**. Runtime/history/composer/capability/attachment/session-tree/recovery surfaces and deterministic fake-Pi compatibility coverage are operational.
+Status: **complete for the personal Windows application boundary**. Runtime/history/composer/capability/attachment/session-tree/recovery surfaces, first-class on-demand bounded Recent Sessions navigation, Pi-native retry/compaction/extension recovery projection, writable-session tail protection, extension-free launch recovery, keyboard slash-command navigation, and deterministic fake-Pi compatibility coverage are operational.
 
 Add:
 
@@ -67,23 +67,26 @@ Add:
 - one supervised `pi --mode rpc` child using the Phase 1 protocol/lifecycle owners;
 - bounded backend-to-renderer event coalescing;
 - send/stream/steer/follow-up/Stop and capability discovery;
-- Stop transaction: preserve `clear_queue` output, abort with deadline, exact-process escalation, quarantine on uncertainty;
+- Stop transaction: preserve native `clear_queue` output when available; on explicit unsupported-command rejection recover only the private bounded `queue_update` user-text snapshot and terminate the exact process so no queued/custom continuation survives; abort with deadline and quarantine on uncertainty;
 - virtualized minimal timeline;
 - versioned/idempotent renderer hydration and bounded crash recovery;
 - deterministic fake Pi subprocess lifecycle fixture;
 - project registry;
 - schema-versioned atomic/recoverable project-registry persistence with safe-start behavior when derived state is malformed;
-- Pi session discovery/resume;
+- bounded paged Pi session discovery/resume with stale-cursor rejection, read-model normalization of explicit persisted skill wrappers, and write-capable Resume refusal for unterminated JSONL tails;
 - lazy history pages plus live `get_entries(since)` synchronization;
 - session names/tree/fork operations exposed through Pi;
 - steer vs follow-up composer actions;
-- slash-command discovery;
+- slash-command discovery plus bounded keyboard palette navigation;
 - extension select/confirm/input bridge;
+- provider retry/summarization retry/compaction outcome/extension-error projection using current Pi event semantics;
+- native `set_auto_retry` control and `abort_retry` Stop semantics without fabricating state Pi does not expose;
+- one-shot quiet-stream advisory using the existing deadline scheduler, with no automatic prompt replay or passive polling;
 - project trust preflight/launch handling;
-- context-file policy messaging that reflects Pi's actual behavior (`AGENTS.md`/`CLAUDE.md` still load under `--no-approve` unless explicitly disabled);
+- independent context-file and extension-discovery launch policies, including an extension-free recovery path when installed Pi extensions prevent startup;
 - backend-owned session draft persistence with visible failure/retry semantics;
 - bounded image attachment ingestion across picker/paste/drop/restore paths;
-- derived session catalog with incremental indexing only if measurements require persistence.
+- derived session catalog with incremental indexing only if measurements require persistence; the current complete 1,200-session traversal measurement does not justify another persistent index/watcher owner.
 
 Exit criteria:
 
@@ -105,7 +108,7 @@ Exit criteria:
 
 ## Phase 3: parallel orchestration
 
-Status: **complete for the first-product scope**. Several independently owned runs, cross-run Needs Attention, exclusive canonical execution-root ownership, local-vs-worktree startup, immutable worktree identity, durable creation recovery, conservative explicit worktree cleanup, run-bound Git review, durable configurable admission control, explicit idle-run Close, terminal-run Dismiss, attention/working/live-first run ordering, bounded terminal retention, and a four-run full-lane scale fixture are operational. Branch integration is deliberately outside the review-only first product.
+Status: **complete for the first-product scope**. Several independently owned runs, an actionable deadline-prioritized global Needs Attention queue backed by exact backend request identity, explicit registered-project/model/thinking/execution/queue/lifecycle-timing state in orchestration surfaces, revision-bound last-known change counts only after explicit review, exclusive canonical execution-root ownership, local-vs-worktree startup, immutable worktree identity, durable creation recovery, conservative explicit worktree cleanup, run-bound Git review, durable configurable admission control, explicit idle-run Close, terminal-run Dismiss, attention/working/live-first run ordering, bounded terminal retention, and an eight-run full-lane scale fixture are operational. Branch integration is deliberately outside the review-only first product.
 
 Add:
 
@@ -119,7 +122,7 @@ Add:
 
 Exit criteria:
 
-- four bursty simulated runs remain within input-latency and IPC backlog targets;
+- eight bursty simulated runs remain within input-latency and IPC backlog targets;
 - each run's cwd is immutable and visible;
 - each worktree records and verifies its exact base commit/branch and is never pooled between live runs;
 - Git mutations are routed through run-owned worktree identity rather than current UI selection;
@@ -147,7 +150,7 @@ Exit criteria:
 
 ## Phase 5: hardening and packaging
 
-Status: **complete for deterministic repository-owned work in the personal Windows app**. Renderer crash-loop protection, explicit recovery UI, retryable hydration, corruption/write-failure fault injection, accessibility/keyboard contracts, Windows process lifecycle behavior, bounded terminal/runtime and session-draft caches, large-history/diff/concurrency/session-catalog fixtures, cold/warm app-owned-state startup measurement, migration/version policy, and optimized Windows builds are implemented. Draft-cache pressure evicts only unowned Saved records and reloads persisted sessions on revisit; unsaved draft state fails closed rather than being discarded.
+Status: **complete for deterministic repository-owned work in the personal Windows app**. Renderer crash-loop protection, explicit recovery UI, retryable v9 hydration, corruption/write-failure fault injection, accessibility/keyboard contracts, Windows process lifecycle behavior, bounded terminal/runtime and session-draft caches, large-history/diff/concurrency/session-catalog fixtures, one-shot quiet-working-stream and steady-idle no-periodic-work regression fixtures, cold/warm app-owned-state startup measurement, explicit pull-based bounded runtime diagnostics, migration/version policy, and optimized Windows builds are implemented. Draft-cache pressure evicts only unowned Saved records and reloads persisted sessions on revisit; unsaved draft state fails closed rather than being discarded.
 
 Add:
 
@@ -155,8 +158,37 @@ Add:
 - crash/recovery UX;
 - accessibility and keyboard pass;
 - cold/warm startup benchmarks;
-- memory/CPU regression fixtures;
+- bounded-state/no-periodic-work regression fixtures plus platform-observable memory/CPU/render diagnostics;
 - migration/version compatibility policy for Pi RPC and any derived catalog.
+
+## Phase 6: finite automation and supervised orchestration
+
+Status: **complete for the requested lightweight workflow scope**.
+
+Add:
+
+- reusable schema-versioned prompt chains containing only a name and ordered prompts;
+- one Automation view with prompt add/remove/reorder, project, concurrency, Git isolation, and supervisor controls;
+- event-driven chain execution that fills ordinary RuntimeManager slots and starts one new Pi session per prompt;
+- unique recoverable Git worktrees for parallel chain workers;
+- completion detection through Pi-native session state/stats, followed by normal Close to release worker capacity without deleting session/worktree history;
+- cancellation that prevents future launches/directives without killing already-running user workers;
+- an optional supervisor implemented as one normal Pi session counted against the same live-run ceiling;
+- bounded worker task/status/last-result context and a strict JSON Send/Steer/Follow-up directive contract targeting exact RunIds;
+- on-demand Automation catalog hydration, execution-only invalidation/IPC, bounded prompt previews, and no-op execution update suppression;
+- bounded supervisor lifetime through an explicit per-execution cycle ceiling plus per-turn deadline;
+- supervisor failure isolation so malformed or rejected autonomous direction disables supervision while the deterministic prompt chain continues.
+
+Exit criteria:
+
+- the configured eight-run ceiling is exercised by the full concurrency fixture;
+- automation performs no interval polling and token/tool display traffic does not wake its scheduler;
+- manual and automated sessions share the same admission and execution-root ownership rules;
+- parallel automation cannot write concurrently in one local checkout;
+- saved chains have independent count/text/aggregate-byte ceilings and corruption quarantine;
+- an LLM supervisor cannot address an unknown run, exceed prompt/directive limits, or bypass Pi-native composer semantics;
+- supervision cannot make a finite chain unbounded, and cancellation is rechecked before any not-yet-started worker/supervisor process spawn;
+- chain cancellation cannot silently terminate user worker sessions or auto-delete their worktrees.
 
 ## Later candidates, evidence required
 

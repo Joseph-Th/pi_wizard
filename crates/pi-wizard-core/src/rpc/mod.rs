@@ -21,10 +21,12 @@ pub use framing::{FrameError, JsonlDecoder};
 pub use gate::{ActiveRpcCommand, RpcCommandGate, RpcGateError};
 pub use io::{RpcReadError, RpcReader, RpcWriteError, RpcWriter};
 pub use message::{
-    AssistantMessageBlockKind, AssistantMessageUpdate, BashExecutionUpdate, InboundMessage,
-    QueueUpdateCounts, RpcEvent, RpcEventKind, RpcEventPayloadError, RpcParseError, RpcResponse,
-    RpcResponseOutcome, SessionInfoChanged, ToolCallStartMeta, ToolExecutionEnd,
-    ToolExecutionStart, ToolExecutionUpdate, parse_frame,
+    AssistantMessageBlockKind, AssistantMessageFinalBlock, AssistantMessageUpdate, AutoRetryEnd,
+    AutoRetryStart, BashExecutionUpdate, CompactionEndEvent, CompactionStartEvent,
+    ExtensionErrorEvent, InboundMessage, QueueUpdateCounts, RpcEvent, RpcEventKind,
+    RpcEventPayloadError, RpcParseError, RpcResponse, RpcResponseOutcome, SessionInfoChanged,
+    SummarizationRetryAttemptStart, SummarizationRetryScheduled, ToolCallStartMeta,
+    ToolExecutionEnd, ToolExecutionStart, ToolExecutionUpdate, parse_frame,
 };
 pub use pending::{PendingRequest, PendingRequestError, PendingRequests};
 pub use response::{

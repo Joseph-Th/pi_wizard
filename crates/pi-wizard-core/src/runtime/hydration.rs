@@ -12,7 +12,7 @@ use super::{
     RunRpcController, RuntimeStore, SessionSyncState,
 };
 
-pub const RUNTIME_HYDRATION_SCHEMA_VERSION: u32 = 6;
+pub const RUNTIME_HYDRATION_SCHEMA_VERSION: u32 = 9;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -71,6 +71,60 @@ pub struct RunRpcHydrationSnapshot {
     pub live: LiveProjectionSnapshot,
     pub extension_ui: ExtensionUiSnapshot,
     pub pending_dialogs: Vec<PendingExtensionDialogSnapshot>,
+    pub compaction: Option<RunCompactionSnapshot>,
+    pub retry: Option<RunRetrySnapshot>,
+    pub summarization_retry: Option<RunSummarizationRetrySnapshot>,
+    pub last_extension_error: Option<RunExtensionErrorSnapshot>,
+    pub stream_stalled: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunCompactionSnapshot {
+    pub reason: String,
+    pub reason_truncated: bool,
+    pub finished: bool,
+    pub aborted: bool,
+    pub will_retry: bool,
+    pub error_message: Option<String>,
+    pub error_truncated: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunRetrySnapshot {
+    pub attempt: usize,
+    pub max_attempts: usize,
+    pub delay_ms: u64,
+    pub error_message: String,
+    pub error_truncated: bool,
+    pub waiting: bool,
+    pub finished: bool,
+    pub success: Option<bool>,
+    pub final_error: Option<String>,
+    pub final_error_truncated: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunSummarizationRetrySnapshot {
+    pub attempt: usize,
+    pub max_attempts: usize,
+    pub delay_ms: u64,
+    pub error_message: String,
+    pub error_truncated: bool,
+    pub source: Option<String>,
+    pub reason: Option<String>,
+    pub finished: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunExtensionErrorSnapshot {
+    pub extension_path: String,
+    pub event: String,
+    pub error: String,
+    pub detail_truncated: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

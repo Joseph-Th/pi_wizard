@@ -1,5 +1,6 @@
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -159,10 +160,17 @@ pub struct RunRecord {
     execution_isolation: ExecutionIsolation,
     worktree: Option<GitWorktreeIdentity>,
     project_trust: ProjectTrustPolicy,
+    started_unix_ms: u64,
+    terminal_unix_ms: Option<u64>,
+    change_revision: u64,
     process: ProcessState,
     agent_working: bool,
     compacting: bool,
     abort_requested: bool,
+    #[serde(skip)]
+    retry_waiting: bool,
+    #[serde(skip)]
+    summarization_retry_active: bool,
     pending_ui_requests: BTreeSet<String>,
     queue: QueueState,
     session: RunSessionState,
@@ -207,10 +215,15 @@ impl RunRecord {
             execution_isolation,
             worktree,
             project_trust,
+            started_unix_ms: current_unix_ms(),
+            terminal_unix_ms: None,
+            change_revision: 0,
             process: ProcessState::Starting,
             agent_working: false,
             compacting: false,
             abort_requested: false,
+            retry_waiting: false,
+            summarization_retry_active: false,
             pending_ui_requests: BTreeSet::new(),
             queue: QueueState::default(),
             session: RunSessionState::default(),
@@ -268,6 +281,21 @@ impl RunRecord {
     }
 
     #[must_use]
+    pub const fn started_unix_ms(&self) -> u64 {
+        self.started_unix_ms
+    }
+
+    #[must_use]
+    pub const fn terminal_unix_ms(&self) -> Option<u64> {
+        self.terminal_unix_ms
+    }
+
+    #[must_use]
+    pub const fn change_revision(&self) -> u64 {
+        self.change_revision
+    }
+
+    #[must_use]
     pub fn execution_root(&self) -> &PathBuf {
         &self.execution_root
     }
@@ -300,6 +328,22 @@ impl RunRecord {
     #[must_use]
     pub const fn is_compacting(&self) -> bool {
         self.compacting
+    }
+
+    /// True only during Pi's documented automatic-retry backoff window. Once
+    /// the retry attempt emits `agent_start`, normal agent Abort semantics own
+    /// the active provider stream again.
+    #[must_use]
+    pub const fn is_retry_waiting(&self) -> bool {
+        self.retry_waiting
+    }
+
+    /// Pi exposes retry events for compaction/branch summarization but no RPC
+    /// command that cancels that retry loop. Stop therefore treats it like
+    /// active compaction and escalates through exact process ownership.
+    #[must_use]
+    pub const fn has_summarization_retry(&self) -> bool {
+        self.summarization_retry_active
     }
 
     #[must_use]
@@ -375,6 +419,7 @@ impl RunRecord {
                 self.require_process("agent_started", &[ProcessState::Ready])?;
                 self.agent_working = true;
                 self.abort_requested = false;
+                self.retry_waiting = false;
             }
             RunMutation::CompactionStarted => {
                 self.require_process("compaction_started", &[ProcessState::Ready])?;
@@ -388,6 +433,24 @@ impl RunRecord {
                 self.require_process("agent_settled", &[ProcessState::Ready])?;
                 self.agent_working = false;
                 self.abort_requested = false;
+                self.retry_waiting = false;
+                self.summarization_retry_active = false;
+            }
+            RunMutation::AutoRetryStarted => {
+                self.require_process("auto_retry_started", &[ProcessState::Ready])?;
+                self.retry_waiting = true;
+            }
+            RunMutation::AutoRetryEnded => {
+                self.require_process("auto_retry_ended", &[ProcessState::Ready])?;
+                self.retry_waiting = false;
+            }
+            RunMutation::SummarizationRetryStarted => {
+                self.require_process("summarization_retry_started", &[ProcessState::Ready])?;
+                self.summarization_retry_active = true;
+            }
+            RunMutation::SummarizationRetryEnded => {
+                self.require_process("summarization_retry_ended", &[ProcessState::Ready])?;
+                self.summarization_retry_active = false;
             }
             RunMutation::UiRequestOpened { request_id } => {
                 self.require_process("ui_request_opened", &[ProcessState::Ready])?;
@@ -449,6 +512,10 @@ impl RunRecord {
                 self.require_process("session_name_changed", &[ProcessState::Ready])?;
                 self.session.session_name = name;
             }
+            RunMutation::ChangesMayHaveChanged => {
+                self.require_process("changes_may_have_changed", &[ProcessState::Ready])?;
+                self.change_revision = self.change_revision.saturating_add(1);
+            }
             RunMutation::BeginStop => {
                 self.require_process("begin_stop", &[ProcessState::Starting, ProcessState::Ready])?;
                 self.process = ProcessState::Stopping;
@@ -457,12 +524,14 @@ impl RunRecord {
             RunMutation::ProcessExited { code } => {
                 self.require_nonterminal("process_exited")?;
                 self.process = ProcessState::Exited;
+                self.terminal_unix_ms = Some(current_unix_ms());
                 self.exit_code = code;
                 self.clear_hot_activity();
             }
             RunMutation::ProcessFailed { failure, code } => {
                 self.require_nonterminal("process_failed")?;
                 self.process = ProcessState::Failed;
+                self.terminal_unix_ms = Some(current_unix_ms());
                 self.exit_code = code;
                 self.failure = Some(failure);
                 self.clear_hot_activity();
@@ -470,6 +539,7 @@ impl RunRecord {
             RunMutation::ProcessQuarantined { failure } => {
                 self.require_process("process_quarantined", &[ProcessState::Stopping])?;
                 self.process = ProcessState::Quarantined;
+                self.terminal_unix_ms = Some(current_unix_ms());
                 self.failure = Some(failure);
                 self.clear_hot_activity();
             }
@@ -482,6 +552,8 @@ impl RunRecord {
         self.agent_working = false;
         self.compacting = false;
         self.abort_requested = false;
+        self.retry_waiting = false;
+        self.summarization_retry_active = false;
         self.pending_ui_requests.clear();
         self.queue = QueueState::default();
     }
@@ -512,6 +584,15 @@ impl RunRecord {
     }
 }
 
+fn current_unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
+}
+
 fn path_is_within(path: &Path, root: &Path) -> bool {
     match (path.canonicalize(), root.canonicalize()) {
         (Ok(path), Ok(root)) => path.starts_with(root),
@@ -524,6 +605,10 @@ pub enum RunMutation {
     ProcessReady,
     AgentStarted,
     AgentSettled,
+    AutoRetryStarted,
+    AutoRetryEnded,
+    SummarizationRetryStarted,
+    SummarizationRetryEnded,
     CompactionStarted,
     CompactionEnded,
     UiRequestOpened {
@@ -537,6 +622,7 @@ pub enum RunMutation {
     StateObserved(RunStateObservation),
     ThinkingLevelChanged(ThinkingLevel),
     SessionNameChanged(Option<String>),
+    ChangesMayHaveChanged,
     BeginStop,
     ProcessExited {
         code: Option<i32>,
@@ -673,6 +759,47 @@ mod tests {
             ProjectTrustPolicy::Ignore,
         )
         .expect("local run")
+    }
+
+    #[test]
+    fn lifecycle_timestamps_are_backend_owned_and_terminal_time_is_frozen() {
+        let id = RunId::new();
+        let mut store = RuntimeStore::new(RuntimeLimits::default());
+        store.register(record(id)).expect("register");
+        let started = store.get(id).expect("run").started_unix_ms();
+        assert!(started > 0);
+        assert_eq!(store.get(id).expect("run").terminal_unix_ms(), None);
+
+        store
+            .apply(id, RunMutation::ProcessExited { code: Some(0) })
+            .expect("exit run");
+        let run = store.get(id).expect("terminal run");
+        assert!(run.terminal_unix_ms().is_some_and(|terminal| terminal > 0));
+        let wire = serde_json::to_value(run).expect("serialize run timing");
+        assert_eq!(wire["startedUnixMs"], serde_json::json!(started));
+        assert!(wire["terminalUnixMs"].is_number());
+    }
+
+    #[test]
+    fn change_revision_is_monotonic_backend_invalidation_state() {
+        let id = RunId::new();
+        let mut store = RuntimeStore::new(RuntimeLimits::default());
+        store.register(record(id)).expect("register");
+        store.apply(id, RunMutation::ProcessReady).expect("ready");
+        assert_eq!(store.get(id).expect("run").change_revision(), 0);
+
+        store
+            .apply(id, RunMutation::ChangesMayHaveChanged)
+            .expect("first invalidation");
+        store
+            .apply(id, RunMutation::ChangesMayHaveChanged)
+            .expect("second invalidation");
+        let run = store.get(id).expect("run");
+        assert_eq!(run.change_revision(), 2);
+        assert_eq!(
+            serde_json::to_value(run).expect("serialize")["changeRevision"],
+            serde_json::json!(2)
+        );
     }
 
     #[test]

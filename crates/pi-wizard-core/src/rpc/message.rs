@@ -5,7 +5,8 @@ use serde_json::Value;
 use thiserror::Error;
 
 use super::command::ThinkingLevel;
-use crate::RequestId;
+use super::response::ClearQueueResult;
+use crate::{RequestId, RuntimeLimits};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum InboundMessage {
@@ -117,6 +118,13 @@ pub enum AssistantMessageUpdate {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AssistantMessageFinalBlock {
+    pub content_index: usize,
+    pub kind: AssistantMessageBlockKind,
+    pub content: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BashExecutionUpdate {
     pub request_id: Option<RequestId>,
     pub delta: String,
@@ -154,6 +162,55 @@ pub struct QueueUpdateCounts {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SessionInfoChanged {
     pub name: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CompactionStartEvent {
+    pub reason: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CompactionEndEvent {
+    pub reason: String,
+    pub aborted: bool,
+    pub will_retry: bool,
+    pub error_message: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AutoRetryStart {
+    pub attempt: usize,
+    pub max_attempts: usize,
+    pub delay_ms: u64,
+    pub error_message: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AutoRetryEnd {
+    pub success: bool,
+    pub attempt: usize,
+    pub final_error: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SummarizationRetryScheduled {
+    pub attempt: usize,
+    pub max_attempts: usize,
+    pub delay_ms: u64,
+    pub error_message: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SummarizationRetryAttemptStart {
+    pub source: String,
+    pub reason: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExtensionErrorEvent {
+    pub extension_path: String,
+    pub event: String,
+    pub error: String,
 }
 
 impl RpcEvent {
@@ -269,6 +326,90 @@ impl RpcEvent {
         Ok(Some(update))
     }
 
+    /// Parses Pi's authoritative completed assistant message. Streaming
+    /// `message_update` events are transient previews; `message_end.message`
+    /// is the final source for the completed model content.
+    pub fn assistant_message_end(
+        &self,
+    ) -> Result<Option<Vec<AssistantMessageFinalBlock>>, RpcEventPayloadError> {
+        if self.kind != RpcEventKind::MessageEnd {
+            return Ok(None);
+        }
+        let message = self.raw.get("message").and_then(Value::as_object).ok_or(
+            RpcEventPayloadError::MissingObject {
+                event: "message_end",
+                field: "message",
+            },
+        )?;
+        let role = message.get("role").and_then(Value::as_str).ok_or(
+            RpcEventPayloadError::MissingString {
+                event: "message_end",
+                field: "message.role",
+            },
+        )?;
+        if role != "assistant" {
+            return Ok(Some(Vec::new()));
+        }
+        let content = message.get("content").and_then(Value::as_array).ok_or(
+            RpcEventPayloadError::MissingArray {
+                event: "message_end",
+                field: "message.content",
+            },
+        )?;
+        let mut blocks = Vec::with_capacity(content.len());
+        for (content_index, value) in content.iter().enumerate() {
+            let block = value
+                .as_object()
+                .ok_or(RpcEventPayloadError::InvalidContentItem {
+                    event: "message_end",
+                })?;
+            let Some(block_type) = block.get("type").and_then(Value::as_str) else {
+                return Err(RpcEventPayloadError::MissingString {
+                    event: "message_end",
+                    field: "message.content[].type",
+                });
+            };
+            let (kind, content) = match block_type {
+                "text" => (
+                    AssistantMessageBlockKind::Text,
+                    block
+                        .get("text")
+                        .and_then(Value::as_str)
+                        .ok_or(RpcEventPayloadError::MissingString {
+                            event: "message_end",
+                            field: "message.content[].text",
+                        })?
+                        .to_owned(),
+                ),
+                "thinking" => (
+                    AssistantMessageBlockKind::Thinking,
+                    block
+                        .get("thinking")
+                        .and_then(Value::as_str)
+                        .ok_or(RpcEventPayloadError::MissingString {
+                            event: "message_end",
+                            field: "message.content[].thinking",
+                        })?
+                        .to_owned(),
+                ),
+                "toolCall" => (
+                    AssistantMessageBlockKind::ToolCall,
+                    block
+                        .get("arguments")
+                        .map(Value::to_string)
+                        .unwrap_or_else(|| value.to_string()),
+                ),
+                _ => continue,
+            };
+            blocks.push(AssistantMessageFinalBlock {
+                content_index,
+                kind,
+                content,
+            });
+        }
+        Ok(Some(blocks))
+    }
+
     /// Typed view of direct RPC bash output. Pi includes the originating
     /// request ID when the command had one; Pi Wizard always sends IDs, so the
     /// process adapter can require correlation without guessing by chronology.
@@ -345,9 +486,9 @@ impl RpcEvent {
         }))
     }
 
-    /// Returns queue sizes without copying queued user text into hot runtime
-    /// state. `clear_queue` is the explicit operation that transfers the text
-    /// when Stop needs to preserve it.
+    /// Returns queue sizes without copying queued user text. The controller's
+    /// separate bounded recovery parser is the only event path allowed to
+    /// retain queue strings, and it keeps them outside runtime hydration.
     pub fn queue_update_counts(&self) -> Result<Option<QueueUpdateCounts>, RpcEventPayloadError> {
         if self.kind != RpcEventKind::QueueUpdate {
             return Ok(None);
@@ -357,6 +498,51 @@ impl RpcEvent {
         Ok(Some(QueueUpdateCounts {
             steering: steering.len(),
             follow_up: follow_up.len(),
+        }))
+    }
+
+    /// Returns the current user-visible Pi queues under the same hard limits
+    /// used by Stop recovery. This copy is suitable only for a private
+    /// emergency recovery shadow; `queue_update` remains an event projection,
+    /// not queue authority.
+    pub fn queue_update_recovery(
+        &self,
+        limits: RuntimeLimits,
+    ) -> Result<Option<ClearQueueResult>, RpcEventPayloadError> {
+        if self.kind != RpcEventKind::QueueUpdate {
+            return Ok(None);
+        }
+        let steering = required_string_array(&self.raw, "queue_update", "steering")?;
+        let follow_up = required_string_array(&self.raw, "queue_update", "followUp")?;
+        let message_count = steering.len().saturating_add(follow_up.len());
+        if message_count > limits.max_recovered_queue_messages_per_run {
+            return Err(RpcEventPayloadError::RecoveredQueueMessageLimit {
+                actual: message_count,
+                limit: limits.max_recovered_queue_messages_per_run,
+            });
+        }
+        let mut text_bytes = 0usize;
+        for value in steering.iter().chain(follow_up) {
+            let text = value
+                .as_str()
+                .expect("required_string_array validates queue strings");
+            text_bytes = text_bytes.saturating_add(text.len());
+            if text_bytes > limits.max_recovered_queue_bytes_per_run {
+                return Err(RpcEventPayloadError::RecoveredQueueByteLimit {
+                    attempted: text_bytes,
+                    limit: limits.max_recovered_queue_bytes_per_run,
+                });
+            }
+        }
+        Ok(Some(ClearQueueResult {
+            steering: steering
+                .iter()
+                .map(|value| value.as_str().expect("validated").to_owned())
+                .collect(),
+            follow_up: follow_up
+                .iter()
+                .map(|value| value.as_str().expect("validated").to_owned())
+                .collect(),
         }))
     }
 
@@ -377,6 +563,95 @@ impl RpcEvent {
         Ok(Some(SessionInfoChanged { name }))
     }
 
+    pub fn compaction_start(&self) -> Result<Option<CompactionStartEvent>, RpcEventPayloadError> {
+        if self.kind != RpcEventKind::CompactionStart {
+            return Ok(None);
+        }
+        Ok(Some(CompactionStartEvent {
+            reason: required_string(&self.raw, "compaction_start", "reason")?,
+        }))
+    }
+
+    pub fn compaction_end(&self) -> Result<Option<CompactionEndEvent>, RpcEventPayloadError> {
+        if self.kind != RpcEventKind::CompactionEnd {
+            return Ok(None);
+        }
+        Ok(Some(CompactionEndEvent {
+            reason: required_string(&self.raw, "compaction_end", "reason")?,
+            aborted: required_bool(&self.raw, "compaction_end", "aborted")?,
+            will_retry: required_bool(&self.raw, "compaction_end", "willRetry")?,
+            error_message: optional_string(&self.raw, "compaction_end", "errorMessage")?,
+        }))
+    }
+
+    pub fn auto_retry_start(&self) -> Result<Option<AutoRetryStart>, RpcEventPayloadError> {
+        if self.kind != RpcEventKind::AutoRetryStart {
+            return Ok(None);
+        }
+        Ok(Some(AutoRetryStart {
+            attempt: required_usize(&self.raw, "auto_retry_start", "attempt")?,
+            max_attempts: required_usize(&self.raw, "auto_retry_start", "maxAttempts")?,
+            delay_ms: required_u64(&self.raw, "auto_retry_start", "delayMs")?,
+            error_message: required_string(&self.raw, "auto_retry_start", "errorMessage")?,
+        }))
+    }
+
+    pub fn auto_retry_end(&self) -> Result<Option<AutoRetryEnd>, RpcEventPayloadError> {
+        if self.kind != RpcEventKind::AutoRetryEnd {
+            return Ok(None);
+        }
+        Ok(Some(AutoRetryEnd {
+            success: required_bool(&self.raw, "auto_retry_end", "success")?,
+            attempt: required_usize(&self.raw, "auto_retry_end", "attempt")?,
+            final_error: optional_string(&self.raw, "auto_retry_end", "finalError")?,
+        }))
+    }
+
+    pub fn summarization_retry_scheduled(
+        &self,
+    ) -> Result<Option<SummarizationRetryScheduled>, RpcEventPayloadError> {
+        if self.kind != RpcEventKind::SummarizationRetryScheduled {
+            return Ok(None);
+        }
+        Ok(Some(SummarizationRetryScheduled {
+            attempt: required_usize(&self.raw, "summarization_retry_scheduled", "attempt")?,
+            max_attempts: required_usize(
+                &self.raw,
+                "summarization_retry_scheduled",
+                "maxAttempts",
+            )?,
+            delay_ms: required_u64(&self.raw, "summarization_retry_scheduled", "delayMs")?,
+            error_message: required_string(
+                &self.raw,
+                "summarization_retry_scheduled",
+                "errorMessage",
+            )?,
+        }))
+    }
+
+    pub fn summarization_retry_attempt_start(
+        &self,
+    ) -> Result<Option<SummarizationRetryAttemptStart>, RpcEventPayloadError> {
+        if self.kind != RpcEventKind::SummarizationRetryAttemptStart {
+            return Ok(None);
+        }
+        Ok(Some(SummarizationRetryAttemptStart {
+            source: required_string(&self.raw, "summarization_retry_attempt_start", "source")?,
+            reason: optional_string(&self.raw, "summarization_retry_attempt_start", "reason")?,
+        }))
+    }
+
+    pub fn extension_error(&self) -> Result<Option<ExtensionErrorEvent>, RpcEventPayloadError> {
+        if self.kind != RpcEventKind::ExtensionError {
+            return Ok(None);
+        }
+        Ok(Some(ExtensionErrorEvent {
+            extension_path: required_string(&self.raw, "extension_error", "extensionPath")?,
+            event: required_string(&self.raw, "extension_error", "event")?,
+            error: required_string(&self.raw, "extension_error", "error")?,
+        }))
+    }
+
     pub fn thinking_level_changed(&self) -> Result<Option<ThinkingLevel>, RpcEventPayloadError> {
         if self.kind != RpcEventKind::ThinkingLevelChanged {
             return Ok(None);
@@ -395,6 +670,53 @@ impl RpcEvent {
                 field: "level",
             }
         })
+    }
+}
+
+fn required_u64(
+    value: &Value,
+    event: &'static str,
+    field: &'static str,
+) -> Result<u64, RpcEventPayloadError> {
+    value
+        .get(field)
+        .and_then(Value::as_u64)
+        .ok_or(RpcEventPayloadError::MissingUnsignedInteger { event, field })
+}
+
+fn required_usize(
+    value: &Value,
+    event: &'static str,
+    field: &'static str,
+) -> Result<usize, RpcEventPayloadError> {
+    let value = required_u64(value, event, field)?;
+    usize::try_from(value).map_err(|_| RpcEventPayloadError::IntegerOutOfRange {
+        event,
+        field,
+        value,
+    })
+}
+
+fn required_bool(
+    value: &Value,
+    event: &'static str,
+    field: &'static str,
+) -> Result<bool, RpcEventPayloadError> {
+    value
+        .get(field)
+        .and_then(Value::as_bool)
+        .ok_or(RpcEventPayloadError::MissingBoolean { event, field })
+}
+
+fn optional_string(
+    value: &Value,
+    event: &'static str,
+    field: &'static str,
+) -> Result<Option<String>, RpcEventPayloadError> {
+    match value.get(field) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(value)) => Ok(Some(value.clone())),
+        Some(_) => Err(RpcEventPayloadError::InvalidOptionalString { event, field }),
     }
 }
 
@@ -518,6 +840,10 @@ pub enum RpcEventPayloadError {
         event: &'static str,
         field: &'static str,
     },
+    #[error("queue_update contains {actual} recoverable messages, above limit {limit}")]
+    RecoveredQueueMessageLimit { actual: usize, limit: usize },
+    #[error("queue_update recoverable text reached {attempted} bytes, above limit {limit}")]
+    RecoveredQueueByteLimit { attempted: usize, limit: usize },
     #[error("{event} contains a malformed tool-result content item")]
     InvalidContentItem { event: &'static str },
     #[error("{event} field {field} contains an unsupported enum value")]
@@ -781,6 +1107,78 @@ mod tests {
     }
 
     #[test]
+    fn message_end_exposes_authoritative_text_thinking_and_tool_call_content() {
+        let message = parse_frame(
+            br#"{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"final answer"},{"type":"thinking","thinking":"final reasoning"},{"type":"toolCall","id":"call-1","name":"read","arguments":{"path":"README.md"}},{"type":"futureBlock","payload":true}]}}"#,
+        )
+        .expect("message end");
+        let InboundMessage::Event(event) = message else {
+            panic!("expected event");
+        };
+        assert_eq!(
+            event.assistant_message_end().expect("typed final message"),
+            Some(vec![
+                AssistantMessageFinalBlock {
+                    content_index: 0,
+                    kind: AssistantMessageBlockKind::Text,
+                    content: "final answer".to_owned(),
+                },
+                AssistantMessageFinalBlock {
+                    content_index: 1,
+                    kind: AssistantMessageBlockKind::Thinking,
+                    content: "final reasoning".to_owned(),
+                },
+                AssistantMessageFinalBlock {
+                    content_index: 2,
+                    kind: AssistantMessageBlockKind::ToolCall,
+                    content: r#"{"path":"README.md"}"#.to_owned(),
+                },
+            ])
+        );
+    }
+
+    #[test]
+    fn queue_update_recovery_copies_only_after_message_and_byte_bounds_pass() {
+        let message = parse_frame(
+            br#"{"type":"queue_update","steering":["one","two"],"followUp":["three"]}"#,
+        )
+        .expect("queue update");
+        let InboundMessage::Event(event) = message else {
+            panic!("expected event");
+        };
+        let recovered = event
+            .queue_update_recovery(RuntimeLimits::default())
+            .expect("bounded queue recovery")
+            .expect("queue event");
+        assert_eq!(recovered.steering, ["one", "two"]);
+        assert_eq!(recovered.follow_up, ["three"]);
+
+        let message_limits = RuntimeLimits {
+            max_recovered_queue_messages_per_run: 2,
+            ..RuntimeLimits::default()
+        };
+        assert_eq!(
+            event.queue_update_recovery(message_limits),
+            Err(RpcEventPayloadError::RecoveredQueueMessageLimit {
+                actual: 3,
+                limit: 2,
+            })
+        );
+
+        let byte_limits = RuntimeLimits {
+            max_recovered_queue_bytes_per_run: 5,
+            ..RuntimeLimits::default()
+        };
+        assert_eq!(
+            event.queue_update_recovery(byte_limits),
+            Err(RpcEventPayloadError::RecoveredQueueByteLimit {
+                attempted: 6,
+                limit: 5,
+            })
+        );
+    }
+
+    #[test]
     fn toolcall_start_preserves_transient_call_identity_and_tool_name() {
         let message = parse_frame(
             br#"{"type":"message_update","assistantMessageEvent":{"type":"toolcall_start","contentIndex":1,"id":"call-7","toolName":"write"}}"#,
@@ -938,6 +1336,112 @@ mod tests {
         assert_eq!(
             thinking.thinking_level_changed().expect("thinking level"),
             Some(ThinkingLevel::Xhigh)
+        );
+    }
+
+    #[test]
+    fn retry_and_summarization_events_preserve_current_pi_fields() {
+        let retry = parse_frame(
+            br#"{"type":"auto_retry_start","attempt":2,"maxAttempts":5,"delayMs":1500,"errorMessage":"rate limited"}"#,
+        )
+        .expect("retry event");
+        let InboundMessage::Event(retry) = retry else {
+            panic!("expected event");
+        };
+        assert_eq!(
+            retry.auto_retry_start().expect("typed retry"),
+            Some(AutoRetryStart {
+                attempt: 2,
+                max_attempts: 5,
+                delay_ms: 1_500,
+                error_message: "rate limited".to_owned(),
+            })
+        );
+
+        let summary = parse_frame(
+            br#"{"type":"summarization_retry_attempt_start","source":"branchSummary","reason":"provider unavailable"}"#,
+        )
+        .expect("summary retry event");
+        let InboundMessage::Event(summary) = summary else {
+            panic!("expected event");
+        };
+        assert_eq!(
+            summary
+                .summarization_retry_attempt_start()
+                .expect("typed summary retry"),
+            Some(SummarizationRetryAttemptStart {
+                source: "branchSummary".to_owned(),
+                reason: Some("provider unavailable".to_owned()),
+            })
+        );
+    }
+
+    #[test]
+    fn extension_error_event_preserves_exact_source_and_error() {
+        let message = parse_frame(
+            br#"{"type":"extension_error","extensionPath":"C:/pi/extensions/broken.ts","event":"session_start","error":"boom"}"#,
+        )
+        .expect("extension error");
+        let InboundMessage::Event(event) = message else {
+            panic!("expected event");
+        };
+        assert_eq!(
+            event.extension_error().expect("typed extension error"),
+            Some(ExtensionErrorEvent {
+                extension_path: "C:/pi/extensions/broken.ts".to_owned(),
+                event: "session_start".to_owned(),
+                error: "boom".to_owned(),
+            })
+        );
+    }
+
+    #[test]
+    fn malformed_retry_event_fails_closed_at_typed_projection() {
+        let message = parse_frame(
+            br#"{"type":"auto_retry_start","attempt":1,"maxAttempts":5,"delayMs":"later","errorMessage":"x"}"#,
+        )
+        .expect("outer event");
+        let InboundMessage::Event(event) = message else {
+            panic!("expected event");
+        };
+        assert_eq!(
+            event.auto_retry_start(),
+            Err(RpcEventPayloadError::MissingUnsignedInteger {
+                event: "auto_retry_start",
+                field: "delayMs",
+            })
+        );
+    }
+
+    #[test]
+    fn compaction_events_preserve_reason_abort_retry_and_error_semantics() {
+        let start = parse_frame(br#"{"type":"compaction_start","reason":"overflow"}"#)
+            .expect("compaction start");
+        let InboundMessage::Event(start) = start else {
+            panic!("expected event");
+        };
+        assert_eq!(
+            start.compaction_start().expect("typed start"),
+            Some(CompactionStartEvent {
+                reason: "overflow".to_owned(),
+            })
+        );
+
+        let end = parse_frame(
+            br#"{"type":"compaction_end","reason":"overflow","result":null,"aborted":false,"willRetry":true,"errorMessage":"provider quota"}"#,
+        )
+        .expect("compaction end");
+        let InboundMessage::Event(end) = end else {
+            panic!("expected event");
+        };
+        assert_eq!(
+            end.compaction_end().expect("typed end"),
+            Some(CompactionEndEvent {
+                reason: "overflow".to_owned(),
+                aborted: false,
+                will_retry: true,
+                error_message: Some("provider quota".to_owned()),
+            })
         );
     }
 

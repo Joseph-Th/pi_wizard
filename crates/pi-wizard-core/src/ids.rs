@@ -140,6 +140,54 @@ impl fmt::Display for WorktreeId {
     }
 }
 
+/// Stable identity for one reusable saved automation chain.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct AutomationChainId(Uuid);
+
+impl AutomationChainId {
+    #[must_use]
+    pub fn new() -> Self {
+        Self(Uuid::now_v7())
+    }
+}
+
+impl Default for AutomationChainId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl fmt::Display for AutomationChainId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+/// Stable identity for one finite execution of a saved automation chain.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct AutomationExecutionId(Uuid);
+
+impl AutomationExecutionId {
+    #[must_use]
+    pub fn new() -> Self {
+        Self(Uuid::now_v7())
+    }
+}
+
+impl Default for AutomationExecutionId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl fmt::Display for AutomationExecutionId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
 /// Stable identity for one image attached to a session-scoped composer draft.
 ///
 /// This survives renderer reload and draft persistence so removal is keyed by

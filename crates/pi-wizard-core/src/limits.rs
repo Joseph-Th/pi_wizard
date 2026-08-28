@@ -32,6 +32,14 @@ const HARD_MAX_GIT_DIFF_BYTES: usize = 8 * 1024 * 1024;
 const HARD_MAX_GIT_DIFF_PAGE_BYTES: usize = 1024 * 1024;
 const HARD_MAX_GIT_DIFF_SCAN_BYTES: usize = 64 * 1024 * 1024;
 const HARD_MAX_GIT_DIFF_HUNKS_PER_PAGE: usize = 4096;
+const HARD_MAX_AUTOMATION_CHAINS: usize = 4096;
+const HARD_MAX_AUTOMATION_STEPS_PER_CHAIN: usize = 4096;
+const HARD_MAX_AUTOMATION_NAME_BYTES: usize = 4096;
+const HARD_MAX_AUTOMATION_PROMPT_PREVIEW_BYTES: usize = 16 * 1024;
+const HARD_MAX_AUTOMATION_STATE_BYTES: usize = 16 * 1024 * 1024;
+const HARD_MAX_SUPERVISOR_CONTEXT_BYTES: usize = 1024 * 1024;
+const HARD_MAX_SUPERVISOR_DIRECTIVES_PER_CYCLE: usize = 256;
+const HARD_MAX_SUPERVISOR_CYCLES_PER_EXECUTION: usize = 256;
 
 /// Centralized resource ceilings for data Pi Wizard owns in memory.
 ///
@@ -100,9 +108,19 @@ pub struct RuntimeLimits {
     pub max_git_diff_page_bytes: usize,
     pub max_git_diff_scan_bytes_per_page: usize,
     pub max_git_diff_hunks_per_page: usize,
+    pub max_automation_chains: usize,
+    pub max_automation_steps_per_chain: usize,
+    pub max_automation_name_bytes: usize,
+    pub max_automation_prompt_preview_bytes: usize,
+    pub max_automation_state_bytes: usize,
+    pub max_supervisor_context_bytes: usize,
+    pub max_supervisor_directives_per_cycle: usize,
+    pub max_supervisor_cycles_per_execution: usize,
+    pub automation_supervisor_turn_deadline_ms: u64,
     pub environment_probe_deadline_ms: u64,
     pub version_probe_deadline_ms: u64,
     pub startup_rpc_deadline_ms: u64,
+    pub stream_stall_advisory_ms: u64,
     pub draft_save_debounce_ms: u64,
     pub draft_flush_deadline_ms: u64,
     pub stop_abort_deadline_ms: u64,
@@ -291,12 +309,43 @@ impl RuntimeLimits {
             "max_git_diff_hunks_per_page",
             self.max_git_diff_hunks_per_page,
         )?;
+        validate_nonzero("max_automation_chains", self.max_automation_chains)?;
+        validate_nonzero(
+            "max_automation_steps_per_chain",
+            self.max_automation_steps_per_chain,
+        )?;
+        validate_nonzero("max_automation_name_bytes", self.max_automation_name_bytes)?;
+        validate_nonzero(
+            "max_automation_prompt_preview_bytes",
+            self.max_automation_prompt_preview_bytes,
+        )?;
+        validate_nonzero(
+            "max_automation_state_bytes",
+            self.max_automation_state_bytes,
+        )?;
+        validate_nonzero(
+            "max_supervisor_context_bytes",
+            self.max_supervisor_context_bytes,
+        )?;
+        validate_nonzero(
+            "max_supervisor_directives_per_cycle",
+            self.max_supervisor_directives_per_cycle,
+        )?;
+        validate_nonzero(
+            "max_supervisor_cycles_per_execution",
+            self.max_supervisor_cycles_per_execution,
+        )?;
+        validate_nonzero_u64(
+            "automation_supervisor_turn_deadline_ms",
+            self.automation_supervisor_turn_deadline_ms,
+        )?;
         validate_nonzero_u64(
             "environment_probe_deadline_ms",
             self.environment_probe_deadline_ms,
         )?;
         validate_nonzero_u64("version_probe_deadline_ms", self.version_probe_deadline_ms)?;
         validate_nonzero_u64("startup_rpc_deadline_ms", self.startup_rpc_deadline_ms)?;
+        validate_nonzero_u64("stream_stall_advisory_ms", self.stream_stall_advisory_ms)?;
         validate_nonzero_u64("draft_save_debounce_ms", self.draft_save_debounce_ms)?;
         validate_nonzero_u64("draft_flush_deadline_ms", self.draft_flush_deadline_ms)?;
         validate_nonzero_u64("stop_abort_deadline_ms", self.stop_abort_deadline_ms)?;
@@ -361,6 +410,46 @@ impl RuntimeLimits {
                 "max_git_diff_hunks_per_page",
                 self.max_git_diff_hunks_per_page,
                 HARD_MAX_GIT_DIFF_HUNKS_PER_PAGE,
+            ),
+            (
+                "max_automation_chains",
+                self.max_automation_chains,
+                HARD_MAX_AUTOMATION_CHAINS,
+            ),
+            (
+                "max_automation_steps_per_chain",
+                self.max_automation_steps_per_chain,
+                HARD_MAX_AUTOMATION_STEPS_PER_CHAIN,
+            ),
+            (
+                "max_automation_name_bytes",
+                self.max_automation_name_bytes,
+                HARD_MAX_AUTOMATION_NAME_BYTES,
+            ),
+            (
+                "max_automation_prompt_preview_bytes",
+                self.max_automation_prompt_preview_bytes,
+                HARD_MAX_AUTOMATION_PROMPT_PREVIEW_BYTES,
+            ),
+            (
+                "max_automation_state_bytes",
+                self.max_automation_state_bytes,
+                HARD_MAX_AUTOMATION_STATE_BYTES,
+            ),
+            (
+                "max_supervisor_context_bytes",
+                self.max_supervisor_context_bytes,
+                HARD_MAX_SUPERVISOR_CONTEXT_BYTES,
+            ),
+            (
+                "max_supervisor_directives_per_cycle",
+                self.max_supervisor_directives_per_cycle,
+                HARD_MAX_SUPERVISOR_DIRECTIVES_PER_CYCLE,
+            ),
+            (
+                "max_supervisor_cycles_per_execution",
+                self.max_supervisor_cycles_per_execution,
+                HARD_MAX_SUPERVISOR_CYCLES_PER_EXECUTION,
             ),
             (
                 "max_retained_terminal_runs",
@@ -759,9 +848,23 @@ impl Default for RuntimeLimits {
             max_git_diff_page_bytes: 128 * 1024,
             max_git_diff_scan_bytes_per_page: 8 * 1024 * 1024,
             max_git_diff_hunks_per_page: 512,
+            max_automation_chains: 128,
+            max_automation_steps_per_chain: 128,
+            max_automation_name_bytes: 256,
+            max_automation_prompt_preview_bytes: 1024,
+            max_automation_state_bytes: 2 * 1024 * 1024,
+            max_supervisor_context_bytes: 64 * 1024,
+            max_supervisor_directives_per_cycle: 16,
+            max_supervisor_cycles_per_execution: 32,
+            // Supervision is ordinary Pi model work, so allow long coding-model
+            // turns while still guaranteeing one cycle cannot wait forever.
+            automation_supervisor_turn_deadline_ms: 15 * 60 * 1_000,
             environment_probe_deadline_ms: 2_000,
             version_probe_deadline_ms: 2_000,
             startup_rpc_deadline_ms: 5_000,
+            // Advisory only. This never retries, probes, cancels, or mutates a
+            // run. The first later Pi event clears the quiet-stream marker.
+            stream_stall_advisory_ms: 120_000,
             draft_save_debounce_ms: 400,
             draft_flush_deadline_ms: 1_500,
             stop_abort_deadline_ms: 3_000,

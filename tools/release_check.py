@@ -31,8 +31,24 @@ def main() -> None:
 
     security = tauri["app"]["security"]["csp"]
     require(security.get("default-src") == "'self'", "CSP default-src must be self-only")
+    require(security.get("script-src") == "'self'", "production CSP script-src must be self-only")
+    require(security.get("style-src") == "'self'", "production CSP style-src must be self-only")
+    require("unsafe-inline" not in security.get("style-src", ""), "production CSP must forbid inline styles")
+    require("unsafe-eval" not in security.get("script-src", ""), "production CSP must forbid script eval")
     require(security.get("object-src") == "'none'", "CSP object-src must be disabled")
+    require(security.get("base-uri") == "'none'", "CSP base-uri must be disabled")
+    require(security.get("form-action") == "'none'", "CSP form submission must be disabled")
     require(security.get("frame-ancestors") == "'none'", "CSP framing must be disabled")
+
+    dev_security = tauri["app"]["security"].get("devCsp", {})
+    require(
+        "ws://127.0.0.1:1420" in dev_security.get("connect-src", ""),
+        "development CSP must permit only the loopback Vite websocket needed for HMR",
+    )
+    require(
+        "'unsafe-inline'" in dev_security.get("style-src", ""),
+        "development-only CSP must contain the Vite inline-style allowance",
+    )
 
     bundle = tauri["bundle"]
     require(bundle.get("active") is True, "Tauri bundling must be enabled")
