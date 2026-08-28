@@ -1,0 +1,848 @@
+:root {
+  font-family:
+    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+    sans-serif;
+  color-scheme: light dark;
+  background: Canvas;
+  color: CanvasText;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+}
+
+.live-timeline {
+  display: grid;
+  gap: 0.625rem;
+  max-height: min(28rem, 45vh);
+  overflow: auto;
+  padding-right: 0.25rem;
+}
+
+.live-block {
+  display: grid;
+  gap: 0.4rem;
+  min-width: 0;
+  padding: 0.7rem 0.75rem;
+  border-left: 2px solid color-mix(in srgb, CanvasText 30%, transparent);
+  background: color-mix(in srgb, CanvasText 4%, transparent);
+}
+
+.live-block header {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  font-size: 0.8125rem;
+}
+
+.live-block header span,
+.truncation-note {
+  color: GrayText;
+  font-size: 0.75rem;
+}
+
+.live-block pre {
+  max-width: 100%;
+  margin: 0;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.8125rem;
+  line-height: 1.45;
+}
+
+.live-thinking {
+  opacity: 0.8;
+}
+
+.history-timeline {
+  display: grid;
+  gap: 0.625rem;
+  padding: 0.75rem 0;
+  border-top: 1px solid color-mix(in srgb, CanvasText 10%, transparent);
+  border-bottom: 1px solid color-mix(in srgb, CanvasText 10%, transparent);
+}
+
+.history-toolbar {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 0.75rem;
+  align-items: center;
+}
+
+.history-toolbar > span,
+.history-footnote,
+.history-note {
+  color: GrayText;
+  font-size: 0.75rem;
+}
+
+.history-toolbar > div {
+  display: flex;
+  gap: 0.375rem;
+}
+
+.history-toolbar button,
+.history-item button {
+  padding: 0.3rem 0.5rem;
+  font: inherit;
+  font-size: 0.75rem;
+}
+
+.history-page {
+  display: grid;
+  gap: 0.5rem;
+  max-height: min(34rem, 52vh);
+  overflow-y: auto;
+  padding-right: 0.25rem;
+}
+
+.history-item {
+  display: grid;
+  gap: 0.4rem;
+  min-width: 0;
+  padding: 0.625rem 0.75rem;
+  border-left: 2px solid color-mix(in srgb, CanvasText 22%, transparent);
+  background: color-mix(in srgb, CanvasText 3%, transparent);
+}
+
+.history-user {
+  border-left-width: 3px;
+}
+
+.history-tool,
+.history-bash,
+.history-custom,
+.history-compaction,
+.history-branch_summary {
+  opacity: 0.88;
+}
+
+.history-error {
+  border-left-style: double;
+}
+
+.history-item header {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.75rem;
+  align-items: center;
+  font-size: 0.8125rem;
+}
+
+.history-item header > div {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.history-item header span {
+  color: GrayText;
+  font-size: 0.7rem;
+}
+
+.history-item pre {
+  max-width: 100%;
+  margin: 0;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.8125rem;
+  line-height: 1.45;
+}
+
+.composers {
+  display: grid;
+  gap: 0.75rem;
+  width: min(42rem, calc(100vw - 4rem));
+  margin-top: 2rem;
+}
+
+.composers h2 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.composer-card {
+  display: grid;
+  gap: 0.75rem;
+  padding: 1rem;
+  border: 1px solid color-mix(in srgb, CanvasText 20%, transparent);
+  border-radius: 0.5rem;
+}
+
+.composer-card header {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.composer-card header span,
+.composer-actions span {
+  color: GrayText;
+  font-size: 0.8125rem;
+}
+
+.run-identity {
+  display: grid;
+  gap: 0.2rem;
+  min-width: 0;
+}
+
+.run-identity span {
+  max-width: 32rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.run-controls {
+  display: grid;
+  grid-template-columns: minmax(10rem, 1fr) minmax(8rem, 0.65fr);
+  gap: 0.625rem;
+  align-items: end;
+  padding: 0.75rem 0;
+  border-top: 1px solid color-mix(in srgb, CanvasText 10%, transparent);
+  border-bottom: 1px solid color-mix(in srgb, CanvasText 10%, transparent);
+}
+
+.run-controls label {
+  display: grid;
+  gap: 0.3rem;
+  min-width: 0;
+}
+
+.run-controls label span {
+  color: GrayText;
+  font-size: 0.75rem;
+}
+
+.run-controls select,
+.run-controls input,
+.run-controls button {
+  min-width: 0;
+  padding: 0.45rem 0.55rem;
+  font: inherit;
+}
+
+.session-usage {
+  display: flex;
+  gap: 0.75rem;
+  align-items: baseline;
+  flex-wrap: wrap;
+  padding: 0.5rem 0;
+  font-size: 0.78rem;
+}
+
+.session-usage span,
+.session-usage-note {
+  color: GrayText;
+}
+
+.session-usage-note {
+  font-size: 0.78rem;
+}
+
+.git-review {
+  display: grid;
+  gap: 0.5rem;
+  padding: 0.75rem 0;
+  border-bottom: 1px solid color-mix(in srgb, CanvasText 10%, transparent);
+}
+
+.git-review-toolbar {
+  display: flex;
+  gap: 0.75rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.git-review-toolbar span,
+.git-review-files > span,
+.git-review-diff span {
+  color: GrayText;
+  font-size: 0.75rem;
+}
+
+.git-review-files {
+  display: grid;
+  max-height: 12rem;
+  overflow: auto;
+  border: 1px solid color-mix(in srgb, CanvasText 10%, transparent);
+  border-radius: 0.375rem;
+}
+
+.git-review-files button {
+  display: grid;
+  grid-template-columns: 5.5rem minmax(0, 1fr) auto;
+  gap: 0.5rem;
+  align-items: baseline;
+  width: 100%;
+  border: 0;
+  border-top: 1px solid color-mix(in srgb, CanvasText 8%, transparent);
+  border-radius: 0;
+  text-align: left;
+  background: transparent;
+}
+
+.git-review-files button:first-of-type {
+  border-top: 0;
+}
+
+.git-review-files button.selected {
+  background: color-mix(in srgb, CanvasText 6%, transparent);
+}
+
+.git-review-files button > span,
+.git-review-files button > small {
+  color: GrayText;
+  font-size: 0.7rem;
+}
+
+.git-review-files button > strong,
+.git-review-files button > small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.git-review-diff {
+  display: grid;
+  gap: 0.4rem;
+  min-width: 0;
+}
+
+.git-review-diff > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.git-review-diff pre {
+  max-height: 24rem;
+  margin: 0;
+  padding: 0.75rem;
+  overflow: auto;
+  white-space: pre;
+  border: 1px solid color-mix(in srgb, CanvasText 10%, transparent);
+  border-radius: 0.375rem;
+  font-size: 0.75rem;
+}
+
+.composer-input {
+  display: grid;
+  gap: 0.5rem;
+  min-width: 0;
+}
+
+.attachment-toolbar {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.attachment-toolbar span {
+  color: GrayText;
+  font-size: 0.75rem;
+}
+
+.attachment-warning {
+  padding: 0.5rem 0.625rem;
+  border-left: 2px solid color-mix(in srgb, CanvasText 28%, transparent);
+  background: color-mix(in srgb, CanvasText 4%, transparent);
+  font-size: 0.78rem;
+  line-height: 1.4;
+}
+
+.attachment-picker {
+  display: none;
+}
+
+.attachment-list {
+  display: grid;
+  gap: 0.375rem;
+}
+
+.attachment-item {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.75rem;
+  align-items: center;
+  min-width: 0;
+  padding: 0.5rem 0.625rem;
+  border: 1px solid color-mix(in srgb, CanvasText 12%, transparent);
+  border-radius: 0.375rem;
+  background: color-mix(in srgb, CanvasText 3%, transparent);
+}
+
+.attachment-item > div {
+  display: grid;
+  gap: 0.15rem;
+  min-width: 0;
+}
+
+.attachment-item strong,
+.attachment-item span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.attachment-item span {
+  color: GrayText;
+  font-size: 0.7rem;
+}
+
+.session-name-control {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.5rem;
+  align-items: end;
+}
+
+.composer-card textarea {
+  width: 100%;
+  min-height: 7rem;
+  padding: 0.625rem;
+  resize: vertical;
+  font: inherit;
+}
+
+.command-suggestions {
+  display: grid;
+  max-height: 13rem;
+  overflow-y: auto;
+  border: 1px solid color-mix(in srgb, CanvasText 16%, transparent);
+  border-radius: 0.375rem;
+}
+
+.command-suggestions button {
+  display: grid;
+  grid-template-columns: minmax(8rem, auto) auto minmax(0, 1fr);
+  gap: 0.65rem;
+  align-items: baseline;
+  width: 100%;
+  border: 0;
+  border-top: 1px solid color-mix(in srgb, CanvasText 8%, transparent);
+  border-radius: 0;
+  text-align: left;
+  background: transparent;
+}
+
+.command-suggestions button:first-child {
+  border-top: 0;
+}
+
+.command-suggestions span,
+.command-suggestions small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.command-suggestions span,
+.command-suggestions small {
+  color: GrayText;
+  font-size: 0.75rem;
+}
+
+.composer-actions {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.composer-card button {
+  padding: 0.45rem 0.75rem;
+  font: inherit;
+}
+
+.composer-card .error {
+  color: CanvasText;
+  font-size: 0.875rem;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  width: 100%;
+  min-width: 100%;
+  height: 100%;
+  min-height: 100%;
+  margin: 0;
+}
+
+.worktree-recoveries {
+  display: grid;
+  gap: 0.625rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid color-mix(in srgb, CanvasText 12%, transparent);
+}
+
+.recovery-heading,
+.recovery-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  align-items: center;
+}
+
+.recovery-heading > div,
+.recovery-row > div:first-child {
+  display: grid;
+  gap: 0.2rem;
+  min-width: 0;
+}
+
+.recovery-heading span,
+.recovery-row span {
+  color: GrayText;
+  font-size: 0.75rem;
+}
+
+.recovery-row {
+  padding: 0.625rem 0;
+  border-top: 1px solid color-mix(in srgb, CanvasText 10%, transparent);
+}
+
+.recovery-row strong,
+.recovery-row span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.recovery-row span {
+  white-space: nowrap;
+}
+
+.recovery-actions {
+  display: flex;
+  gap: 0.5rem;
+  flex: 0 0 auto;
+}
+
+body {
+  overflow: hidden;
+}
+
+.foundation-shell {
+  display: grid;
+  align-content: start;
+  justify-content: start;
+  height: 100%;
+  min-height: 100%;
+  padding: 2rem;
+  overflow: auto;
+}
+
+.foundation-shell h1,
+.foundation-shell p {
+  margin: 0;
+}
+
+.foundation-shell .subtitle {
+  margin-top: 0.375rem;
+  color: GrayText;
+}
+
+.runtime-status {
+  display: grid;
+  gap: 0.75rem;
+  width: min(42rem, calc(100vw - 4rem));
+  margin-top: 1.5rem;
+  padding-top: 1rem;
+  border-top: 1px solid color-mix(in srgb, CanvasText 18%, transparent);
+}
+
+.runtime-status > div {
+  display: grid;
+  grid-template-columns: 7rem 1fr;
+  gap: 1rem;
+  align-items: baseline;
+}
+
+.runtime-status span {
+  color: GrayText;
+}
+
+.runtime-status strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-weight: 600;
+}
+
+.runtime-status .error {
+  margin: -0.35rem 0 0 8rem;
+  color: CanvasText;
+  font-size: 0.875rem;
+}
+
+.project-launcher {
+  display: grid;
+  gap: 0.75rem;
+  width: min(42rem, calc(100vw - 4rem));
+  margin-top: 2rem;
+}
+
+.project-launcher h2 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.project-launcher form {
+  display: grid;
+  grid-template-columns: minmax(15rem, 1fr) minmax(10rem, 0.5fr) minmax(13rem, 0.7fr) auto;
+  gap: 0.75rem;
+  align-items: end;
+}
+
+.worktree-plan {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: auto minmax(10rem, 0.5fr) minmax(16rem, 1fr);
+  gap: 0.75rem;
+  align-items: end;
+  padding: 0.75rem;
+  border: 1px solid color-mix(in srgb, CanvasText 12%, transparent);
+  border-radius: 0.5rem;
+}
+
+.worktree-base {
+  grid-column: 1 / -1;
+  display: flex;
+  gap: 0.65rem;
+  flex-wrap: wrap;
+  min-width: 0;
+  font-size: 0.78rem;
+}
+
+.worktree-base span,
+.worktree-base p {
+  color: GrayText;
+}
+
+.worktree-base span {
+  max-width: 28rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.worktree-base p,
+.worktree-plan .launch-note,
+.worktree-plan .error {
+  grid-column: 1 / -1;
+  margin: 0;
+}
+
+.project-launcher label {
+  display: grid;
+  gap: 0.35rem;
+  min-width: 0;
+}
+
+.project-launcher label span,
+.project-launcher .launch-note {
+  color: GrayText;
+  font-size: 0.8125rem;
+}
+
+.project-launcher input,
+.project-launcher select,
+.project-launcher button {
+  min-width: 0;
+  padding: 0.5rem 0.625rem;
+  font: inherit;
+}
+
+.project-launcher .launch-note {
+  line-height: 1.45;
+}
+
+.project-launcher .error {
+  font-size: 0.875rem;
+}
+
+.session-browser {
+  display: grid;
+  gap: 0.75rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid color-mix(in srgb, CanvasText 12%, transparent);
+}
+
+.session-search {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.5rem;
+}
+
+.session-search input,
+.session-search button,
+.session-row button {
+  min-width: 0;
+  padding: 0.5rem 0.625rem;
+  font: inherit;
+}
+
+.session-results {
+  display: grid;
+  gap: 0.5rem;
+}
+
+.session-results-meta,
+.session-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  align-items: center;
+}
+
+.session-results-meta {
+  color: GrayText;
+  font-size: 0.75rem;
+}
+
+.session-row {
+  padding: 0.625rem 0;
+  border-top: 1px solid color-mix(in srgb, CanvasText 10%, transparent);
+}
+
+.session-row > div {
+  display: grid;
+  min-width: 0;
+  gap: 0.2rem;
+}
+
+.session-row strong,
+.session-row span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-row span {
+  color: GrayText;
+  font-size: 0.75rem;
+}
+
+@media (max-width: 720px) {
+  .project-launcher form,
+  .worktree-plan {
+    grid-template-columns: 1fr;
+  }
+
+  .worktree-plan > * {
+    grid-column: 1;
+  }
+
+  .session-search {
+    grid-template-columns: 1fr;
+  }
+
+  .recovery-heading,
+  .recovery-row {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .recovery-actions button {
+    flex: 1 1 auto;
+  }
+
+  .run-controls,
+  .session-name-control {
+    grid-template-columns: 1fr;
+  }
+
+  .command-suggestions button {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .command-suggestions small {
+    grid-column: 1 / -1;
+  }
+
+  .history-toolbar {
+    grid-template-columns: 1fr auto;
+  }
+
+  .history-toolbar > span {
+    grid-column: 1 / -1;
+    grid-row: 2;
+  }
+}
+
+.attention {
+  display: grid;
+  gap: 0.75rem;
+  width: min(42rem, calc(100vw - 4rem));
+  margin-top: 2rem;
+}
+
+.attention h2 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.dialog-card {
+  display: grid;
+  gap: 0.75rem;
+  padding: 1rem;
+  border: 1px solid color-mix(in srgb, CanvasText 20%, transparent);
+  border-radius: 0.5rem;
+}
+
+.dialog-card header {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.dialog-card header span {
+  color: GrayText;
+  font-size: 0.8125rem;
+}
+
+.dialog-card form,
+.dialog-options,
+.dialog-actions {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.dialog-card form {
+  align-items: start;
+}
+
+.dialog-card input,
+.dialog-card textarea {
+  flex: 1 1 20rem;
+  min-width: 0;
+  padding: 0.5rem;
+  font: inherit;
+}
+
+.dialog-card textarea {
+  min-height: 8rem;
+  resize: vertical;
+}
+
+.dialog-card button {
+  padding: 0.45rem 0.75rem;
+  font: inherit;
+}
+
+.dialog-card .error {
+  color: CanvasText;
+  font-size: 0.875rem;
+}

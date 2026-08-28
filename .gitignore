@@ -1,0 +1,9 @@
+/target/
+/dist/
+/node_modules/
+/.vite/
+/src-tauri/gen/schemas/
+*.log
+*.tmp
+.DS_Store
+Thumbs.db
