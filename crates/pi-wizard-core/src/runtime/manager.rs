@@ -3560,14 +3560,24 @@ mod tests {
             let root =
                 std::env::temp_dir().join(format!("pi-wizard-manager-{name}-{}", RunId::new()));
             fs::create_dir_all(&root).expect("create manager fixture root");
+            #[cfg(windows)]
+            let script = root
+                .join("node_modules")
+                .join("@earendil-works")
+                .join("pi-coding-agent")
+                .join("dist")
+                .join("bundle")
+                .join("cli.js");
+            #[cfg(not(windows))]
             let script = root.join("fake-pi.js");
+            fs::create_dir_all(script.parent().expect("fake Pi script parent"))
+                .expect("create fake Pi script parent");
             fs::write(&script, source).expect("write fake Pi JavaScript");
 
             #[cfg(windows)]
             let fake_pi = {
                 let path = root.join("pi.cmd");
-                fs::write(&path, "@echo off\r\nnode \"%~dp0fake-pi.js\"\r\n")
-                    .expect("write fake Pi wrapper");
+                fs::write(&path, "@echo off\r\nexit /b 1\r\n").expect("write logical Pi shim");
                 path
             };
 

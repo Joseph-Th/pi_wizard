@@ -38,23 +38,23 @@ The source tree follows ordinary desktop application ownership boundaries instea
 
 ```text
 src/
-  app/            shell composition and renderer recovery
-  components/     reusable presentation components
-  features/       automation, supervision, models, launcher, sessions, runs
+  app/            shell/state composition and renderer recovery
+  features/       attention, automation, models, projects, runs, sessions, supervision
+  features/runs/  run contracts, history/tree, composer/live UI, presentation/notices
   lib/            typed IPC and small framework-neutral helpers
-  types/          renderer IPC/view-model contracts
+  types/          shared renderer IPC/view-model contracts
   styles/         application styles
 
 src-tauri/src/
-  app/            desktop runtime composition/state
-  commands/       thin Tauri command adapters grouped by feature
-  services/       automation, supervision, models, Git/session orchestration
-  platform/       Windows-only process/container integration
-  lib.rs          Tauri builder/composition only
+  app/            desktop runtime composition/state plus grouped general desktop command adapters
+  commands/       thin feature adapters for automation, supervision, and models
+  services/       automation, supervision, Pi-session, and internal-run orchestration
+  platform/       Windows-only process containment
+  lib.rs          module/re-export entry point only
   main.rs         process entry point only
 ```
 
-Feature folders own feature-specific UI/service state; shared Pi/runtime semantics stay in `pi-wizard-core`. `App.tsx` and `src-tauri/src/lib.rs` must remain composition surfaces rather than growing back into product-wide implementation files.
+Feature folders own feature-specific UI/service state; shared Pi/runtime semantics stay in `pi-wizard-core`. `src/app/App.tsx` is the renderer shell/state composition owner; run/session/composer implementation lives under `src/features/runs`. `src-tauri/src/app/mod.rs` owns desktop composition/runtime state while its general command adapters and wire tests live in `src-tauri/src/app/desktop_commands.rs`; `src-tauri/src/lib.rs` remains a thin module/re-export entry point.
 
 ## 2. Stack decision
 
@@ -133,7 +133,7 @@ OS spawn is not RPC readiness. A newly owned child remains `Starting` until a de
 
 The core process transport verifies that the launch executable is the same canonical Pi selected by the launch-environment resolver, spawns only private piped stdin/stdout/stderr, continuously drains stderr into a byte-bounded ring, and retains the original child handle plus spawn-time PID identity for lifecycle control. RPC is a trusted local stdio boundary; Pi Wizard does not expose the unauthenticated RPC stream on a network listener.
 
-Process wrappers are part of the ownership problem. On Windows an npm-installed `pi.cmd` can own a Node descendant; killing only the wrapper can leave that descendant holding stdout/stderr handles and make shutdown wait forever. Hard termination therefore targets the exact captured PID tree with Windows tree semantics. On Unix the child is launched as leader of an app-owned process group and hard termination targets that group. Neither path scans for `pi`, `node`, or shell processes by name. If tree/group termination cannot be confirmed, the run is quarantined even if the direct wrapper exited.
+Process wrappers are part of the ownership problem. On Windows, supported standard npm shims are resolved to their direct Node entry point before live spawn, while unresolved shell-backed launchers are rejected. Hard termination still targets the exact captured PID tree with Windows tree semantics because Pi/Node may create descendants during normal operation. On Unix the child is launched as leader of an app-owned process group and hard termination targets that group. Neither path scans for `pi`, `node`, or shell processes by name. If tree/group termination cannot be confirmed, the run is quarantined.
 
 Stderr EOF is diagnostic information, not permission to hold lifecycle completion forever. Final stderr draining shares the bounded lifecycle deadline; if inherited pipe handles prevent EOF, the drain task is cancelled and diagnostics record that EOF was not observed.
 
@@ -283,9 +283,9 @@ Pi capability discovery remains authoritative for models Pi reports, including n
 
 ### Windows Pi invocation and process containment
 
-Pi Wizard does not keep an npm command-shell shim alive as the production Pi process. When Windows discovery resolves the standard npm `pi.cmd`/`pi.ps1` installation, the environment owner resolves the corresponding `node.exe` plus `@earendil-works/pi-coding-agent/dist/bundle/cli.js` and the process owner spawns that Node entry point directly with `CREATE_NO_WINDOW`. The logical Pi shim path remains diagnostic/discovery identity; the runtime invocation target is the direct Node child.
+Pi Wizard does not keep a command-shell shim alive as a production Pi process. When Windows discovery resolves the standard npm `pi.cmd`/`pi.ps1` installation, the environment owner resolves the corresponding `node.exe` plus `@earendil-works/pi-coding-agent/dist/bundle/cli.js` and the process owner spawns that Node entry point directly with `CREATE_NO_WINDOW`. The logical Pi shim path remains diagnostic/discovery identity; the runtime invocation target is the direct Node child. If a configured/discovered `.cmd`, `.bat`, or `.ps1` launcher cannot be resolved to a direct executable invocation, live-runtime spawn fails explicitly before starting it rather than retaining a background shell.
 
-Graceful shutdown still belongs to `RuntimeManager`, which closes every owned Pi run and reports termination uncertainty explicitly. In addition, the Windows desktop establishes one kill-on-close Job Object before child work begins and keeps that handle for the process lifetime. Descendants inherit the job, so an abrupt desktop termination closes the job and the kernel terminates remaining descendants rather than leaving orphaned Pi/Node processes. Exact-process Stop/Close behavior and bounded diagnostic finalization remain in place for ordinary lifecycle operations.
+Graceful shutdown still belongs to `RuntimeManager`, which closes every owned Pi run and reports termination uncertainty explicitly. The Windows exact-tree `taskkill.exe` fallback is itself spawned with `CREATE_NO_WINDOW`. In addition, the Windows desktop establishes one kill-on-close Job Object before child work begins and keeps that handle for the process lifetime. Descendants inherit the job, so an abrupt desktop termination closes the job and the kernel terminates remaining descendants rather than leaving orphaned Pi/Node processes. Exact-process Stop/Close behavior and bounded diagnostic finalization remain in place for ordinary lifecycle operations.
 
 ### Composer draft ownership
 

@@ -21,8 +21,14 @@ const attention = [
   readFileSync(resolve(root, "src", "features", "attention", "ExtensionDialogCard.tsx"), "utf8"),
   readFileSync(resolve(root, "src", "features", "attention", "NeedsAttentionView.tsx"), "utf8"),
 ].join("\n");
+const runs = [
+  readFileSync(resolve(root, "src", "features", "runs", "types.tsx"), "utf8"),
+  readFileSync(resolve(root, "src", "features", "runs", "history.tsx"), "utf8"),
+  readFileSync(resolve(root, "src", "features", "runs", "composer.tsx"), "utf8"),
+  readFileSync(resolve(root, "src", "features", "runs", "presentation.tsx"), "utf8"),
+].join("\n");
 const desktop = readFileSync(resolve(root, "src", "lib", "desktop.ts"), "utf8");
-const ui = [app, automation, supervision, models, projects, sessions, attention].join("\n");
+const ui = [app, automation, supervision, models, projects, sessions, attention, runs].join("\n");
 const styles = [
   readFileSync(resolve(root, "src", "styles", "app.css"), "utf8"),
   readFileSync(resolve(root, "src", "features", "models", "models.css"), "utf8"),
@@ -84,7 +90,9 @@ requireContract(
     ui.includes("promptPreview") &&
     ui.includes("promptTruncated") &&
     ui.includes("const refreshRuntimeState = async () =>") &&
-    ui.includes("refreshHydration(),\n      refreshCapacity(),\n    ]);") &&
+    ui.includes("const [snapshot] = await Promise.all([") &&
+    ui.includes("refreshHydration(),") &&
+    ui.includes("refreshCapacity(),") &&
     ui.includes("Git-isolated workers") &&
     !automation.includes("supervisor") &&
     ui.includes('view() === "supervision"') &&

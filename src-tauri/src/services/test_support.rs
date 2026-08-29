@@ -18,17 +18,24 @@ impl WorkflowFakePiFixture {
     pub(crate) fn new(name: &str) -> Self {
         let root = std::env::temp_dir().join(format!("pi-wizard-{name}-{}", RunId::new()));
         fs::create_dir_all(&root).expect("create workflow fake Pi fixture");
+        #[cfg(windows)]
+        let script = root
+            .join("node_modules")
+            .join("@earendil-works")
+            .join("pi-coding-agent")
+            .join("dist")
+            .join("bundle")
+            .join("cli.js");
+        #[cfg(not(windows))]
         let script = root.join("workflow-fake-pi.js");
+        fs::create_dir_all(script.parent().expect("workflow fake Pi script parent"))
+            .expect("create workflow fake Pi script parent");
         fs::write(&script, WORKFLOW_FAKE_PI_JS).expect("write workflow fake Pi script");
 
         #[cfg(windows)]
         let fake_pi = {
             let path = root.join("pi.cmd");
-            fs::write(
-                &path,
-                "@echo off\r\nnode \"%~dp0workflow-fake-pi.js\" %*\r\n",
-            )
-            .expect("write Windows workflow Pi wrapper");
+            fs::write(&path, "@echo off\r\nexit /b 1\r\n").expect("write logical Pi shim");
             path
         };
 

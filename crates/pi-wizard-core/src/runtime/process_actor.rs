@@ -491,25 +491,41 @@ mod tests {
             let root = std::env::temp_dir().join(format!("pi-wizard-actor-{}", RunId::new()));
             fs::create_dir_all(&root).expect("fixture root");
             #[cfg(windows)]
-            let fake_pi = root.join("pi.cmd");
+            let fake_pi = {
+                let cli = root
+                    .join("node_modules")
+                    .join("@earendil-works")
+                    .join("pi-coding-agent")
+                    .join("dist")
+                    .join("bundle")
+                    .join("cli.js");
+                fs::create_dir_all(cli.parent().expect("fake Pi CLI parent"))
+                    .expect("create fake Pi npm layout");
+                fs::write(
+                    &cli,
+                    concat!(
+                        "let buffer = '';\n",
+                        "process.stdin.setEncoding('utf8');\n",
+                        "process.stdin.on('data', chunk => {\n",
+                        "  buffer += chunk;\n",
+                        "  while (buffer.includes('\\n')) {\n",
+                        "    const index = buffer.indexOf('\\n');\n",
+                        "    const line = buffer.slice(0, index).replace(/\\r$/, '');\n",
+                        "    buffer = buffer.slice(index + 1);\n",
+                        "    if (!line) continue;\n",
+                        "    const request = JSON.parse(line);\n",
+                        "    if (request.type === 'get_state') process.stdout.write(JSON.stringify({id:request.id,type:'response',command:'get_state',success:true,data:{model:null,thinkingLevel:'medium',isStreaming:false,isCompacting:false,steeringMode:'all',followUpMode:'one-at-a-time',sessionId:'fake',autoCompactionEnabled:true,messageCount:0,pendingMessageCount:0}}) + '\\n');\n",
+                        "  }\n",
+                        "});\n"
+                    ),
+                )
+                .expect("write direct fake Pi CLI");
+                let path = root.join("pi.cmd");
+                fs::write(&path, "@echo off\r\nexit /b 1\r\n").expect("write logical Pi shim");
+                path
+            };
             #[cfg(not(windows))]
             let fake_pi = root.join("pi");
-
-            #[cfg(windows)]
-            fs::write(
-                &fake_pi,
-                concat!(
-                    "@echo off\r\n",
-                    ":loop\r\n",
-                    "set request=\r\n",
-                    "set /p request=\r\n",
-                    "if errorlevel 1 goto done\r\n",
-                    "echo %request% | findstr /c:\"get_state\" >nul && echo {\"id\":\"state-1\",\"type\":\"response\",\"command\":\"get_state\",\"success\":true,\"data\":{\"model\":null,\"thinkingLevel\":\"medium\",\"isStreaming\":false,\"isCompacting\":false,\"steeringMode\":\"all\",\"followUpMode\":\"one-at-a-time\",\"sessionId\":\"fake\",\"autoCompactionEnabled\":true,\"messageCount\":0,\"pendingMessageCount\":0}}\r\n",
-                    "goto loop\r\n",
-                    ":done\r\n"
-                ),
-            )
-            .expect("fake Pi");
             #[cfg(not(windows))]
             {
                 use std::os::unix::fs::PermissionsExt;

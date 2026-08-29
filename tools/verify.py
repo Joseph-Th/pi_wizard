@@ -88,6 +88,7 @@ def full() -> None:
     )
     run([sys.executable, str(ROOT / "tools" / "release_check.py")])
     run([tool("npm"), "run", "desktop:build"])
+    run([sys.executable, str(ROOT / "tools" / "check_windows_gui_subsystem.py")])
 
 
 def main() -> None:

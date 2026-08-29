@@ -31,7 +31,8 @@ python tools/verify.py full
 - ignored core fixtures, currently a 25+ MiB/10k-entry Pi JSONL history, a multi-megabyte tracked Git diff paged through fixed byte/scan ceilings, eight concurrent simulated streaming runs, a 1,200-file historical session catalog traversed through bounded continuation pages with fixed retained-candidate/scan/page ceilings, and confirmed idle-run Close/process-tree termination exercised serially so unrelated Windows process fixtures cannot create false quarantine results;
 - an ignored desktop cold/warm app-owned-state startup measurement with a deliberately loose regression ceiling;
 - desktop configuration/version/CSP/icon checks;
-- an optimized Tauri Windows desktop build with `--no-bundle`.
+- an optimized Tauri Windows desktop build with `--no-bundle`;
+- a post-build PE-header assertion that the release executable is `IMAGE_SUBSYSTEM_WINDOWS_GUI`, preventing a console/terminal window from being created when the packaged desktop app starts.
 
 Runtime diagnostics tests prove the snapshot is explicit/pull-only, serializes only bounded counter data, reports exact process ownership and bounded per-run state/backlog values, counts delivered UI events without retaining them, and uses a fixed recent RPC traffic window that decays to zero without a timer. Desktop tests prove active Git-review and session-catalog job counts come from the existing job owners, while the renderer source contract keeps diagnostics behind an explicit refresh action and development long-task observation behind `import.meta.env.DEV`.
 
@@ -130,8 +131,8 @@ Prove:
 - a process exiting while its view is unmounted still updates runtime state;
 - stdout and stderr ownership cannot deadlock the child through unread pipes.
 - stderr is continuously drained into a fixed byte budget even when the renderer never opens diagnostics;
-- exact child-handle termination is used for escalation; PID/executable-name lookup is never the lifecycle authority.
-- standard Windows npm Pi installations resolve to direct Node + Pi CLI entrypoint invocation so the long-lived runtime has no command-shell wrapper; legacy/custom script launchers remain covered by exact-tree fallback tests;
+- exact child-handle termination is used for escalation; PID/executable-name lookup is never the lifecycle authority, and the Windows `taskkill.exe` exact-tree fallback uses `CREATE_NO_WINDOW` so hard-stop escalation cannot flash a console.
+- standard Windows npm Pi installations resolve to direct Node + Pi CLI entrypoint invocation so the long-lived runtime has no command-shell wrapper; unresolved `.cmd`, `.bat`, and `.ps1` live launchers are rejected before spawn rather than retained as background shells;
 - the Windows desktop establishes kill-on-close process containment before runtime children can be launched so abrupt desktop termination cannot orphan inherited descendants;
 - a destructive Windows Job Object regression assigns a long-lived child to a kill-on-close job, drops the job handle, and requires the child to terminate within the bounded test deadline;
 - stderr finalization is deadline-bounded even when a descendant inherits and retains a pipe handle;

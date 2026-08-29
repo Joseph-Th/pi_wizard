@@ -413,7 +413,7 @@ fn resolve_pi_invocation(
                 if let Some(node) = node {
                     return Ok(ResolvedPiInvocation {
                         executable: node,
-                        prefix_args: vec![cli.into_os_string()],
+                        prefix_args: vec![process_argument_path(&cli)],
                         direct_npm_node: true,
                     });
                 }
@@ -426,6 +426,20 @@ fn resolve_pi_invocation(
         prefix_args: Vec::new(),
         direct_npm_node: false,
     })
+}
+
+fn process_argument_path(path: &Path) -> OsString {
+    #[cfg(windows)]
+    {
+        let value = path.as_os_str().to_string_lossy();
+        if let Some(rest) = value.strip_prefix(r"\\?\UNC\") {
+            return OsString::from(format!(r"\\{rest}"));
+        }
+        if let Some(rest) = value.strip_prefix(r"\\?\") {
+            return OsString::from(rest);
+        }
+    }
+    path.as_os_str().to_os_string()
 }
 
 fn overlay_environment(
@@ -723,9 +737,14 @@ mod tests {
         );
         assert_eq!(
             resolved.pi_invocation().prefix_args(),
-            [cli.canonicalize()
-                .expect("canonical Pi CLI entrypoint")
-                .into_os_string()]
+            [process_argument_path(
+                &cli.canonicalize().expect("canonical Pi CLI entrypoint")
+            )]
+        );
+        assert!(
+            !resolved.pi_invocation().prefix_args()[0]
+                .to_string_lossy()
+                .starts_with(r"\\?\")
         );
         assert!(resolved.pi_invocation().is_direct_npm_node());
     }

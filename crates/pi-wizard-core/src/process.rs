@@ -208,6 +208,12 @@ pub fn spawn_pi_process(
     }
 
     let invocation = environment.pi_invocation();
+    #[cfg(windows)]
+    if windows_launcher_requires_shell(invocation.executable()) {
+        return Err(ProcessError::ScriptLauncherRequiresShell {
+            path: invocation.executable().to_path_buf(),
+        });
+    }
     let mut command = Command::new(invocation.executable());
     command
         .args(invocation.prefix_args())
@@ -229,10 +235,7 @@ pub fn spawn_pi_process(
     }
 
     #[cfg(windows)]
-    {
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        command.creation_flags(CREATE_NO_WINDOW);
-    }
+    configure_windows_no_window(&mut command);
 
     let mut child = command.spawn().map_err(ProcessError::Spawn)?;
     let pid = child.id().ok_or(ProcessError::MissingProcessId)?;
@@ -284,6 +287,23 @@ fn unix_tree_termination_args(identity: PiProcessIdentity) -> [String; 2] {
 }
 
 #[cfg(windows)]
+fn windows_launcher_requires_shell(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            extension.eq_ignore_ascii_case("cmd")
+                || extension.eq_ignore_ascii_case("bat")
+                || extension.eq_ignore_ascii_case("ps1")
+        })
+}
+
+#[cfg(windows)]
+fn configure_windows_no_window(command: &mut Command) {
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    command.creation_flags(CREATE_NO_WINDOW);
+}
+
+#[cfg(windows)]
 async fn request_process_tree_termination(
     identity: PiProcessIdentity,
     deadline: Duration,
@@ -294,14 +314,15 @@ async fn request_process_tree_termination(
         .filter(|path| path.is_file())
         .unwrap_or_else(|| PathBuf::from("taskkill.exe"));
     let args = windows_tree_termination_args(identity);
-    let mut child = Command::new(taskkill)
+    let mut command = Command::new(taskkill);
+    command
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .kill_on_drop(true)
-        .spawn()
-        .map_err(ProcessError::TreeTerminateSpawn)?;
+        .kill_on_drop(true);
+    configure_windows_no_window(&mut command);
+    let mut child = command.spawn().map_err(ProcessError::TreeTerminateSpawn)?;
     let status = match timeout(deadline, child.wait()).await {
         Ok(result) => result.map_err(ProcessError::TreeTerminateWait)?,
         Err(_) => {
@@ -383,6 +404,11 @@ pub enum ProcessError {
     Spawn(io::Error),
     #[error("spawned Pi child did not expose a process id")]
     MissingProcessId,
+    #[cfg(windows)]
+    #[error(
+        "Pi launcher {path} requires a command shell; configure a direct executable or use the standard npm Pi installation so Pi Wizard can resolve Node directly"
+    )]
+    ScriptLauncherRequiresShell { path: PathBuf },
     #[error("spawned Pi child is missing required {0} pipe")]
     MissingPipe(&'static str),
     #[error("failed waiting for Pi child: {0}")]
@@ -424,21 +450,32 @@ mod tests {
                 std::env::temp_dir().join(format!("pi-wizard-process-{name}-{}", RunId::new()));
             fs::create_dir_all(&root).expect("create fixture");
             #[cfg(windows)]
-            let fake_pi = root.join("pi.cmd");
+            let fake_pi = {
+                let cli = root
+                    .join("node_modules")
+                    .join("@earendil-works")
+                    .join("pi-coding-agent")
+                    .join("dist")
+                    .join("bundle")
+                    .join("cli.js");
+                fs::create_dir_all(cli.parent().expect("fake Pi CLI parent"))
+                    .expect("create fake Pi npm layout");
+                fs::write(
+                    &cli,
+                    concat!(
+                        "process.stdin.once('data', () => {\n",
+                        "  process.stderr.write('0123456789abcdefghijklmnopqrstuvwxyz\\n');\n",
+                        "  process.stdout.write(JSON.stringify({id:'req-1',type:'response',command:'get_state',success:true,data:{model:null,thinkingLevel:'medium',isStreaming:false,isCompacting:false,steeringMode:'all',followUpMode:'one-at-a-time',sessionId:'fake-session',autoCompactionEnabled:true,messageCount:0,pendingMessageCount:0}}) + '\\n', () => process.exit(0));\n",
+                        "});\n"
+                    ),
+                )
+                .expect("write direct fake Pi CLI");
+                let path = root.join("pi.cmd");
+                fs::write(&path, "@echo off\r\nexit /b 1\r\n").expect("write logical Pi shim");
+                path
+            };
             #[cfg(not(windows))]
             let fake_pi = root.join("pi");
-
-            #[cfg(windows)]
-            fs::write(
-                &fake_pi,
-                concat!(
-                    "@echo off\r\n",
-                    "set /p request=\r\n",
-                    "1>&2 echo 0123456789abcdefghijklmnopqrstuvwxyz\r\n",
-                    "echo {\"id\":\"req-1\",\"type\":\"response\",\"command\":\"get_state\",\"success\":true,\"data\":{\"model\":null,\"thinkingLevel\":\"medium\",\"isStreaming\":false,\"isCompacting\":false,\"steeringMode\":\"all\",\"followUpMode\":\"one-at-a-time\",\"sessionId\":\"fake-session\",\"autoCompactionEnabled\":true,\"messageCount\":0,\"pendingMessageCount\":0}}\r\n"
-                ),
-            )
-            .expect("write fake Pi");
             #[cfg(not(windows))]
             {
                 use std::os::unix::fs::PermissionsExt;
@@ -485,6 +522,36 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.root);
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn live_runtime_refuses_unresolved_windows_script_launcher() {
+        let root = std::env::temp_dir().join(format!(
+            "pi-wizard-process-script-rejection-{}",
+            RunId::new()
+        ));
+        fs::create_dir_all(&root).expect("create script rejection fixture");
+        let pi = root.join("pi.cmd");
+        fs::write(&pi, "@echo off\r\nexit /b 0\r\n").expect("write script launcher");
+        let desktop_environment: BTreeMap<OsString, OsString> = std::env::vars_os().collect();
+        let environment = resolve_launch_environment(LaunchEnvironmentInput {
+            configured_pi: Some(pi.clone()),
+            desktop_environment,
+            ..LaunchEnvironmentInput::default()
+        })
+        .expect("resolve logical script launcher");
+        assert!(!environment.pi_invocation().is_direct_npm_node());
+        let launch = PiLaunchSpec::new(pi, &root, ProjectTrustPolicy::Ignore)
+            .resolve()
+            .expect("resolve launch spec");
+        let error = spawn_pi_process(&launch, &environment, RuntimeLimits::default())
+            .expect_err("live runtime must reject a shell-backed Pi launcher");
+        assert!(matches!(
+            error,
+            ProcessError::ScriptLauncherRequiresShell { .. }
+        ));
+        fs::remove_dir_all(root).expect("remove script rejection fixture");
     }
 
     #[test]

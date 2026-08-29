@@ -17,6 +17,7 @@ def main() -> None:
     cargo = tomllib.loads((ROOT / "Cargo.toml").read_text(encoding="utf-8"))
     package = json.loads((ROOT / "package.json").read_text(encoding="utf-8"))
     tauri = json.loads((ROOT / "src-tauri" / "tauri.conf.json").read_text(encoding="utf-8"))
+    desktop_main = (ROOT / "src-tauri" / "src" / "main.rs").read_text(encoding="utf-8")
 
     version = cargo["workspace"]["package"]["version"]
     require(package["version"] == version, "package.json version must match Cargo workspace")
@@ -67,6 +68,10 @@ def main() -> None:
     require(
         "@tauri-apps/cli" in package.get("devDependencies", {}),
         "Tauri CLI must be repository-pinned as a development dependency",
+    )
+    require(
+        '#![cfg_attr(windows, windows_subsystem = "windows")]' in desktop_main,
+        "Windows desktop executable must always use the GUI subsystem so app launch never opens a console window",
     )
 
     print("release configuration checks passed")
