@@ -1,7 +1,8 @@
-import { ErrorBoundary, onCleanup, onMount } from "solid-js";
+import { createSignal, ErrorBoundary, onCleanup, onMount, Show } from "solid-js";
 import { render } from "solid-js/web";
 
 import { App } from "./app/App";
+import { waitForDesktopBackend } from "./lib/desktop";
 import {
   boundRendererErrorDetail,
   parseRendererCrashCount,
@@ -48,6 +49,63 @@ function StableApp() {
     if (stableTimer !== undefined) window.clearTimeout(stableTimer);
   });
   return <App />;
+}
+
+function BackendGate() {
+  const [ready, setReady] = createSignal(false);
+  const [error, setError] = createSignal<string>();
+  let disposed = false;
+  let attempt = 0;
+
+  const connect = () => {
+    const currentAttempt = ++attempt;
+    setError(undefined);
+    void waitForDesktopBackend()
+      .then(() => {
+        if (!disposed && currentAttempt === attempt) setReady(true);
+      })
+      .catch((startupError) => {
+        if (!disposed && currentAttempt === attempt) setError(String(startupError));
+      });
+  };
+
+  onMount(connect);
+  onCleanup(() => {
+    disposed = true;
+    attempt += 1;
+  });
+
+  return (
+    <Show
+      when={ready()}
+      fallback={
+        <main class="renderer-recovery-screen">
+          <section class="renderer-recovery-card" aria-label="Desktop startup">
+            <h1>{error() ? "Pi Wizard could not start" : "Starting Pi Wizard"}</h1>
+            <p>
+              {error()
+                ? "The desktop backend did not finish initializing. No Pi run was started or restarted."
+                : "Waiting for the desktop backend to finish initializing."}
+            </p>
+            <Show when={error()}>
+              {(detail) => (
+                <>
+                  <pre>{boundRendererErrorDetail(detail())}</pre>
+                  <div class="renderer-recovery-actions">
+                    <button type="button" onClick={connect}>
+                      Retry startup
+                    </button>
+                  </div>
+                </>
+              )}
+            </Show>
+          </section>
+        </main>
+      }
+    >
+      <StableApp />
+    </Show>
+  );
 }
 
 function RendererRecovery(props: { error: unknown; reset: () => void }) {
@@ -106,7 +164,7 @@ if (root === null) {
 render(
   () => (
     <ErrorBoundary fallback={(error, reset) => <RendererRecovery error={error} reset={reset} />}>
-      <StableApp />
+      <BackendGate />
     </ErrorBoundary>
   ),
   root,

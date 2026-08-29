@@ -938,6 +938,11 @@ pub(super) fn runtime_attachment_limits(
 }
 
 #[tauri::command]
+pub(super) fn runtime_backend_ready(_runtime: tauri::State<'_, DesktopRuntime>) -> bool {
+    true
+}
+
+#[tauri::command]
 pub(super) async fn runtime_capacity(
     runtime: tauri::State<'_, DesktopRuntime>,
 ) -> Result<DesktopRuntimeCapacity, String> {

@@ -17,7 +17,7 @@ import { SessionCatalogBrowser } from "../features/sessions/SessionCatalogBrowse
 import { RecentSessionsView } from "../features/sessions/RecentSessionsView";
 import { SupervisionView } from "../features/supervision/SupervisionView";
 import type { SupervisionSnapshot } from "../features/supervision/types";
-import { invokeDesktop, invokeDesktopAtStartup, retryStartupOperation } from "../lib/desktop";
+import { invokeDesktop } from "../lib/desktop";
 import { pathLeaf } from "../lib/path";
 
 import {
@@ -164,11 +164,9 @@ export function App() {
     });
   };
 
-  const refreshCapacity = async (startup = false) => {
+  const refreshCapacity = async () => {
     try {
-      const snapshot = startup
-        ? await invokeDesktopAtStartup<RuntimeCapacitySnapshot>("runtime_capacity")
-        : await invokeDesktop<RuntimeCapacitySnapshot>("runtime_capacity");
+      const snapshot = await invokeDesktop<RuntimeCapacitySnapshot>("runtime_capacity");
       if (!disposed) {
         setCapacity(snapshot);
         setLiveRunLimitDraft(String(snapshot.liveRunLimit));
@@ -278,10 +276,10 @@ export function App() {
     }
   };
 
-  const refreshRuntimeState = async (startup = false) => {
+  const refreshRuntimeState = async () => {
     const [snapshot] = await Promise.all([
-      refreshHydration(startup),
-      refreshCapacity(startup),
+      refreshHydration(),
+      refreshCapacity(),
     ]);
     return snapshot;
   };
@@ -472,12 +470,10 @@ export function App() {
     }
   });
 
-  const refreshHydration = async (startup = false) => {
+  const refreshHydration = async () => {
     const requestSequence = ++hydrationRequestSequence;
     try {
-      const snapshot = startup
-        ? await invokeDesktopAtStartup<RuntimeHydration>("runtime_hydrate")
-        : await invokeDesktop<RuntimeHydration>("runtime_hydrate");
+      const snapshot = await invokeDesktop<RuntimeHydration>("runtime_hydrate");
       applyHydration(snapshot, requestSequence);
       return snapshot;
     } catch (error) {
@@ -552,33 +548,29 @@ export function App() {
     }
   };
 
-  const installRuntimeListeners = async (startup = false) => {
+  const installRuntimeListeners = async () => {
     if (runtimeListenersReady) return;
-    const listenOnce = <T,>(event: string, handler: Parameters<typeof listen<T>>[1]) =>
-      startup
-        ? retryStartupOperation(() => listen<T>(event, handler))
-        : listen<T>(event, handler);
     const pending: UnlistenFn[] = [];
     try {
       pending.push(
-        await listenOnce<RuntimeManagerSignal>("runtime://dirty", ({ payload }) => {
+        await listen<RuntimeManagerSignal>("runtime://dirty", ({ payload }) => {
           void drainRun(payload.runId);
         }),
       );
       pending.push(
-        await listenOnce("runtime://rehydrate", () => {
+        await listen("runtime://rehydrate", () => {
           void refreshHydration();
         }),
       );
       pending.push(
-        await listenOnce<AutomationChangedSignal>("automation://changed", ({ payload }) => {
+        await listen<AutomationChangedSignal>("automation://changed", ({ payload }) => {
           if (view() !== "automation") return;
           if (payload === "catalog") void refreshAutomation();
           else void refreshAutomationExecutions();
         }),
       );
       pending.push(
-        await listenOnce("supervision://changed", () => {
+        await listen("supervision://changed", () => {
           if (view() === "supervision") void refreshSupervision();
         }),
       );
@@ -590,23 +582,23 @@ export function App() {
     }
   };
 
-  const connectBackend = async (startup = false) => {
+  const connectBackend = async () => {
     try {
-      await installRuntimeListeners(startup);
-      return await refreshRuntimeState(startup);
+      await installRuntimeListeners();
+      return await refreshRuntimeState();
     } catch (error) {
-      if (!disposed) setRuntimeError(`Backend connection failed: ${String(error)}`);
+      if (!disposed) setRuntimeError(`Runtime listener setup failed: ${String(error)}`);
       return undefined;
     }
   };
 
   onMount(() => {
-    // Subscribe before hydrating. Initial listener/IPC registration gets one
-    // finite retry window so a WebView that starts before Tauri has finished
-    // exposing managed state does not show a false backend failure.
-    void connectBackend(true);
+    // The root renderer does not mount App until the Tauri backend has
+    // positively answered runtime_backend_ready. Subscribe before hydrating
+    // so a runtime change during this handoff cannot be lost.
+    void connectBackend();
 
-    void invokeDesktopAtStartup<PiProbeReport>("probe_pi_environment")
+    void invokeDesktop<PiProbeReport>("probe_pi_environment")
       .then((report) => {
         if (!disposed) setPiProbe(report);
       })
@@ -614,7 +606,7 @@ export function App() {
         if (!disposed) setPiProbeError(String(error));
       });
 
-    void invokeDesktopAtStartup<RuntimeAttachmentLimits>("runtime_attachment_limits")
+    void invokeDesktop<RuntimeAttachmentLimits>("runtime_attachment_limits")
       .then((limits) => {
         if (!disposed) setAttachmentLimits(limits);
       })
@@ -891,8 +883,8 @@ export function App() {
           <Show when={runtimeError() && !runtime()}>
             <section class="runtime-recovery" aria-label="Renderer recovery">
               <div>
-                <strong>Backend connection failed</strong>
-                <span>Retry reconnects backend listeners and rehydrates state without restarting Pi runs.</span>
+                <strong>Runtime state unavailable</strong>
+                <span>Retry reinstalls runtime listeners and rehydrates state without restarting Pi runs.</span>
               </div>
               <div class="runtime-recovery-actions">
                 <button type="button" onClick={() => void connectBackend()}>

@@ -67,10 +67,26 @@ const PORTABLE_STATE_DIRECTORY: &str = "pi-wizard-data";
 const PORTABLE_STATE_MIGRATION_DIRECTORY: &str = "pi-wizard-data.migrating";
 
 fn portable_state_root(executable: &Path) -> Result<PathBuf, io::Error> {
-    executable
+    let executable_dir = executable
         .parent()
-        .map(|parent| parent.join(PORTABLE_STATE_DIRECTORY))
-        .ok_or_else(|| io::Error::other("Pi Wizard executable has no parent directory"))
+        .ok_or_else(|| io::Error::other("Pi Wizard executable has no parent directory"))?;
+    let build_profile = executable_dir.file_name().and_then(|name| name.to_str());
+    let target_dir = executable_dir.parent();
+    let project_root = target_dir.and_then(Path::parent);
+    if matches!(build_profile, Some("debug" | "release"))
+        && target_dir
+            .and_then(Path::file_name)
+            .and_then(|name| name.to_str())
+            == Some("target")
+        && project_root.is_some_and(|root| {
+            root.join("Cargo.toml").is_file() && root.join("src-tauri").is_dir()
+        })
+    {
+        return Ok(project_root
+            .expect("checked project root")
+            .join(PORTABLE_STATE_DIRECTORY));
+    }
+    Ok(executable_dir.join(PORTABLE_STATE_DIRECTORY))
 }
 
 fn copy_state_tree(source: &Path, destination: &Path) -> Result<(), io::Error> {
@@ -104,12 +120,19 @@ fn prepare_portable_state_root(
         return Ok(state_root);
     }
 
-    let Some(legacy_state_root) = legacy_state_root.filter(|path| path.is_dir()) else {
+    let old_executable_sibling = executable
+        .parent()
+        .map(|parent| parent.join(PORTABLE_STATE_DIRECTORY));
+    let migration_source = old_executable_sibling
+        .as_deref()
+        .filter(|path| *path != state_root && path.is_dir())
+        .or_else(|| legacy_state_root.filter(|path| path.is_dir()));
+    let Some(migration_source) = migration_source else {
         fs::create_dir_all(&state_root)?;
         return Ok(state_root);
     };
 
-    if fs::rename(legacy_state_root, &state_root).is_ok() {
+    if fs::rename(migration_source, &state_root).is_ok() {
         return Ok(state_root);
     }
 
@@ -120,12 +143,12 @@ fn prepare_portable_state_root(
     if migration_root.exists() {
         fs::remove_dir_all(&migration_root)?;
     }
-    if let Err(error) = copy_state_tree(legacy_state_root, &migration_root) {
+    if let Err(error) = copy_state_tree(migration_source, &migration_root) {
         let _ = fs::remove_dir_all(&migration_root);
         return Err(error);
     }
     fs::rename(&migration_root, &state_root)?;
-    let _ = fs::remove_dir_all(legacy_state_root);
+    let _ = fs::remove_dir_all(migration_source);
     Ok(state_root)
 }
 
@@ -736,6 +759,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            desktop_commands::runtime_backend_ready,
             desktop_commands::runtime_hydrate,
             runtime_recover_ui,
             desktop_commands::runtime_drain,
@@ -838,6 +862,61 @@ mod portable_state_tests {
             portable_state_root(&executable).expect("portable state root"),
             PathBuf::from(r"C:\apps\pi-wizard\pi-wizard-data")
         );
+    }
+
+    #[test]
+    fn repository_build_state_root_lives_outside_target_output() {
+        let root = std::env::temp_dir().join(format!(
+            "pi-wizard-portable-repository-root-{}",
+            RunId::new()
+        ));
+        fs::create_dir_all(root.join("src-tauri")).expect("src-tauri fixture");
+        fs::create_dir_all(root.join("target").join("release")).expect("release fixture");
+        fs::write(root.join("Cargo.toml"), b"[workspace]\n").expect("workspace manifest");
+        let executable = root
+            .join("target")
+            .join("release")
+            .join("pi-wizard-desktop.exe");
+        assert_eq!(
+            portable_state_root(&executable).expect("repository portable root"),
+            root.join(PORTABLE_STATE_DIRECTORY)
+        );
+        fs::remove_dir_all(root).expect("repository root fixture cleanup");
+    }
+
+    #[test]
+    fn repository_build_migrates_old_target_state_before_legacy_app_data() {
+        let root = std::env::temp_dir().join(format!(
+            "pi-wizard-portable-target-migration-{}",
+            RunId::new()
+        ));
+        let release = root.join("target").join("release");
+        let executable = release.join("pi-wizard-desktop.exe");
+        let old_target_state = release.join(PORTABLE_STATE_DIRECTORY);
+        let legacy = root.join("legacy-runtime-state");
+        fs::create_dir_all(root.join("src-tauri")).expect("src-tauri fixture");
+        fs::create_dir_all(&old_target_state).expect("old target state");
+        fs::create_dir_all(&legacy).expect("legacy state");
+        fs::write(root.join("Cargo.toml"), b"[workspace]\n").expect("workspace manifest");
+        fs::write(
+            old_target_state.join("model-profiles.json"),
+            b"newer-target",
+        )
+        .expect("old target models");
+        fs::write(legacy.join("model-profiles.json"), b"older-app-data").expect("legacy models");
+
+        let portable =
+            prepare_portable_state_root(&executable, Some(&legacy)).expect("migrate target state");
+        assert_eq!(portable, root.join(PORTABLE_STATE_DIRECTORY));
+        assert_eq!(
+            fs::read(portable.join("model-profiles.json")).expect("migrated models"),
+            b"newer-target"
+        );
+        assert!(
+            legacy.is_dir(),
+            "unused older AppData source must not overwrite target state"
+        );
+        fs::remove_dir_all(root).expect("target migration fixture cleanup");
     }
 
     #[test]

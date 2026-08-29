@@ -286,7 +286,7 @@ Automated UI tests should focus on contracts rather than pixel trivia:
 - same-ID extension-dialog hydration refreshes preserve partially typed input/editor state, while a new request ID resets dialog-local state;
 - stale/expired extension dialog responses are rejected by exact backend ownership and trigger authoritative refresh rather than leaving a zombie actionable dialog;
 - runtime listeners are installed before initial hydration so startup has no lost-wakeup window;
-- initial listener registration plus read-only hydration/capacity/probe IPC uses only a finite startup backoff; a transient first invoke/listener failure is recovered automatically before the backend recovery screen appears, while ordinary runtime updates remain event-driven with no polling loop;
+- the root renderer waits on an explicit `runtime_backend_ready` command before mounting the main App; only that bounded bootstrap handshake retries during Tauri initialization, then App installs runtime listeners before initial hydration and ordinary runtime updates remain event-driven with no polling loop;
 - per-run dirty wakeups trigger bounded pulls, not interval polling or raw Pi event forwarding;
 - overlapping dirty signals for one run do not create overlapping drain loops;
 - hydration demand survives multi-batch bounded drain continuation so a display/semantic change in an early batch cannot be forgotten before backlog completion;
@@ -319,7 +319,7 @@ Automated UI tests should focus on contracts rather than pixel trivia:
 - slash-command suggestions support bounded Arrow Up/Down wrapping and Enter staging, keep the selected row visible via nearest scrolling, and do not create an app-owned input-history store;
 - keyboard focus and accessibility labels are correct.
 
-Desktop portable-state tests prove the production root is a `pi-wizard-data` sibling of the executable, nested legacy AppData state migrates intact, and an already-existing portable root is never overwritten by stale legacy state. The shared root is consumed by the existing prompt-chain, custom-model, project/worktree, preference, and draft stores, so those domains survive rebuilds without compile-time configuration.
+Desktop portable-state tests prove repository builds resolve `pi-wizard-data` outside `target`, standalone executables use an executable-sibling root, old `target\debug|release\pi-wizard-data` is preferred over older AppData during migration, nested legacy AppData state migrates intact when needed, and an already-existing current portable root is never overwritten by stale migration state. The shared root is consumed by the existing prompt-chain, custom-model, project/worktree, preference, and draft stores, so those domains survive clean rebuilds without compile-time configuration.
 
 ## 8. Performance regression fixtures
 

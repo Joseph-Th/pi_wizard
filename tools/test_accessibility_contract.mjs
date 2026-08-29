@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 const root = resolve(import.meta.dirname, "..");
+const entry = readFileSync(resolve(root, "src", "index.tsx"), "utf8");
 const app = readFileSync(resolve(root, "src", "app", "App.tsx"), "utf8");
 const automation = readFileSync(resolve(root, "src", "features", "automation", "AutomationView.tsx"), "utf8");
 const supervision = readFileSync(resolve(root, "src", "features", "supervision", "SupervisionView.tsx"), "utf8");
@@ -28,6 +29,10 @@ const runs = [
   readFileSync(resolve(root, "src", "features", "runs", "presentation.tsx"), "utf8"),
 ].join("\n");
 const desktop = readFileSync(resolve(root, "src", "lib", "desktop.ts"), "utf8");
+const desktopHost = [
+  readFileSync(resolve(root, "src-tauri", "src", "app", "mod.rs"), "utf8"),
+  readFileSync(resolve(root, "src-tauri", "src", "app", "desktop_commands.rs"), "utf8"),
+].join("\n");
 const ui = [app, automation, supervision, models, projects, sessions, attention, runs].join("\n");
 const styles = [
   readFileSync(resolve(root, "src", "styles", "app.css"), "utf8"),
@@ -89,13 +94,11 @@ requireContract(
     ui.includes('if (view() === "automation") void refreshAutomation();') &&
     ui.includes("promptPreview") &&
     ui.includes("promptTruncated") &&
-    ui.includes("const refreshRuntimeState = async (startup = false) =>") &&
+    ui.includes("const refreshRuntimeState = async () =>") &&
     ui.includes("const [snapshot] = await Promise.all([") &&
-    ui.includes("refreshHydration(startup),") &&
-    ui.includes("refreshCapacity(startup),") &&
-    ui.includes("const installRuntimeListeners = async (startup = false) =>") &&
-    ui.includes("retryStartupOperation(() => listen<T>(event, handler))") &&
-    ui.includes("void connectBackend(true)") &&
+    ui.includes("refreshHydration(),") &&
+    ui.includes("refreshCapacity(),") &&
+    ui.includes("const installRuntimeListeners = async () =>") &&
     ui.includes('onClick={() => void connectBackend()}') &&
     ui.includes("Git-isolated workers") &&
     !automation.includes("supervisor") &&
@@ -107,6 +110,19 @@ requireContract(
     styles.includes(".automation-step") &&
     styles.includes(".supervision-surface"),
   "finite Automation and independent Supervision must be separate first-class keyboard-accessible navigation surfaces driven by backend invalidation events rather than polling",
+);
+requireContract(
+  entry.includes("waitForDesktopBackend") &&
+    entry.includes("<BackendGate />") &&
+    entry.includes("Starting Pi Wizard") &&
+    desktop.includes('invokeDesktop<boolean>("runtime_backend_ready")') &&
+    desktopHost.includes("fn runtime_backend_ready") &&
+    desktopHost.includes("desktop_commands::runtime_backend_ready") &&
+    app.includes("void connectBackend();") &&
+    !app.includes("invokeDesktopAtStartup") &&
+    !app.includes("retryStartupOperation") &&
+    !app.includes("Backend connection failed"),
+  "the main runtime UI must mount only after an explicit backend-ready handshake; ordinary App listeners/hydration must not race Tauri startup or surface the old false backend-connection banner",
 );
 requireContract(
   models.includes('"runtime_probe_project_models"') &&
