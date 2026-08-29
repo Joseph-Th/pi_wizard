@@ -91,6 +91,7 @@ export function App(props: { startup: AppStartupSnapshot }) {
     lastDurationMs: 0,
   });
   const [view, setView] = createSignal<AppView>("dashboard");
+  const [sidebarWidth, setSidebarWidth] = createSignal(288);
   const [selectedRunId, setSelectedRunId] = createSignal<string>();
   const [preferredProjectPath, setPreferredProjectPath] = createSignal("");
   const [projects, setProjects] = createSignal<DesktopProjectRecord[]>([]);
@@ -251,8 +252,16 @@ export function App(props: { startup: AppStartupSnapshot }) {
 
   createEffect(() => {
     if (view() === "automation") void refreshAutomation();
-    if (view() === "supervision") void refreshSupervision();
+    if (view() === "supervision") {
+      void refreshSupervision();
+      void refreshAutomation();
+    }
   });
+
+  const clampSidebarWidth = (width: number) => {
+    const bounded = Math.max(208, Math.min(480, width));
+    return 208 + Math.round((bounded - 208) / 16) * 16;
+  };
 
   const openRunFolder = async (run: RunHydration) => {
     if (openingFolderRunId()) return;
@@ -665,7 +674,7 @@ export function App(props: { startup: AppStartupSnapshot }) {
   return (
     <>
       <a class="skip-link" href="#main-content">Skip to main content</a>
-      <div class="app-shell">
+      <div class={`app-shell sidebar-width-${sidebarWidth()}`}>
         <aside class="app-sidebar" aria-label="Pi Wizard navigation">
           <header class="app-brand">
             <strong>Pi Wizard</strong>
@@ -879,6 +888,33 @@ export function App(props: { startup: AppStartupSnapshot }) {
           </details>
         </aside>
 
+        <div
+          class="sidebar-resizer"
+          role="separator"
+          aria-label="Resize navigation sidebar"
+          aria-orientation="vertical"
+          aria-valuemin="208"
+          aria-valuemax="480"
+          aria-valuenow={sidebarWidth()}
+          tabIndex={0}
+          onPointerDown={(event) => event.currentTarget.setPointerCapture(event.pointerId)}
+          onPointerMove={(event) => {
+            if (!event.currentTarget.hasPointerCapture(event.pointerId)) return;
+            setSidebarWidth(clampSidebarWidth(event.clientX));
+          }}
+          onPointerUp={(event) => {
+            if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+              event.currentTarget.releasePointerCapture(event.pointerId);
+            }
+          }}
+          onKeyDown={(event) => {
+            if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+            event.preventDefault();
+            const direction = event.key === "ArrowRight" ? 1 : -1;
+            setSidebarWidth((current) => clampSidebarWidth(current + direction * 16));
+          }}
+        />
+
         <main class="app-main" id="main-content" tabIndex={-1}>
           <Show when={notifications().length > 0}>
             <section class="notification-stack" aria-label="Extension notifications" aria-live="polite">
@@ -934,6 +970,7 @@ export function App(props: { startup: AppStartupSnapshot }) {
             <SupervisionView
               snapshots={supervision()}
               projects={projects()}
+              chains={automation()?.catalog.chains ?? []}
               capacity={capacity()}
               piReady={Boolean(piProbe())}
               onRefresh={refreshSupervision}

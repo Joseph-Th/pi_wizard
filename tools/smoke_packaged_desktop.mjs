@@ -17,7 +17,13 @@ function requireContract(condition, detail) {
 }
 
 function removeTree(path) {
-  rmSync(path, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  // WebView2 can keep its disposable user-data directory locked briefly after
+  // the desktop process has exited. Node's recursive rm already retries the
+  // Windows EPERM/EBUSY family, but two seconds proved too short on an
+  // optimized release shutdown. Keep cleanup strict while allowing a bounded
+  // ten-second handle-release window; a genuinely leaked process still fails
+  // the release smoke instead of silently leaving test state behind.
+  rmSync(path, { recursive: true, force: true, maxRetries: 80, retryDelay: 125 });
 }
 
 function createFakeNpmPi() {
@@ -44,24 +50,64 @@ function createFakeNpmPi() {
   process.exit(0);
 }
 
+const fs = require("node:fs");
+const path = require("node:path");
+const sessionArg = process.argv.indexOf("--session-id");
+const persistedSession = sessionArg >= 0 && Boolean(process.argv[sessionArg + 1]);
+const sessionId = persistedSession ? String(process.argv[sessionArg + 1]) : "packaged-smoke";
+const sessionFile = persistedSession
+  ? path.join(process.cwd(), "pi-wizard-packaged-" + sessionId + ".jsonl")
+  : null;
+const entries = [];
+let leafId = null;
+let turn = 0;
+let working = false;
+let activeBash = null;
+const fence = String.fromCharCode(96, 96, 96);
+const finalAnswer =
+  "## Packaged handoff\n\n- **Persisted** answer\n\n" +
+  fence + "js\nconst answer = 7;\n" + fence +
+  "\n\n<script>window.__PI_WIZARD_SMOKE_SCRIPTED__=true</script>";
+
+if (persistedSession) {
+  fs.writeFileSync(
+    sessionFile,
+    JSON.stringify({
+      type: "session",
+      version: 3,
+      id: sessionId,
+      timestamp: "2026-08-29T00:00:00.000Z",
+      cwd: process.cwd()
+    }) + "\n"
+  );
+}
+
 let buffer = "";
+function emit(value) {
+  process.stdout.write(JSON.stringify(value) + "\n");
+}
 function respond(request, data) {
-  process.stdout.write(JSON.stringify({
+  emit({
     id: request.id,
     type: "response",
     command: request.type,
     success: true,
     ...(data === undefined ? {} : { data })
-  }) + "\n");
+  });
 }
 function reject(request, error) {
-  process.stdout.write(JSON.stringify({
+  emit({
     id: request.id,
     type: "response",
     command: request.type,
     success: false,
     error
-  }) + "\n");
+  });
+}
+function appendEntry(entry) {
+  entries.push(entry);
+  leafId = entry.id;
+  if (sessionFile) fs.appendFileSync(sessionFile, JSON.stringify(entry) + "\n");
 }
 process.stdin.setEncoding("utf8");
 process.stdin.on("data", (chunk) => {
@@ -84,19 +130,152 @@ process.stdin.on("data", (chunk) => {
       respond(request, {
         model: null,
         thinkingLevel: "medium",
-        isStreaming: false,
+        isStreaming: working,
         isCompacting: false,
         steeringMode: "all",
         followUpMode: "one-at-a-time",
-        sessionFile: null,
-        sessionId: "packaged-smoke",
+        sessionFile,
+        sessionId,
         sessionName: null,
         autoCompactionEnabled: true,
+        // Deliberately stale for persisted runs. The packaged transcript smoke
+        // proves final-answer handoff follows session-sync revision rather than
+        // depending on another get_state reconciliation.
         messageCount: 0,
         pendingMessageCount: 0
       });
+    } else if (request.type === "get_entries") {
+      const since = request.since == null ? null : String(request.since);
+      const index = since == null ? -1 : entries.findIndex((entry) => entry.id === since);
+      const start = since == null ? 0 : index >= 0 ? index + 1 : entries.length;
+      respond(request, { entries: entries.slice(start), leafId });
     } else if (request.type === "get_available_thinking_levels") {
       respond(request, { levels: ["off", "medium", "high"] });
+    } else if (request.type === "get_commands") {
+      respond(request, { commands: [] });
+    } else if (request.type === "export_html" && persistedSession) {
+      const exported = path.join(process.cwd(), "packaged-session-export.html");
+      fs.writeFileSync(exported, "<!doctype html><title>Packaged session export</title>\n");
+      respond(request, { path: exported });
+    } else if (request.type === "bash" && persistedSession) {
+      if (request.excludeFromContext !== true) {
+        reject(request, "packaged smoke requires excludeFromContext=true");
+        continue;
+      }
+      emit({
+        type: "bash_execution_update",
+        id: request.id,
+        delta: "packaged bash stream"
+      });
+      const timer = setTimeout(() => {
+        activeBash = null;
+        respond(request, {
+          output: "packaged bash result",
+          exitCode: 0,
+          cancelled: false,
+          truncated: false,
+          fullOutputPath: null
+        });
+      }, request.command === "reload-owned" ? 5_000 : 400);
+      activeBash = { request, timer };
+    } else if (request.type === "abort_bash" && persistedSession) {
+      respond(request);
+      if (activeBash) {
+        const bash = activeBash;
+        activeBash = null;
+        clearTimeout(bash.timer);
+        respond(bash.request, {
+          output: "packaged bash cancelled",
+          exitCode: 130,
+          cancelled: true,
+          truncated: false,
+          fullOutputPath: null
+        });
+      }
+    } else if (request.type === "prompt" && persistedSession) {
+      turn += 1;
+      const userId = "packaged-u" + turn;
+      const assistantId = "packaged-a" + turn;
+      appendEntry({
+        type: "message",
+        id: userId,
+        parentId: leafId,
+        timestamp: "2026-08-29T00:00:01.000Z",
+        message: { role: "user", content: String(request.message) }
+      });
+      respond(request);
+      working = true;
+      emit({ type: "agent_start" });
+      emit({ type: "message_start", message: { role: "assistant", content: [] } });
+      emit({
+        type: "message_update",
+        assistantMessageEvent: { type: "thinking_start", contentIndex: 0 }
+      });
+      emit({
+        type: "message_update",
+        assistantMessageEvent: {
+          type: "thinking_delta",
+          contentIndex: 0,
+          delta: "verify packaged handoff"
+        }
+      });
+      emit({
+        type: "message_update",
+        assistantMessageEvent: { type: "text_start", contentIndex: 1 }
+      });
+      emit({
+        type: "message_update",
+        assistantMessageEvent: {
+          type: "text_delta",
+          contentIndex: 1,
+          delta: "## Packaged handoff\n\nStreaming"
+        }
+      });
+      setTimeout(() => {
+        emit({
+          type: "message_update",
+          assistantMessageEvent: {
+            type: "thinking_end",
+            contentIndex: 0,
+            content: "verify packaged handoff"
+          }
+        });
+        emit({
+          type: "message_update",
+          assistantMessageEvent: {
+            type: "text_end",
+            contentIndex: 1,
+            content: finalAnswer
+          }
+        });
+        appendEntry({
+          type: "message",
+          id: assistantId,
+          parentId: userId,
+          timestamp: "2026-08-29T00:00:02.000Z",
+          message: {
+            role: "assistant",
+            content: [
+              { type: "thinking", thinking: "verify packaged handoff" },
+              { type: "text", text: finalAnswer }
+            ],
+            model: "packaged-smoke",
+            stopReason: "stop"
+          }
+        });
+        emit({
+          type: "message_end",
+          message: {
+            role: "assistant",
+            content: [
+              { type: "thinking", thinking: "verify packaged handoff" },
+              { type: "text", text: finalAnswer }
+            ]
+          }
+        });
+        working = false;
+        emit({ type: "agent_settled" });
+      }, 1_500);
     } else if (request.type === "clear_queue") {
       reject(request, "Unknown command: clear_queue");
     } else {
@@ -283,6 +462,404 @@ async function smokeIsolatedModelPreferences() {
   }
 }
 
+async function smokeIsolatedTranscriptHandoff() {
+  const appRoot = mkdtempSync(resolve(tmpdir(), "pi-wizard-packaged-transcript-app-"));
+  const projectRoot = mkdtempSync(resolve(tmpdir(), "pi-wizard-packaged-transcript-project-"));
+  const isolatedExecutable = resolve(appRoot, "pi-wizard-desktop.exe");
+  const fakeNpmPi = createFakeNpmPi();
+  copyFileSync(executable, isolatedExecutable);
+  mkdirSync(resolve(appRoot, "pi-wizard-data"), { recursive: true });
+  writeFileSync(resolve(projectRoot, "seed.txt"), "packaged transcript fixture\n");
+
+  const { child, client, webviewData } = await launchDesktop(isolatedExecutable, fakeNpmPi);
+  try {
+    const result = await client.evaluate(String.raw`(async () => {
+      const invoke = window.__TAURI_INTERNALS__.invoke;
+      const projectRoot = ${JSON.stringify(projectRoot)};
+      const initialTask = "Keep **these prompt markers** verbatim";
+      const started = await invoke("runtime_start_project", {
+        request: {
+          projectPath: projectRoot,
+          projectTrust: "inherit",
+          contextFiles: "disabled",
+          extensionDiscovery: "disabled",
+          provider: null,
+          model: null,
+          thinking: null,
+          initialTask
+        }
+      });
+      if (!started?.runId || !started.initialTaskSubmitted || started.initialTaskError) {
+        return { error: "packaged run did not accept initial task", started };
+      }
+
+      const dashboard = [...document.querySelectorAll("button")].find(
+        (candidate) => candidate.textContent.trim() === "Dashboard"
+      );
+      dashboard?.click();
+      const cardDeadline = Date.now() + 5_000;
+      let card;
+      while (Date.now() < cardDeadline) {
+        card = [...document.querySelectorAll(".run-card")].find((candidate) =>
+          candidate.textContent.includes(projectRoot)
+        );
+        if (card) break;
+        await new Promise((resolveDelay) => window.setTimeout(resolveDelay, 50));
+      }
+      if (!card) return { error: "started packaged run never appeared on dashboard", started };
+      const open = [...card.querySelectorAll("button")].find(
+        (candidate) => candidate.textContent.trim() === "Open"
+      );
+      if (!open) return { error: "started packaged run has no Open action", started };
+      open.click();
+
+      const surfaceDeadline = Date.now() + 3_000;
+      while (!document.querySelector(".active-run-surface") && Date.now() < surfaceDeadline) {
+        await new Promise((resolveDelay) => window.setTimeout(resolveDelay, 25));
+      }
+      if (!document.querySelector(".active-run-surface")) {
+        return { error: "packaged run surface did not mount", started };
+      }
+
+      let sawLiveAnswer = false;
+      let sawLiveReasoning = false;
+      let sawActiveStatus = false;
+      const liveDeadline = Date.now() + 1_250;
+      while (Date.now() < liveDeadline) {
+        const live = document.querySelector(".live-timeline");
+        const liveAnswer = live?.querySelector(".live-text pre")?.textContent ?? "";
+        const reasoning = live?.querySelector(".live-reasoning pre")?.textContent ?? "";
+        const status = live?.querySelector('[role="status"]')?.textContent ?? "";
+        sawLiveAnswer ||= liveAnswer.includes("## Packaged handoff") && liveAnswer.includes("Streaming");
+        sawLiveReasoning ||= reasoning.includes("verify packaged handoff");
+        sawActiveStatus ||= status.includes("Model turn active");
+        if (sawLiveAnswer && sawLiveReasoning && sawActiveStatus) break;
+        await new Promise((resolveDelay) => window.setTimeout(resolveDelay, 25));
+      }
+
+      const finalDeadline = Date.now() + 7_000;
+      let finalSnapshot;
+      while (Date.now() < finalDeadline) {
+        const assistant = [...document.querySelectorAll(".history-assistant")].find((candidate) =>
+          candidate.textContent.includes("Packaged handoff")
+        );
+        const markdown = assistant?.querySelector(".markdown-body");
+        const prompt = document.querySelector(".history-user .history-prompt-text")?.textContent ?? null;
+        const live = document.querySelector(".live-timeline");
+        const liveAnswerPresent = Boolean(live?.querySelector(".live-text"));
+        const liveReasoningPresent = Boolean(live?.querySelector(".live-reasoning"));
+        const status = live?.querySelector('[role="status"]')?.textContent ?? "";
+        const heading = markdown?.querySelector("h2")?.textContent ?? null;
+        const strong = markdown?.querySelector("strong")?.textContent ?? null;
+        const code = markdown?.querySelector("pre code");
+        const codeText = code?.textContent ?? null;
+        const codeHighlighted = Boolean(code?.classList.contains("hljs"));
+        const rawHtmlVisible = Boolean(
+          markdown?.textContent.includes("<script>window.__PI_WIZARD_SMOKE_SCRIPTED__=true</script>")
+        );
+        const rawHtmlExecuted = Boolean(
+          markdown?.querySelector("script") || window.__PI_WIZARD_SMOKE_SCRIPTED__
+        );
+        if (
+          prompt === initialTask &&
+          heading === "Packaged handoff" &&
+          strong === "Persisted" &&
+          codeText?.includes("const answer = 7;") &&
+          codeHighlighted &&
+          rawHtmlVisible &&
+          !rawHtmlExecuted &&
+          !liveAnswerPresent &&
+          !liveReasoningPresent &&
+          status.includes("Pi is idle and ready")
+        ) {
+          const hydration = await invoke("runtime_hydrate", {});
+          const run = hydration?.runs?.find((candidate) => candidate.run?.id === started.runId);
+          finalSnapshot = {
+            prompt,
+            heading,
+            strong,
+            codeText,
+            codeHighlighted,
+            rawHtmlVisible,
+            rawHtmlExecuted,
+            liveAnswerPresent,
+            liveReasoningPresent,
+            status,
+            messageCount: run?.run?.session?.messageCount ?? null,
+            sessionSyncInitialized: run?.rpc?.sessionSync?.initialized ?? false,
+            sessionSyncRevision: run?.rpc?.sessionSync?.revision ?? null,
+            sessionSyncCursor: run?.rpc?.sessionSync?.cursor ?? null,
+            visibleError:
+              document.body.innerText.includes("Runtime update failed:") ||
+              document.body.innerText.includes("Session history failed:") ||
+              document.body.innerText.includes("not allowed by CSP")
+          };
+          break;
+        }
+        await new Promise((resolveDelay) => window.setTimeout(resolveDelay, 50));
+      }
+
+      let utilitySnapshot;
+      if (finalSnapshot) {
+        const detailsButton = [...document.querySelectorAll(".inspector-tabs button")].find(
+          (candidate) => candidate.textContent.trim() === "Run details"
+        );
+        detailsButton?.click();
+        const detailsDeadline = Date.now() + 3_000;
+        while (!document.querySelector(".run-details-inspector") && Date.now() < detailsDeadline) {
+          await new Promise((resolveDelay) => window.setTimeout(resolveDelay, 25));
+        }
+        const details = document.querySelector(".run-details-inspector");
+        if (!details) {
+          return { error: "Run details did not open for packaged utility smoke", started, finalSnapshot };
+        }
+
+        const exportButton = [...details.querySelectorAll("button")].find(
+          (candidate) => candidate.textContent.trim() === "Export session HTML"
+        );
+        if (!exportButton) {
+          return { error: "Export session HTML action is missing", started, finalSnapshot };
+        }
+        exportButton.click();
+        const exportDeadline = Date.now() + 3_000;
+        let exportText = "";
+        while (Date.now() < exportDeadline) {
+          exportText = details.textContent ?? "";
+          if (
+            exportText.includes("Session HTML exported to") &&
+            exportText.includes("packaged-session-export.html")
+          ) break;
+          await new Promise((resolveDelay) => window.setTimeout(resolveDelay, 25));
+        }
+
+        const commandForm = details.querySelector(".direct-command-control");
+        const commandInput = commandForm?.querySelector("input");
+        const commandButton = [...(commandForm?.querySelectorAll("button") ?? [])].find(
+          (candidate) => candidate.textContent.trim() === "Run command"
+        );
+        if (!commandInput || !commandButton) {
+          return { error: "One-shot command controls are missing", started, finalSnapshot, exportText };
+        }
+        commandInput.value = "git status --short";
+        commandInput.dispatchEvent(new Event("input", { bubbles: true }));
+        await new Promise((resolveDelay) => window.setTimeout(resolveDelay, 25));
+        commandButton.click();
+
+        let sawLiveCommand = false;
+        const commandLiveDeadline = Date.now() + 1_500;
+        while (Date.now() < commandLiveDeadline) {
+          const output = document.querySelector(".live-command pre")?.textContent ?? "";
+          sawLiveCommand ||= output.includes("packaged bash stream");
+          if (sawLiveCommand) break;
+          await new Promise((resolveDelay) => window.setTimeout(resolveDelay, 20));
+        }
+
+        const commandDeadline = Date.now() + 4_000;
+        let commandResult;
+        while (Date.now() < commandDeadline) {
+          const resultNode = details.querySelector(".direct-command-result");
+          const output = resultNode?.querySelector("pre")?.textContent ?? "";
+          const text = resultNode?.textContent ?? "";
+          if (output.includes("packaged bash result") && text.includes("Last command · exit 0")) {
+            commandResult = { output, text };
+            break;
+          }
+          await new Promise((resolveDelay) => window.setTimeout(resolveDelay, 25));
+        }
+
+        utilitySnapshot = {
+          exportText,
+          sawLiveCommand,
+          commandResult,
+          userRows: document.querySelectorAll(".history-user").length,
+          assistantRows: document.querySelectorAll(".history-assistant").length,
+          conversationText: document.querySelector(".history-timeline")?.textContent ?? "",
+          commandError: [...details.querySelectorAll(".error")]
+            .map((node) => node.textContent ?? "")
+            .filter(Boolean),
+          visibleError:
+            document.body.innerText.includes("Runtime update failed:") ||
+            document.body.innerText.includes("not allowed by CSP")
+        };
+      }
+      return {
+        started,
+        sawLiveAnswer,
+        sawLiveReasoning,
+        sawActiveStatus,
+        finalSnapshot,
+        utilitySnapshot,
+        debugText: document.querySelector(".active-run-surface")?.textContent?.slice(0, 4_000) ?? ""
+      };
+    })()`, 20_000);
+
+    requireContract(!result.error, result.error ?? "packaged transcript handoff failed");
+    requireContract(result.sawLiveAnswer === true, `streaming answer never appeared in Live activity: ${JSON.stringify(result)}`);
+    requireContract(result.sawLiveReasoning === true, `streaming reasoning never appeared in Live activity: ${JSON.stringify(result)}`);
+    requireContract(result.sawActiveStatus === true, `active model status never appeared in Live activity: ${JSON.stringify(result)}`);
+    requireContract(Boolean(result.finalSnapshot), `persisted final answer never replaced the live projection: ${JSON.stringify(result)}`);
+    requireContract(result.finalSnapshot.prompt === "Keep **these prompt markers** verbatim", `user prompt was reformatted or changed: ${JSON.stringify(result)}`);
+    requireContract(result.finalSnapshot.heading === "Packaged handoff", `Markdown heading did not render: ${JSON.stringify(result)}`);
+    requireContract(result.finalSnapshot.strong === "Persisted", `Markdown emphasis did not render: ${JSON.stringify(result)}`);
+    requireContract(result.finalSnapshot.codeHighlighted === true, `fenced code was not syntax-highlighted: ${JSON.stringify(result)}`);
+    requireContract(result.finalSnapshot.rawHtmlVisible === true && result.finalSnapshot.rawHtmlExecuted === false, `raw assistant HTML was not escaped safely: ${JSON.stringify(result)}`);
+    requireContract(result.finalSnapshot.liveAnswerPresent === false && result.finalSnapshot.liveReasoningPresent === false, `settled answer/reasoning remained duplicated in Live activity: ${JSON.stringify(result)}`);
+    requireContract(result.finalSnapshot.messageCount === 0, `fixture no longer proves stale get_state messageCount: ${JSON.stringify(result)}`);
+    requireContract(
+      result.finalSnapshot.sessionSyncInitialized === true &&
+        result.finalSnapshot.sessionSyncRevision > 0 &&
+        result.finalSnapshot.sessionSyncCursor === "packaged-a1",
+      `persisted handoff did not advance live session synchronization: ${JSON.stringify(result)}`,
+    );
+    requireContract(result.finalSnapshot.visibleError === false, `packaged transcript exposed a runtime/history/CSP error: ${JSON.stringify(result)}`);
+    requireContract(Boolean(result.utilitySnapshot), `packaged run utilities were not exercised: ${JSON.stringify(result)}`);
+    requireContract(
+      result.utilitySnapshot.exportText.includes("Session HTML exported to") &&
+        result.utilitySnapshot.exportText.includes("packaged-session-export.html"),
+      `session HTML export did not complete through the packaged UI: ${JSON.stringify(result)}`,
+    );
+    requireContract(result.utilitySnapshot.sawLiveCommand === true, `one-shot Bash streaming never appeared in Live activity: ${JSON.stringify(result)}`);
+    requireContract(
+      result.utilitySnapshot.commandResult?.output.includes("packaged bash result") &&
+        result.utilitySnapshot.commandResult?.text.includes("Last command · exit 0"),
+      `one-shot Bash final result did not render: ${JSON.stringify(result)}`,
+    );
+    requireContract(
+      result.utilitySnapshot.userRows === 1 && result.utilitySnapshot.assistantRows === 1,
+      `one-shot Bash leaked into the model conversation instead of remaining excluded from context: ${JSON.stringify(result)}`,
+    );
+    requireContract(
+      !result.utilitySnapshot.conversationText.includes("packaged bash stream") &&
+        !result.utilitySnapshot.conversationText.includes("packaged bash result"),
+      `one-shot Bash output leaked into persisted conversation rows: ${JSON.stringify(result)}`,
+    );
+    requireContract(
+      result.utilitySnapshot.commandError.length === 0 && result.utilitySnapshot.visibleError === false,
+      `packaged Pi-native utilities exposed a command/export/runtime error: ${JSON.stringify(result)}`,
+    );
+
+    const reloadStart = await client.evaluate(String.raw`(async () => {
+      const invoke = window.__TAURI_INTERNALS__.invoke;
+      const runId = ${JSON.stringify(result.started.runId)};
+      void invoke("runtime_run_bash", {
+        request: { runId, command: "reload-owned" }
+      }).catch((error) => { window.__PI_WIZARD_RELOAD_BASH_ERROR__ = String(error); });
+      const deadline = Date.now() + 2_000;
+      while (Date.now() < deadline) {
+        const hydration = await invoke("runtime_hydrate", {});
+        const run = hydration?.runs?.find((candidate) => candidate.run?.id === runId);
+        if ((run?.rpc?.live?.directBash?.length ?? 0) > 0) {
+          return { active: true, error: window.__PI_WIZARD_RELOAD_BASH_ERROR__ ?? null };
+        }
+        await new Promise((resolveDelay) => window.setTimeout(resolveDelay, 20));
+      }
+      return { active: false, error: window.__PI_WIZARD_RELOAD_BASH_ERROR__ ?? null };
+    })()`);
+    requireContract(
+      reloadStart.active === true && reloadStart.error == null,
+      `could not establish active direct Bash before renderer reload: ${JSON.stringify(reloadStart)}`,
+    );
+
+    await client.send("Page.reload", { ignoreCache: true }, 5_000);
+    await delay(250);
+    const reloadOwnership = await client.evaluate(String.raw`(async () => {
+      const runId = ${JSON.stringify(result.started.runId)};
+      const deadline = Date.now() + 8_000;
+      let card;
+      while (Date.now() < deadline) {
+        const dashboard = [...document.querySelectorAll("button")].find(
+          (candidate) => candidate.textContent.trim() === "Dashboard"
+        );
+        if (dashboard) dashboard.click();
+        await new Promise((resolveDelay) => window.setTimeout(resolveDelay, 50));
+        const cards = [...document.querySelectorAll(".run-card")];
+        card = cards.length === 1 ? cards[0] : undefined;
+        if (card?.textContent.includes("command running")) break;
+        await new Promise((resolveDelay) => window.setTimeout(resolveDelay, 50));
+      }
+      if (!card) return { error: "run card did not recover after renderer reload" };
+      const dashboardCommandRunning = card.textContent.includes("command running");
+      const closeVisible = [...card.querySelectorAll("button")].some(
+        (candidate) => candidate.textContent.trim() === "Close"
+      );
+      const open = [...card.querySelectorAll("button")].find(
+        (candidate) => candidate.textContent.trim() === "Open"
+      );
+      if (!open) return { error: "reloaded active run has no Open action", dashboardCommandRunning, closeVisible };
+      open.click();
+      const surfaceDeadline = Date.now() + 3_000;
+      while (!document.querySelector(".active-run-surface") && Date.now() < surfaceDeadline) {
+        await new Promise((resolveDelay) => window.setTimeout(resolveDelay, 25));
+      }
+      const detailsButton = [...document.querySelectorAll(".inspector-tabs button")].find(
+        (candidate) => candidate.textContent.trim() === "Run details"
+      );
+      detailsButton?.click();
+      const detailsDeadline = Date.now() + 3_000;
+      while (!document.querySelector(".run-details-inspector") && Date.now() < detailsDeadline) {
+        await new Promise((resolveDelay) => window.setTimeout(resolveDelay, 25));
+      }
+      const details = document.querySelector(".run-details-inspector");
+      if (!details) return { error: "run details did not recover after renderer reload" };
+      const cancel = [...details.querySelectorAll("button")].find(
+        (candidate) => candidate.textContent.trim() === "Cancel command"
+      );
+      const commandInput = details.querySelector(".direct-command-control input");
+      const send = [...document.querySelectorAll(".composer-actions button")].find(
+        (candidate) => candidate.textContent.trim() === "Send"
+      );
+      if (!send) return { error: "reloaded composer Send action is missing" };
+      const statusText = document.querySelector(".live-timeline [role=\"status\"]")?.textContent ?? "";
+      const ownerText = details.textContent ?? "";
+      const sessionMutatorsDisabled = [...details.querySelectorAll(".run-controls select, .run-controls button")]
+        .filter((element) => !element.textContent.includes("Session usage") && !element.textContent.includes("Export session HTML"))
+        .every((element) => element.disabled);
+      const snapshot = {
+        dashboardCommandRunning,
+        closeVisible,
+        cancelVisible: Boolean(cancel),
+        cancelDisabled: Boolean(cancel?.disabled),
+        commandInputDisabled: Boolean(commandInput?.disabled),
+        sendDisabled: Boolean(send?.disabled),
+        ownerTextVisible: ownerText.includes("Direct Bash owns this execution root"),
+        statusShowsCommand: statusText.includes("Running a command"),
+        sessionMutatorsDisabled,
+        visibleError:
+          document.body.innerText.includes("Runtime update failed:") ||
+          document.body.innerText.includes("not allowed by CSP")
+      };
+      cancel?.click();
+      return snapshot;
+    })()`, 15_000);
+    requireContract(!reloadOwnership.error, reloadOwnership.error ?? "renderer reload ownership smoke failed");
+    requireContract(
+      reloadOwnership.dashboardCommandRunning === true && reloadOwnership.closeVisible === false,
+      `dashboard did not preserve direct-Bash ownership across renderer reload: ${JSON.stringify(reloadOwnership)}`,
+    );
+    requireContract(
+      reloadOwnership.cancelVisible === true &&
+        reloadOwnership.cancelDisabled === false &&
+        reloadOwnership.commandInputDisabled === true &&
+        reloadOwnership.sendDisabled === true &&
+        reloadOwnership.sessionMutatorsDisabled === true,
+      `reloaded run controls did not mirror authoritative direct-Bash ownership: ${JSON.stringify(reloadOwnership)}`,
+    );
+    requireContract(
+      reloadOwnership.ownerTextVisible === true &&
+        reloadOwnership.statusShowsCommand === true &&
+        reloadOwnership.visibleError === false,
+      `reloaded direct-Bash status/cancellation surface was not explicit and healthy: ${JSON.stringify(reloadOwnership)}`,
+    );
+  } finally {
+    client.close();
+    await stopChild(child);
+    removeTree(webviewData);
+    removeTree(fakeNpmPi);
+    removeTree(projectRoot);
+    removeTree(appRoot);
+  }
+}
+
 async function freeLoopbackPort() {
   const server = createServer();
   await new Promise((resolveListen, reject) => {
@@ -342,7 +919,7 @@ class CdpClient {
     });
   }
 
-  async send(method, params = {}) {
+  async send(method, params = {}, timeoutMs = 10_000) {
     const id = this.nextId++;
     const response = new Promise((resolveResponse) => {
       this.pending.set(id, { resolve: resolveResponse });
@@ -350,7 +927,7 @@ class CdpClient {
     this.socket.send(JSON.stringify({ id, method, params }));
     const result = await Promise.race([
       response,
-      delay(10_000).then(() => {
+      delay(timeoutMs).then(() => {
         throw new Error(`CDP command timed out: ${method}`);
       }),
     ]);
@@ -358,12 +935,12 @@ class CdpClient {
     return result.result;
   }
 
-  async evaluate(expression) {
+  async evaluate(expression, timeoutMs = 10_000) {
     const result = await this.send("Runtime.evaluate", {
       expression,
       awaitPromise: true,
       returnByValue: true,
-    });
+    }, timeoutMs);
     requireContract(
       !result.exceptionDetails,
       `WebView evaluation failed: ${JSON.stringify(result.exceptionDetails)}`,
@@ -388,6 +965,10 @@ async function stopChild(child) {
       windowsHide: true,
       stdio: "ignore",
     });
+    await Promise.race([
+      new Promise((resolveExit) => child.once("exit", resolveExit)),
+      delay(2_000),
+    ]);
   }
 }
 
@@ -579,6 +1160,93 @@ async function main() {
     requireContract(modelPicker.manageSavedProjects === true, "saved project management is not reachable from New Run");
     requireContract(modelPicker.visibleError === false, "model picker shows a packaged discovery/runtime error");
 
+    const layout = await client.evaluate(String.raw`(async () => {
+      const contentWidth = (element) => {
+        if (!element) return null;
+        const style = getComputedStyle(element);
+        return element.clientWidth - parseFloat(style.paddingLeft || "0") - parseFloat(style.paddingRight || "0");
+      };
+      const main = document.querySelector(".app-main");
+      const launcher = document.querySelector(".project-launcher");
+      const sidebar = document.querySelector(".app-sidebar");
+      const shell = document.querySelector(".app-shell");
+      const resizer = document.querySelector('.sidebar-resizer[role="separator"]');
+      if (!main || !launcher || !sidebar || !shell || !resizer) {
+        return { error: "desktop layout controls missing" };
+      }
+      const mainContentWidth = contentWidth(main);
+      const launcherWidth = launcher.getBoundingClientRect().width;
+      const beforeAria = Number(resizer.getAttribute("aria-valuenow"));
+      const beforeSidebarWidth = sidebar.getBoundingClientRect().width;
+      resizer.focus();
+      resizer.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
+      await new Promise((resolveDelay) => window.setTimeout(resolveDelay, 80));
+      const expandedAria = Number(resizer.getAttribute("aria-valuenow"));
+      const expandedSidebarWidth = sidebar.getBoundingClientRect().width;
+      const expandedShellClass = shell.className;
+      resizer.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowLeft", bubbles: true }));
+      await new Promise((resolveDelay) => window.setTimeout(resolveDelay, 80));
+      const restoredAria = Number(resizer.getAttribute("aria-valuenow"));
+      const restoredSidebarWidth = sidebar.getBoundingClientRect().width;
+
+      const supervisionButton = [...document.querySelectorAll("button")].find(
+        (candidate) => candidate.textContent.trim() === "Supervision"
+      );
+      supervisionButton?.click();
+      const deadline = Date.now() + 5_000;
+      let supervision;
+      while (Date.now() < deadline) {
+        supervision = document.querySelector(".supervision-surface");
+        if (supervision) break;
+        await new Promise((resolveDelay) => window.setTimeout(resolveDelay, 50));
+      }
+      const supervisionWidth = supervision?.getBoundingClientRect().width ?? null;
+      const supervisionContentWidth = contentWidth(main);
+      const text = document.body.innerText;
+      return {
+        mainContentWidth,
+        launcherWidth,
+        launcherUsesWorkspace: mainContentWidth !== null && launcherWidth >= mainContentWidth - 4,
+        beforeAria,
+        expandedAria,
+        restoredAria,
+        beforeSidebarWidth,
+        expandedSidebarWidth,
+        restoredSidebarWidth,
+        expandedShellClass,
+        resizerVisible: getComputedStyle(resizer).display !== "none",
+        supervisionWidth,
+        supervisionContentWidth,
+        supervisionUsesWorkspace:
+          supervisionWidth !== null &&
+          supervisionContentWidth !== null &&
+          supervisionWidth >= supervisionContentWidth - 4,
+        visibleError:
+          text.includes("not allowed by ACL") ||
+          text.includes("Runtime update failed:") ||
+          text.includes("not allowed by CSP")
+      };
+    })()`);
+    requireContract(!layout.error, layout.error ?? "desktop layout smoke failed");
+    requireContract(layout.resizerVisible === true, `sidebar resizer is hidden at release window size: ${JSON.stringify(layout)}`);
+    requireContract(
+      layout.expandedAria === layout.beforeAria + 16 &&
+        layout.restoredAria === layout.beforeAria,
+      `keyboard sidebar resize did not update its bounded accessible value: ${JSON.stringify(layout)}`,
+    );
+    requireContract(
+      layout.expandedSidebarWidth >= layout.beforeSidebarWidth + 15 &&
+        Math.abs(layout.restoredSidebarWidth - layout.beforeSidebarWidth) <= 1,
+      `packaged CSP-safe sidebar width classes did not resize and restore the real sidebar: ${JSON.stringify(layout)}`,
+    );
+    requireContract(
+      String(layout.expandedShellClass).includes(`sidebar-width-${layout.expandedAria}`),
+      `expanded sidebar did not use the expected static shell class: ${JSON.stringify(layout)}`,
+    );
+    requireContract(layout.launcherUsesWorkspace === true, `New Run does not consume the available workspace width: ${JSON.stringify(layout)}`);
+    requireContract(layout.supervisionUsesWorkspace === true, `Supervision does not consume the available workspace width: ${JSON.stringify(layout)}`);
+    requireContract(layout.visibleError === false, `layout exercise exposed a packaged ACL/CSP/runtime error: ${JSON.stringify(layout)}`);
+
     const navigation = await client.evaluate(String.raw`(async () => {
       const labels = [
         "Dashboard",
@@ -628,8 +1296,9 @@ async function main() {
   }
 
   await smokeIsolatedModelPreferences();
+  await smokeIsolatedTranscriptHandoff();
   console.log("packaged desktop WebView smoke passed");
-  console.log("verified: custom IPC, event listen/unlisten ACL, global model discovery, first-run Muse default, remembered New Run model, favorites-first persistence, project preset routing without sidebar manager, main navigation, no visible ACL/CSP/runtime-update failure");
+  console.log("verified: custom IPC, event listen/unlisten ACL, global model discovery, first-run Muse default, remembered New Run model, favorites-first persistence, project preset routing without sidebar manager, CSP-safe keyboard sidebar resizing, full-width New Run/Supervision surfaces, real packaged run streaming-to-persisted transcript handoff with stale messageCount, sanitized rich final Markdown, native session HTML export, one-shot Bash streaming/result with context exclusion, direct-Bash execution-root ownership across renderer reload with cancellation and mutation gating, main navigation, no visible ACL/CSP/runtime-update failure");
 }
 
 await main();

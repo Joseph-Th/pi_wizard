@@ -21,9 +21,7 @@ use tokio::sync::{Mutex, broadcast, watch};
 
 use crate::LaunchSelection;
 use crate::services::internal_run::terminate_internal_run;
-use crate::services::pi_session::{
-    last_assistant_text, session_assistant_messages, submit_text_prompt,
-};
+use crate::services::pi_session::{last_assistant_text, submit_text_prompt};
 
 #[derive(Clone)]
 pub(crate) struct SupervisionCoordinator {
@@ -73,11 +71,15 @@ impl SupervisionCoordinator {
     ) -> Result<watch::Receiver<bool>, String> {
         let mut sessions = self.sessions.lock().await;
         if sessions.values().any(|session| {
-            session.snapshot.project_id == snapshot.project_id
-                && !session.snapshot.status.is_terminal()
+            !session.snapshot.status.is_terminal()
+                && session
+                    .snapshot
+                    .project_ids
+                    .iter()
+                    .any(|project_id| snapshot.project_ids.contains(project_id))
         }) {
             return Err(
-                "this project already has an active supervision session; stop it before starting another"
+                "one or more selected projects already have active supervision; stop the overlapping session before starting another"
                     .to_owned(),
             );
         }
@@ -151,10 +153,12 @@ pub(crate) struct SupervisionRuntimeContext {
 pub(crate) struct SupervisionPlan {
     pub(crate) id: SupervisionId,
     pub(crate) project: ProjectBinding,
+    pub(crate) project_ids: HashSet<ProjectId>,
     pub(crate) environment: ResolvedLaunchEnvironment,
     pub(crate) base: WorktreeBaseSnapshot,
     pub(crate) selection: LaunchSelection,
-    pub(crate) max_cycles: usize,
+    pub(crate) prompt_templates: Vec<String>,
+    pub(crate) max_cycles: Option<usize>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize)]
@@ -163,6 +167,7 @@ enum SupervisorAction {
     Send,
     Steer,
     FollowUp,
+    Stop,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -170,7 +175,8 @@ enum SupervisorAction {
 struct SupervisorDirective {
     run_id: RunId,
     action: SupervisorAction,
-    message: String,
+    #[serde(default)]
+    message: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -178,6 +184,18 @@ struct SupervisorDirective {
 struct SupervisorReply {
     #[serde(default)]
     directives: Vec<SupervisorDirective>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ObservedRunVersion {
+    session_replacement_generation: u64,
+    session_id: Option<String>,
+    assistant_message_generation: u64,
+}
+
+enum SupervisorLaunchOutcome {
+    Ready(RunId),
+    Stopped(Option<RunId>),
 }
 
 pub(crate) async fn run_supervision(
@@ -222,7 +240,22 @@ async fn run_supervision_inner(
     plan: &SupervisionPlan,
     stop: &mut watch::Receiver<bool>,
 ) -> Result<(), String> {
-    let supervisor_run = launch_supervisor(context, plan, stop).await?;
+    let supervisor_run = match launch_supervisor(context, plan, stop).await? {
+        SupervisorLaunchOutcome::Ready(run_id) => run_id,
+        SupervisorLaunchOutcome::Stopped(run_id) => {
+            if let Some(run_id) = run_id {
+                terminate_internal_run(&context.manager, run_id).await?;
+            }
+            context
+                .coordinator
+                .mutate(plan.id, |snapshot| {
+                    snapshot.supervisor_run_id = None;
+                    snapshot.status = SupervisionStatus::Stopped;
+                })
+                .await?;
+            return Ok(());
+        }
+    };
     context
         .coordinator
         .mutate(plan.id, |snapshot| {
@@ -231,8 +264,7 @@ async fn run_supervision_inner(
         })
         .await?;
 
-    let mut state_changes = context.manager.subscribe_state_changes();
-    let mut baselines: HashMap<RunId, usize> = HashMap::new();
+    let mut considered_idle: HashMap<RunId, ObservedRunVersion> = HashMap::new();
 
     loop {
         if *stop.borrow() {
@@ -247,22 +279,37 @@ async fn run_supervision_inner(
             return Ok(());
         }
 
+        // Subscribe before taking the authoritative snapshot. Any semantic
+        // change after this point is either already reflected by hydration or
+        // remains queued for the wait below. A completed supervisor decision
+        // starts the next loop with a fresh receiver so read-only RPC wakeups
+        // generated while building/applying that decision are absorbed by the
+        // next snapshot instead of replayed one by one.
+        let mut state_changes = context.manager.subscribe_state_changes();
         let hydration = context
             .manager
             .hydrate()
             .await
             .map_err(|error| error.to_string())?;
-        let eligible = eligible_runs(&hydration, plan.project.id(), supervisor_run);
-        baselines.retain(|run_id, _| eligible.contains(run_id));
+        let eligible = eligible_runs(&hydration, &plan.project_ids, supervisor_run);
+        considered_idle.retain(|run_id, _| eligible.contains(run_id));
         let mut settled = HashSet::new();
+        let mut observed = HashMap::with_capacity(eligible.len());
         for run_id in &eligible {
             let Some(run) = hydration.runs.iter().find(|run| run.run.id() == *run_id) else {
                 continue;
             };
-            let assistant_messages = session_assistant_messages(&context.manager, *run_id).await?;
-            let baseline = baselines.entry(*run_id).or_insert(assistant_messages);
-            if run_is_idle_actionable(run) && assistant_messages > *baseline {
-                *baseline = assistant_messages;
+            let generation = ObservedRunVersion {
+                session_replacement_generation: run.run.session_replacement_generation(),
+                session_id: run.run.session_state().session_id.clone(),
+                assistant_message_generation: run.run.assistant_message_generation(),
+            };
+            observed.insert(*run_id, generation.clone());
+            if !run_is_idle_actionable(run) {
+                continue;
+            }
+            if considered_idle.get(run_id) != Some(&generation) {
+                considered_idle.insert(*run_id, generation);
                 settled.insert(*run_id);
             }
         }
@@ -280,7 +327,7 @@ async fn run_supervision_inner(
                     .snapshot
                     .cycles
             };
-            if cycles >= plan.max_cycles {
+            if plan.max_cycles.is_some_and(|maximum| cycles >= maximum) {
                 terminate_internal_run(&context.manager, supervisor_run).await?;
                 context
                     .coordinator
@@ -291,23 +338,43 @@ async fn run_supervision_inner(
                     .await?;
                 return Ok(());
             }
-            context
-                .coordinator
-                .mutate(plan.id, |snapshot| {
-                    snapshot.cycles = snapshot.cycles.saturating_add(1)
-                })
-                .await?;
-            run_supervisor_cycle(
+            let deferred_idle = run_supervisor_cycle(
                 context,
                 plan,
                 supervisor_run,
                 &hydration,
                 &eligible,
                 &settled,
-                &mut baselines,
+                &observed,
                 stop,
             )
             .await?;
+            for run_id in deferred_idle {
+                considered_idle.remove(&run_id);
+            }
+            if *stop.borrow() {
+                continue;
+            }
+            let completed_cycles = cycles.saturating_add(1);
+            context
+                .coordinator
+                .mutate(plan.id, |snapshot| snapshot.cycles = completed_cycles)
+                .await?;
+            if plan
+                .max_cycles
+                .is_some_and(|maximum| completed_cycles >= maximum)
+            {
+                terminate_internal_run(&context.manager, supervisor_run).await?;
+                context
+                    .coordinator
+                    .mutate(plan.id, |snapshot| {
+                        snapshot.supervisor_run_id = None;
+                        snapshot.status = SupervisionStatus::Completed;
+                    })
+                    .await?;
+                return Ok(());
+            }
+            continue;
         }
 
         tokio::select! {
@@ -327,7 +394,7 @@ async fn run_supervision_inner(
 
 fn eligible_runs(
     hydration: &RuntimeHydrationSnapshot,
-    project_id: ProjectId,
+    project_ids: &HashSet<ProjectId>,
     supervisor_run: RunId,
 ) -> HashSet<RunId> {
     hydration
@@ -335,7 +402,7 @@ fn eligible_runs(
         .iter()
         .filter(|run| {
             run.run.id() != supervisor_run
-                && run.run.project_id() == project_id
+                && project_ids.contains(&run.run.project_id())
                 && !run.run.process_state().is_terminal()
         })
         .map(|run| run.run.id())
@@ -351,16 +418,23 @@ fn run_is_idle_actionable(run: &RunHydrationSnapshot) -> bool {
         && run.run.pending_ui_requests() == 0
         && !run.run.is_retry_waiting()
         && !run.run.has_summarization_retry()
+        && !run_has_active_direct_bash(run)
+}
+
+fn run_has_active_direct_bash(run: &RunHydrationSnapshot) -> bool {
+    run.rpc
+        .as_ref()
+        .is_some_and(|rpc| !rpc.live.direct_bash.is_empty())
 }
 
 async fn launch_supervisor(
     context: &SupervisionRuntimeContext,
     plan: &SupervisionPlan,
-    stop: &watch::Receiver<bool>,
-) -> Result<RunId, String> {
+    stop: &mut watch::Receiver<bool>,
+) -> Result<SupervisorLaunchOutcome, String> {
     let _gate = context.launch_cleanup_gate.lock().await;
     if *stop.borrow() {
-        return Err("supervision was stopped before its supervisor could start".to_owned());
+        return Ok(SupervisorLaunchOutcome::Stopped(None));
     }
     let capacity = context
         .manager
@@ -411,7 +485,7 @@ async fn launch_supervisor(
             .map_err(|error| error.to_string())?;
     }
     if *stop.borrow() {
-        return Err("supervision was stopped before Pi spawn".to_owned());
+        return Ok(SupervisorLaunchOutcome::Stopped(None));
     }
 
     let mut spec = PiLaunchSpec::new(
@@ -435,9 +509,28 @@ async fn launch_supervisor(
         })
         .await
         .map_err(|error| error.to_string())?;
+    if let Err(error) = context
+        .coordinator
+        .mutate(plan.id, |snapshot| {
+            snapshot.supervisor_run_id = Some(run_id)
+        })
+        .await
+    {
+        drop(_gate);
+        let cleanup = terminate_internal_run(&context.manager, run_id).await;
+        return Err(match cleanup {
+            Ok(()) => error,
+            Err(cleanup_error) => {
+                format!("{error}; untracked supervisor cleanup failed: {cleanup_error}")
+            }
+        });
+    }
     drop(_gate);
-    wait_supervisor_ready(&context.manager, context.limits, run_id).await?;
-    Ok(run_id)
+    if wait_supervisor_ready_or_stopped(&context.manager, context.limits, run_id, stop).await? {
+        Ok(SupervisorLaunchOutcome::Ready(run_id))
+    } else {
+        Ok(SupervisorLaunchOutcome::Stopped(Some(run_id)))
+    }
 }
 
 fn supervision_worktree_plan(
@@ -509,6 +602,27 @@ async fn wait_supervisor_ready(
     .map_err(|_| "timed out waiting for supervisor readiness".to_owned())?
 }
 
+async fn wait_supervisor_ready_or_stopped(
+    manager: &RuntimeManagerHandle,
+    limits: RuntimeLimits,
+    run_id: RunId,
+    stop: &mut watch::Receiver<bool>,
+) -> Result<bool, String> {
+    if *stop.borrow() {
+        return Ok(false);
+    }
+    tokio::select! {
+        result = wait_supervisor_ready(manager, limits, run_id) => result.map(|()| true),
+        changed = stop.changed() => {
+            if changed.is_err() || *stop.borrow() {
+                Ok(false)
+            } else {
+                Err("supervision stop signal changed without requesting Stop".to_owned())
+            }
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_supervisor_cycle(
     context: &SupervisionRuntimeContext,
@@ -517,12 +631,25 @@ async fn run_supervisor_cycle(
     hydration: &RuntimeHydrationSnapshot,
     eligible: &HashSet<RunId>,
     settled: &HashSet<RunId>,
-    baselines: &mut HashMap<RunId, usize>,
+    observed: &HashMap<RunId, ObservedRunVersion>,
     stop: &mut watch::Receiver<bool>,
-) -> Result<(), String> {
+) -> Result<HashSet<RunId>, String> {
     let prompt = supervisor_prompt(context, plan, hydration, eligible, settled).await?;
-    let before = session_assistant_messages(&context.manager, supervisor_run).await?;
+    if *stop.borrow() {
+        return Ok(HashSet::new());
+    }
     let mut state_changes = context.manager.subscribe_state_changes();
+    let before = context
+        .manager
+        .hydrate()
+        .await
+        .map_err(|error| error.to_string())?
+        .runs
+        .iter()
+        .find(|run| run.run.id() == supervisor_run)
+        .ok_or_else(|| "supervisor run disappeared before its turn".to_owned())?
+        .run
+        .assistant_message_generation();
     submit_text_prompt(&context.manager, supervisor_run, &prompt).await?;
     let wait = async {
         loop {
@@ -556,7 +683,7 @@ async fn run_supervisor_cycle(
             }
             if run.run.process_state() == ProcessState::Ready
                 && run.run.activity_state() == ActivityState::Idle
-                && session_assistant_messages(&context.manager, supervisor_run).await? > before
+                && run.run.assistant_message_generation() > before
             {
                 return Ok(true);
             }
@@ -569,7 +696,10 @@ async fn run_supervisor_cycle(
     .await
     .map_err(|_| "supervisor turn exceeded its configured deadline".to_owned())??;
     if !completed {
-        return Ok(());
+        return Ok(HashSet::new());
+    }
+    if *stop.borrow() {
+        return Ok(HashSet::new());
     }
 
     let text = last_assistant_text(&context.manager, supervisor_run).await?;
@@ -591,7 +721,12 @@ async fn run_supervisor_cycle(
     }
 
     let mut targeted = HashSet::new();
+    let mut decision_summary = Vec::new();
+    let mut deferred_idle = HashSet::new();
     for directive in reply.directives {
+        if *stop.borrow() {
+            return Ok(HashSet::new());
+        }
         if directive.run_id == supervisor_run || !eligible.contains(&directive.run_id) {
             return Err(format!(
                 "supervisor targeted unknown or ineligible run {}",
@@ -604,10 +739,86 @@ async fn run_supervisor_cycle(
                 directive.run_id
             ));
         }
-        let message = directive.message.trim();
-        if message.is_empty() {
-            return Err("supervisor directive message cannot be empty".to_owned());
+        let current = context
+            .manager
+            .hydrate()
+            .await
+            .map_err(|error| error.to_string())?;
+        let Some(run) = current
+            .runs
+            .iter()
+            .find(|run| run.run.id() == directive.run_id)
+        else {
+            decision_summary.push(format!(
+                "Skipped run {}: it is no longer live",
+                short_run_id(directive.run_id)
+            ));
+            continue;
+        };
+        if !plan.project_ids.contains(&run.run.project_id()) {
+            return Err(format!(
+                "supervisor target {} is no longer eligible",
+                directive.run_id
+            ));
         }
+        let observed_version = observed.get(&directive.run_id).ok_or_else(|| {
+            format!(
+                "supervisor target {} has no observation token for this cycle",
+                directive.run_id
+            )
+        })?;
+        if run.run.session_replacement_generation()
+            != observed_version.session_replacement_generation
+            || run.run.session_state().session_id != observed_version.session_id
+        {
+            decision_summary.push(format!(
+                "Skipped run {}: it changed Pi sessions during the supervisor decision",
+                short_run_id(directive.run_id)
+            ));
+            continue;
+        }
+        if matches!(
+            directive.action,
+            SupervisorAction::Send | SupervisorAction::Stop
+        ) && run.run.assistant_message_generation()
+            != observed_version.assistant_message_generation
+        {
+            decision_summary.push(format!(
+                "Skipped run {}: it produced a newer assistant result during the supervisor decision",
+                short_run_id(directive.run_id)
+            ));
+            continue;
+        }
+        if run.run.process_state().is_terminal() {
+            decision_summary.push(format!(
+                "Skipped run {}: it already finished",
+                short_run_id(directive.run_id)
+            ));
+            continue;
+        }
+        if run_has_active_direct_bash(run) {
+            decision_summary.push(format!(
+                "Skipped run {}: a user direct command owns the execution root",
+                short_run_id(directive.run_id)
+            ));
+            if settled.contains(&directive.run_id) {
+                deferred_idle.insert(directive.run_id);
+            }
+            continue;
+        }
+        if matches!(directive.action, SupervisorAction::Stop) {
+            terminate_supervised_run(&context.manager, directive.run_id).await?;
+            decision_summary.push(format!("Stopped run {}", short_run_id(directive.run_id)));
+            continue;
+        }
+        let message = directive
+            .message
+            .as_deref()
+            .map(str::trim)
+            .filter(|message| !message.is_empty())
+            .ok_or_else(|| {
+                "supervisor send/steer/follow_up directive requires a message".to_owned()
+            })?;
         if message.len() > context.limits.max_draft_bytes_per_session {
             return Err(format!(
                 "supervisor directive uses {} bytes, exceeding prompt limit {}",
@@ -615,67 +826,29 @@ async fn run_supervisor_cycle(
                 context.limits.max_draft_bytes_per_session
             ));
         }
-        let current = context
-            .manager
-            .hydrate()
-            .await
-            .map_err(|error| error.to_string())?;
-        let run = current
-            .runs
-            .iter()
-            .find(|run| run.run.id() == directive.run_id)
-            .ok_or_else(|| format!("supervisor target {} disappeared", directive.run_id))?;
-        if run.run.project_id() != plan.project.id() || run.run.process_state().is_terminal() {
-            return Err(format!(
-                "supervisor target {} is no longer eligible",
-                directive.run_id
+        if let Some(reason) = directive_state_skip_reason(run, directive.action) {
+            decision_summary.push(format!(
+                "Skipped run {}: {reason}",
+                short_run_id(directive.run_id)
             ));
+            continue;
         }
         let command = match directive.action {
-            SupervisorAction::Send => {
-                if !run_is_idle_actionable(run) {
-                    return Err(format!(
-                        "supervisor can send only to a currently idle run: {}",
-                        directive.run_id
-                    ));
-                }
-                baselines.insert(
-                    directive.run_id,
-                    session_assistant_messages(&context.manager, directive.run_id).await?,
-                );
-                RpcCommand::Prompt {
-                    message: message.to_owned(),
-                    images: Vec::new(),
-                    streaming_behavior: None,
-                }
-            }
-            SupervisorAction::Steer => {
-                if run.run.process_state() != ProcessState::Ready
-                    || run.run.activity_state() != ActivityState::Working
-                {
-                    return Err(format!(
-                        "supervisor can steer only a working run: {}",
-                        directive.run_id
-                    ));
-                }
-                RpcCommand::Steer {
-                    message: message.to_owned(),
-                    images: Vec::new(),
-                }
-            }
-            SupervisorAction::FollowUp => {
-                if run.run.process_state() != ProcessState::Ready
-                    || run.run.activity_state() != ActivityState::Working
-                {
-                    return Err(format!(
-                        "supervisor can queue follow-up only for a working run: {}",
-                        directive.run_id
-                    ));
-                }
-                RpcCommand::FollowUp {
-                    message: message.to_owned(),
-                    images: Vec::new(),
-                }
+            SupervisorAction::Send => RpcCommand::Prompt {
+                message: message.to_owned(),
+                images: Vec::new(),
+                streaming_behavior: None,
+            },
+            SupervisorAction::Steer => RpcCommand::Steer {
+                message: message.to_owned(),
+                images: Vec::new(),
+            },
+            SupervisorAction::FollowUp => RpcCommand::FollowUp {
+                message: message.to_owned(),
+                images: Vec::new(),
+            },
+            SupervisorAction::Stop => {
+                unreachable!("stop directives are handled before message validation")
             }
         };
         let completion = context
@@ -689,8 +862,109 @@ async fn run_supervisor_cycle(
                 .error
                 .unwrap_or_else(|| "Pi rejected supervisor directive".to_owned()));
         }
+        let action = match directive.action {
+            SupervisorAction::Send => "Sent next task to",
+            SupervisorAction::Steer => "Steered",
+            SupervisorAction::FollowUp => "Queued follow-up for",
+            SupervisorAction::Stop => unreachable!("stop handled before Pi RPC"),
+        };
+        decision_summary.push(format!(
+            "{action} run {}: {}",
+            short_run_id(directive.run_id),
+            truncate_utf8_prefix(message, 240)
+        ));
     }
-    Ok(())
+    let summary = if decision_summary.is_empty() {
+        format!(
+            "No intervention for {} newly idle run{}",
+            settled.len(),
+            if settled.len() == 1 { "" } else { "s" }
+        )
+    } else {
+        decision_summary.join(" · ")
+    };
+    let summary =
+        truncate_utf8_prefix(&summary, context.limits.max_failure_detail_bytes).to_owned();
+    context
+        .coordinator
+        .mutate(plan.id, |snapshot| snapshot.last_decision = Some(summary))
+        .await?;
+    Ok(deferred_idle)
+}
+
+fn directive_state_skip_reason(
+    run: &RunHydrationSnapshot,
+    action: SupervisorAction,
+) -> Option<&'static str> {
+    match action {
+        SupervisorAction::Send if !run_is_idle_actionable(run) => Some("it is no longer idle"),
+        SupervisorAction::Steer | SupervisorAction::FollowUp
+            if run.run.process_state() != ProcessState::Ready
+                || run.run.activity_state() != ActivityState::Working =>
+        {
+            Some("it is no longer working")
+        }
+        _ => None,
+    }
+}
+
+fn short_run_id(run_id: RunId) -> String {
+    run_id.to_string().chars().take(8).collect()
+}
+
+async fn terminate_supervised_run(
+    manager: &RuntimeManagerHandle,
+    run_id: RunId,
+) -> Result<(), String> {
+    let hydration = manager.hydrate().await.map_err(|error| error.to_string())?;
+    let Some(run) = hydration.runs.iter().find(|run| run.run.id() == run_id) else {
+        return Ok(());
+    };
+    if run.run.process_state().is_terminal() {
+        return Ok(());
+    }
+    if run.run.process_state() != ProcessState::Ready
+        || run.run.activity_state() != ActivityState::Idle
+    {
+        let stopped = manager
+            .stop_run(run_id)
+            .await
+            .map_err(|error| error.to_string())?;
+        if stopped.quarantined {
+            return Err(format!(
+                "supervisor Stop left run {run_id} with uncertain process termination"
+            ));
+        }
+        if stopped.process_terminated {
+            return Ok(());
+        }
+    }
+
+    let hydration = manager.hydrate().await.map_err(|error| error.to_string())?;
+    let Some(run) = hydration.runs.iter().find(|run| run.run.id() == run_id) else {
+        return Ok(());
+    };
+    if run.run.process_state().is_terminal() {
+        return Ok(());
+    }
+    if run.run.process_state() == ProcessState::Ready
+        && run.run.activity_state() == ActivityState::Idle
+    {
+        let closed = manager
+            .close_run(run_id)
+            .await
+            .map_err(|error| error.to_string())?;
+        if closed.quarantined || !closed.process_terminated {
+            return Err(format!(
+                "supervisor could not confirm process termination for run {run_id}"
+            ));
+        }
+        return Ok(());
+    }
+    Err(format!(
+        "supervisor cannot stop run {run_id} from process state {:?}",
+        run.run.process_state()
+    ))
 }
 
 async fn supervisor_prompt(
@@ -701,18 +975,23 @@ async fn supervisor_prompt(
     settled: &HashSet<RunId>,
 ) -> Result<String, String> {
     let mut prompt = String::from(
-        "You supervise live Pi Wizard runs for one project. Keep them productive only when useful. Return JSON only in this exact shape: {\"directives\":[{\"runId\":\"UUID\",\"action\":\"send|steer|follow_up\",\"message\":\"...\"}]}. Use send only for idle runs. Use steer/follow_up only for working runs. An empty directives array means no intervention.\nRuns:\n",
+        "You supervise live Pi Wizard coding runs across the selected projects. Your default job is to keep newly idle runs productively moving through the next logical engineering task. When a run has just finished, inspect its lastResult and normally send a concrete next task that advances that project without simply repeating completed work. If the result reports a problem, either send a bounded task that can resolve it or stop the run when continuing autonomously is unsafe or unproductive. Return JSON only in this exact shape: {\"directives\":[{\"runId\":\"UUID\",\"action\":\"send|steer|follow_up|stop\",\"message\":\"...\"}]}. The message is required for send/steer/follow_up and may be omitted for stop. Use send only for idle runs. Use steer/follow_up only for working runs. Use stop only when the run should be terminated rather than continued. An empty directives array means deliberate no intervention.\n",
     );
-    for run_id in eligible {
-        let Some(run) = hydration.runs.iter().find(|run| run.run.id() == *run_id) else {
+    prompt.push_str("Newly idle runs requiring a decision this cycle are marked decisionRequired=true. Prioritize those runs over unrelated active work.\nRuns:\n");
+    for run_id in ordered_supervision_run_ids(eligible, settled) {
+        let Some(run) = hydration.runs.iter().find(|run| run.run.id() == run_id) else {
             continue;
         };
-        let status = match run.run.activity_state() {
-            ActivityState::Idle => "idle",
-            ActivityState::Working => "working",
-            ActivityState::Compacting => "compacting",
-            ActivityState::WaitingForInput => "needs_attention",
-            ActivityState::Aborting => "aborting",
+        let status = if run_has_active_direct_bash(run) {
+            "command_running"
+        } else {
+            match run.run.activity_state() {
+                ActivityState::Idle => "idle",
+                ActivityState::Working => "working",
+                ActivityState::Compacting => "compacting",
+                ActivityState::WaitingForInput => "needs_attention",
+                ActivityState::Aborting => "aborting",
+            }
         };
         let session = run.run.session_state();
         let model = session
@@ -720,8 +999,9 @@ async fn supervisor_prompt(
             .as_ref()
             .map(|model| format!("{}/{}", model.provider, model.id))
             .unwrap_or_else(|| "pi-default".to_owned());
-        let result = if settled.contains(run_id) {
-            last_assistant_text(&context.manager, *run_id)
+        let decision_required = settled.contains(&run_id);
+        let result = if decision_required {
+            last_assistant_text(&context.manager, run_id)
                 .await
                 .ok()
                 .map(|text| truncate_utf8_prefix(&text, 4_096).to_owned())
@@ -730,11 +1010,13 @@ async fn supervisor_prompt(
         };
         let line = match result {
             Some(result) => format!(
-                "- runId={run_id} status={status} model={model:?} root={:?} lastResult={result:?}\n",
+                "- runId={run_id} projectId={} decisionRequired={decision_required} status={status} model={model:?} root={:?} lastResult={result:?}\n",
+                run.run.project_id(),
                 run.run.execution_root()
             ),
             None => format!(
-                "- runId={run_id} status={status} model={model:?} root={:?}\n",
+                "- runId={run_id} projectId={} decisionRequired={decision_required} status={status} model={model:?} root={:?}\n",
+                run.run.project_id(),
                 run.run.execution_root()
             ),
         };
@@ -743,11 +1025,32 @@ async fn supervisor_prompt(
         }
         prompt.push_str(&line);
     }
+    if !plan.prompt_templates.is_empty() {
+        let heading = "Reusable playbook prompts. Treat these as candidate work themes, adapt them to each project's current state, and choose the next logical one rather than blindly replaying them:\n";
+        if prompt.len().saturating_add(heading.len()) <= context.limits.max_supervisor_context_bytes
+        {
+            prompt.push_str(heading);
+            for template in &plan.prompt_templates {
+                let line = format!("- {:?}\n", truncate_utf8_prefix(template, 2_048));
+                if prompt.len().saturating_add(line.len())
+                    > context.limits.max_supervisor_context_bytes
+                {
+                    break;
+                }
+                prompt.push_str(&line);
+            }
+        }
+    }
     if prompt.len() > context.limits.max_supervisor_context_bytes {
         return Err("supervisor instruction prefix exceeds configured context limit".to_owned());
     }
-    let _ = plan;
     Ok(prompt)
+}
+
+fn ordered_supervision_run_ids(eligible: &HashSet<RunId>, settled: &HashSet<RunId>) -> Vec<RunId> {
+    let mut run_ids: Vec<_> = eligible.iter().copied().collect();
+    run_ids.sort_by_key(|run_id| (!settled.contains(run_id), run_id.to_string()));
+    run_ids
 }
 
 fn truncate_utf8_prefix(value: &str, max_bytes: usize) -> &str {
@@ -781,6 +1084,69 @@ mod tests {
     use pi_wizard_core::{PiSessionId, SupervisionId};
     use std::fs;
 
+    fn assert_no_session_stats_probes(root: &std::path::Path) {
+        if !root.exists() {
+            return;
+        }
+        let mut pending = vec![root.to_path_buf()];
+        while let Some(directory) = pending.pop() {
+            for entry in fs::read_dir(&directory).expect("read workflow fixture directory") {
+                let path = entry.expect("read workflow fixture entry").path();
+                if path.is_dir() {
+                    pending.push(path);
+                } else if path.file_name().and_then(|name| name.to_str())
+                    == Some("workflow-session-stats.log")
+                {
+                    panic!(
+                        "orchestration must not poll Pi get_session_stats; found {}",
+                        path.display()
+                    );
+                }
+            }
+        }
+    }
+
+    async fn wait_for_supervisor_turn_started(
+        coordinator: &SupervisionCoordinator,
+        manager: &RuntimeManagerHandle,
+        id: SupervisionId,
+    ) -> RunId {
+        let mut supervision_changes = coordinator.subscribe();
+        let mut runtime_changes = manager.subscribe_state_changes();
+        tokio::time::timeout(Duration::from_secs(8), async {
+            loop {
+                let snapshots = coordinator.snapshots().await;
+                let supervisor_run = snapshots
+                    .iter()
+                    .find(|snapshot| snapshot.id == id)
+                    .and_then(|snapshot| snapshot.supervisor_run_id);
+                if let Some(supervisor_run) = supervisor_run {
+                    let hydration = manager.hydrate().await.expect("supervisor-turn hydration");
+                    if hydration.runs.iter().any(|run| {
+                        run.run.id() == supervisor_run
+                            && run.run.activity_state() == ActivityState::Working
+                    }) {
+                        return supervisor_run;
+                    }
+                }
+                tokio::select! {
+                    changed = supervision_changes.recv() => {
+                        if matches!(changed, Err(broadcast::error::RecvError::Closed)) {
+                            panic!("supervision stream closed before supervisor turn started");
+                        }
+                    }
+                    changed = runtime_changes.recv() => {
+                        if matches!(changed, Err(broadcast::error::RecvError::Closed)) {
+                            panic!("runtime stream closed before supervisor turn started");
+                        }
+                    }
+                }
+            }
+        })
+        .await
+        .expect("supervisor turn start deadline")
+    }
+
     #[test]
     fn strict_supervisor_json_accepts_only_narrow_directive_shape() {
         let run_id = RunId::new();
@@ -792,6 +1158,17 @@ mod tests {
         assert_eq!(reply.directives.len(), 1);
         assert_eq!(reply.directives[0].run_id, run_id);
         assert!(matches!(reply.directives[0].action, SupervisorAction::Send));
+        assert_eq!(reply.directives[0].message.as_deref(), Some("continue"));
+
+        let stop_text =
+            format!("{{\"directives\":[{{\"runId\":\"{run_id}\",\"action\":\"stop\"}}]}}");
+        let stop_reply: SupervisorReply =
+            serde_json::from_str(&stop_text).expect("parse supervisor stop reply");
+        assert!(matches!(
+            stop_reply.directives[0].action,
+            SupervisorAction::Stop
+        ));
+        assert!(stop_reply.directives[0].message.is_none());
     }
 
     #[test]
@@ -816,52 +1193,1098 @@ mod tests {
         assert!(plan.worktree_path.to_string_lossy().contains(&key));
     }
 
+    #[test]
+    fn supervisor_prompt_order_prioritizes_runs_that_require_a_decision() {
+        let first_settled = RunId::new();
+        let unrelated = RunId::new();
+        let second_settled = RunId::new();
+        let eligible = HashSet::from([first_settled, unrelated, second_settled]);
+        let settled = HashSet::from([first_settled, second_settled]);
+
+        let ordered = ordered_supervision_run_ids(&eligible, &settled);
+        assert_eq!(ordered.len(), 3);
+        assert!(settled.contains(&ordered[0]));
+        assert!(settled.contains(&ordered[1]));
+        assert_eq!(ordered[2], unrelated);
+    }
+
     #[tokio::test]
-    async fn supervision_independently_directs_a_normal_project_run_and_leaves_it_alive() {
-        let fixture = WorkflowFakePiFixture::new("supervision-integration");
+    async fn supervisor_state_revalidation_classifies_stale_actions_without_failing_session() {
+        let fixture = WorkflowFakePiFixture::new("supervision-state-race");
+        let environment = fixture.environment();
+        let limits = RuntimeLimits {
+            max_live_runs: 2,
+            startup_rpc_deadline_ms: 2_000,
+            ..RuntimeLimits::default()
+        };
+        let manager = spawn_runtime_manager(limits).expect("supervision race runtime manager");
+        let project = ProjectBinding::register(&fixture.root).expect("register race project");
+        let mut launch = PiLaunchSpec::new(
+            environment.pi_executable().to_path_buf(),
+            project.canonical_root(),
+            ProjectTrustPolicy::Inherit,
+        );
+        launch.session = SessionLaunch::NewWithId(PiSessionId::new());
+        let worker = manager
+            .start_run(RunStartSpec {
+                project_id: project.id(),
+                execution_isolation: ExecutionIsolation::LocalCheckout,
+                worktree: None,
+                launch: launch.resolve().expect("resolve race worker launch"),
+                environment,
+            })
+            .await
+            .expect("start race worker");
+        wait_supervisor_ready(&manager, limits, worker)
+            .await
+            .expect("race worker ready");
+
+        let hydration = manager.hydrate().await.expect("idle race hydration");
+        let idle = hydration
+            .runs
+            .iter()
+            .find(|run| run.run.id() == worker)
+            .expect("idle race worker");
+        assert_eq!(
+            directive_state_skip_reason(idle, SupervisorAction::Send),
+            None
+        );
+        assert_eq!(
+            directive_state_skip_reason(idle, SupervisorAction::Steer),
+            Some("it is no longer working")
+        );
+
+        let mut changes = manager.subscribe_state_changes();
+        submit_text_prompt(&manager, worker, "slow race task")
+            .await
+            .expect("start slow race task");
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let hydration = manager.hydrate().await.expect("working race hydration");
+                let working = hydration
+                    .runs
+                    .iter()
+                    .find(|run| run.run.id() == worker)
+                    .expect("working race worker");
+                if working.run.activity_state() == ActivityState::Working {
+                    assert_eq!(
+                        directive_state_skip_reason(working, SupervisorAction::Send),
+                        Some("it is no longer idle")
+                    );
+                    assert_eq!(
+                        directive_state_skip_reason(working, SupervisorAction::Steer),
+                        None
+                    );
+                    break;
+                }
+                match changes.recv().await {
+                    Ok(()) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(broadcast::error::RecvError::Closed) => {
+                        panic!("runtime state stream closed before race worker became active")
+                    }
+                }
+            }
+        })
+        .await
+        .expect("race worker working deadline");
+
+        manager.shutdown().await.expect("shutdown race manager");
+    }
+
+    #[tokio::test]
+    async fn supervision_skips_send_when_user_takes_over_idle_run_during_supervisor_turn() {
+        let fixture = WorkflowFakePiFixture::new("supervision-send-race");
         let environment = fixture.initialize_git_repository();
         let limits = RuntimeLimits {
             max_live_runs: 3,
             startup_rpc_deadline_ms: 2_000,
             ..RuntimeLimits::default()
         };
-        let manager = spawn_runtime_manager(limits).expect("supervision runtime manager");
-        let project =
-            ProjectBinding::register(&fixture.root).expect("register supervision project");
+        let manager = spawn_runtime_manager(limits).expect("send-race runtime manager");
+        let project = ProjectBinding::register(&fixture.root).expect("register send-race project");
         let base = inspect_worktree_base(project.canonical_root(), &environment, limits)
             .await
-            .expect("inspect supervision Git base");
-
-        let mut worker_launch = PiLaunchSpec::new(
+            .expect("inspect send-race Git base");
+        let mut launch = PiLaunchSpec::new(
             environment.pi_executable().to_path_buf(),
             project.canonical_root(),
             ProjectTrustPolicy::Inherit,
         );
-        worker_launch.session = SessionLaunch::NewWithId(PiSessionId::new());
-        let worker_run = manager
+        launch.session = SessionLaunch::NewWithId(PiSessionId::new());
+        let worker = manager
             .start_run(RunStartSpec {
                 project_id: project.id(),
                 execution_isolation: ExecutionIsolation::LocalCheckout,
                 worktree: None,
-                launch: worker_launch.resolve().expect("resolve worker launch"),
+                launch: launch.resolve().expect("resolve send-race worker launch"),
                 environment: environment.clone(),
             })
             .await
-            .expect("start ordinary worker run");
-        wait_supervisor_ready(&manager, limits, worker_run)
+            .expect("start send-race worker");
+        wait_supervisor_ready(&manager, limits, worker)
             .await
-            .expect("ordinary worker ready");
+            .expect("send-race worker ready");
 
         let coordinator = SupervisionCoordinator::new(limits);
         let id = SupervisionId::new();
         let stop = coordinator
             .insert(SupervisionSnapshot::new(
                 id,
+                vec![project.id()],
                 project.id(),
                 None,
                 None,
                 None,
-                1,
+                Some(1),
+            ))
+            .await
+            .expect("insert send-race supervision");
+        let mut supervision_changes = coordinator.subscribe();
+        let mut runtime_changes = manager.subscribe_state_changes();
+        let context = SupervisionRuntimeContext {
+            manager: manager.clone(),
+            limits,
+            launch_cleanup_gate: Arc::new(Mutex::new(())),
+            worktrees: Arc::new(Mutex::new(WorktreeRegistry::ephemeral(limits))),
+            coordinator: coordinator.clone(),
+        };
+        let selection = LaunchSelection {
+            context_files: ContextFilesPolicy::Disabled,
+            extension_discovery: ExtensionDiscoveryPolicy::Disabled,
+            provider: None,
+            model: None,
+            thinking: None,
+        };
+        let supervision_task = tokio::spawn(run_supervision(
+            context,
+            SupervisionPlan {
+                id,
+                project: project.clone(),
+                project_ids: HashSet::from([project.id()]),
+                environment,
+                base,
+                selection,
+                prompt_templates: vec!["RACE_TEST_DELAY".to_owned()],
+                max_cycles: Some(1),
+            },
+            stop,
+        ));
+
+        tokio::time::timeout(Duration::from_secs(8), async {
+            loop {
+                let snapshots = coordinator.snapshots().await;
+                let supervisor_run = snapshots
+                    .iter()
+                    .find(|snapshot| snapshot.id == id)
+                    .and_then(|snapshot| snapshot.supervisor_run_id);
+                if let Some(supervisor_run) = supervisor_run {
+                    let hydration = manager
+                        .hydrate()
+                        .await
+                        .expect("send-race supervisor hydration");
+                    if hydration.runs.iter().any(|run| {
+                        run.run.id() == supervisor_run
+                            && run.run.activity_state() == ActivityState::Working
+                    }) {
+                        break;
+                    }
+                }
+                tokio::select! {
+                    changed = supervision_changes.recv() => {
+                        if matches!(changed, Err(broadcast::error::RecvError::Closed)) {
+                            panic!("supervision stream closed before race decision started");
+                        }
+                    }
+                    changed = runtime_changes.recv() => {
+                        if matches!(changed, Err(broadcast::error::RecvError::Closed)) {
+                            panic!("runtime stream closed before race decision started");
+                        }
+                    }
+                }
+            }
+        })
+        .await
+        .expect("supervisor race-decision start deadline");
+
+        submit_text_prompt(&manager, worker, "race manual takeover")
+            .await
+            .expect("user takes over race worker");
+
+        tokio::time::timeout(Duration::from_secs(12), supervision_task)
+            .await
+            .expect("send-race supervision deadline")
+            .expect("send-race supervision join");
+
+        let snapshots = coordinator.snapshots().await;
+        let snapshot = snapshots
+            .iter()
+            .find(|snapshot| snapshot.id == id)
+            .expect("send-race terminal snapshot");
+        assert_eq!(
+            snapshot.status,
+            SupervisionStatus::Completed,
+            "{snapshot:?}"
+        );
+        assert!(snapshot.error.is_none(), "{snapshot:?}");
+        let decision = snapshot
+            .last_decision
+            .as_deref()
+            .expect("send-race last decision");
+        assert!(decision.contains("Skipped run"), "{decision}");
+        assert!(decision.contains("no longer idle"), "{decision}");
+
+        let prompts = fs::read_to_string(fixture.root.join("workflow-worker-prompts.log"))
+            .expect("read send-race worker prompt audit");
+        assert_eq!(
+            prompts.lines().collect::<Vec<_>>(),
+            ["race manual takeover"],
+            "the stale supervisor send must not overwrite or duplicate the user's takeover"
+        );
+
+        manager
+            .shutdown()
+            .await
+            .expect("shutdown send-race manager");
+    }
+
+    #[tokio::test]
+    async fn supervision_defers_autonomous_stop_while_direct_bash_owns_execution_root() {
+        let fixture = WorkflowFakePiFixture::new("supervision-bash-race");
+        let environment = fixture.initialize_git_repository();
+        let limits = RuntimeLimits {
+            max_live_runs: 3,
+            startup_rpc_deadline_ms: 2_000,
+            ..RuntimeLimits::default()
+        };
+        let manager = spawn_runtime_manager(limits).expect("Bash-race runtime manager");
+        let project = ProjectBinding::register(&fixture.root).expect("register Bash-race project");
+        let base = inspect_worktree_base(project.canonical_root(), &environment, limits)
+            .await
+            .expect("inspect Bash-race Git base");
+        let mut launch = PiLaunchSpec::new(
+            environment.pi_executable().to_path_buf(),
+            project.canonical_root(),
+            ProjectTrustPolicy::Inherit,
+        );
+        launch.session = SessionLaunch::NewWithId(PiSessionId::new());
+        let worker = manager
+            .start_run(RunStartSpec {
+                project_id: project.id(),
+                execution_isolation: ExecutionIsolation::LocalCheckout,
+                worktree: None,
+                launch: launch.resolve().expect("resolve Bash-race worker launch"),
+                environment: environment.clone(),
+            })
+            .await
+            .expect("start Bash-race worker");
+        wait_supervisor_ready(&manager, limits, worker)
+            .await
+            .expect("Bash-race worker ready");
+
+        let coordinator = SupervisionCoordinator::new(limits);
+        let id = SupervisionId::new();
+        let stop = coordinator
+            .insert(SupervisionSnapshot::new(
+                id,
+                vec![project.id()],
+                project.id(),
+                None,
+                None,
+                None,
+                None,
+            ))
+            .await
+            .expect("insert Bash-race supervision");
+        let mut supervision_changes = coordinator.subscribe();
+        let mut runtime_changes = manager.subscribe_state_changes();
+        let supervision_task = tokio::spawn(run_supervision(
+            SupervisionRuntimeContext {
+                manager: manager.clone(),
+                limits,
+                launch_cleanup_gate: Arc::new(Mutex::new(())),
+                worktrees: Arc::new(Mutex::new(WorktreeRegistry::ephemeral(limits))),
+                coordinator: coordinator.clone(),
+            },
+            SupervisionPlan {
+                id,
+                project: project.clone(),
+                project_ids: HashSet::from([project.id()]),
+                environment,
+                base,
+                selection: LaunchSelection {
+                    context_files: ContextFilesPolicy::Disabled,
+                    extension_discovery: ExtensionDiscoveryPolicy::Disabled,
+                    provider: None,
+                    model: None,
+                    thinking: None,
+                },
+                prompt_templates: vec!["RACE_TEST_DELAY STOP_DURING_BASH_RACE".to_owned()],
+                max_cycles: None,
+            },
+            stop,
+        ));
+
+        tokio::time::timeout(Duration::from_secs(8), async {
+            loop {
+                let supervisor_run = coordinator
+                    .snapshots()
+                    .await
+                    .into_iter()
+                    .find(|snapshot| snapshot.id == id)
+                    .and_then(|snapshot| snapshot.supervisor_run_id);
+                if let Some(supervisor_run) = supervisor_run {
+                    let hydration = manager
+                        .hydrate()
+                        .await
+                        .expect("Bash-race supervisor hydration");
+                    if hydration.runs.iter().any(|run| {
+                        run.run.id() == supervisor_run
+                            && run.run.activity_state() == ActivityState::Working
+                    }) {
+                        break;
+                    }
+                }
+                tokio::select! {
+                    changed = supervision_changes.recv() => {
+                        if matches!(changed, Err(broadcast::error::RecvError::Closed)) {
+                            panic!("supervision stream closed before Bash-race decision started");
+                        }
+                    }
+                    changed = runtime_changes.recv() => {
+                        if matches!(changed, Err(broadcast::error::RecvError::Closed)) {
+                            panic!("runtime stream closed before Bash-race decision started");
+                        }
+                    }
+                }
+            }
+        })
+        .await
+        .expect("Bash-race supervisor decision start deadline");
+
+        let bash_manager = manager.clone();
+        let bash_task = tokio::spawn(async move {
+            bash_manager
+                .request(
+                    worker,
+                    RpcRequest::new(RpcCommand::Bash {
+                        command: "slow-bash".to_owned(),
+                        exclude_from_context: Some(true),
+                    }),
+                )
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let hydration = manager.hydrate().await.expect("Bash-race worker hydration");
+                let run = hydration
+                    .runs
+                    .iter()
+                    .find(|run| run.run.id() == worker)
+                    .expect("Bash-race worker");
+                if run
+                    .rpc
+                    .as_ref()
+                    .is_some_and(|rpc| !rpc.live.direct_bash.is_empty())
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("Bash-race direct command start deadline");
+
+        tokio::time::timeout(Duration::from_secs(4), async {
+            loop {
+                let snapshot = coordinator
+                    .snapshots()
+                    .await
+                    .into_iter()
+                    .find(|snapshot| snapshot.id == id)
+                    .expect("Bash-race supervision snapshot");
+                if snapshot.cycles == 1
+                    && snapshot.last_decision.as_deref().is_some_and(|decision| {
+                        decision.contains("a user direct command owns the execution root")
+                    })
+                {
+                    break;
+                }
+                match supervision_changes.recv().await {
+                    Ok(()) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(broadcast::error::RecvError::Closed) => {
+                        panic!("supervision stream closed before Bash-race deferral")
+                    }
+                }
+            }
+        })
+        .await
+        .expect("Bash-race deferral deadline");
+        assert!(
+            fs::read_to_string(fixture.root.join("workflow-worker-prompts.log"))
+                .unwrap_or_default()
+                .is_empty(),
+            "supervision must not inject model work while direct Bash owns the checkout"
+        );
+        let during_bash = manager
+            .hydrate()
+            .await
+            .expect("Bash-race retained worker hydration");
+        let worker_during_bash = during_bash
+            .runs
+            .iter()
+            .find(|run| run.run.id() == worker)
+            .expect("Bash-race worker remains registered");
+        assert!(
+            !worker_during_bash.run.process_state().is_terminal(),
+            "an autonomous Stop decision must not terminate a worker while user Bash owns its execution root"
+        );
+
+        let bash = bash_task
+            .await
+            .expect("Bash-race command task join")
+            .expect("Bash-race command completion");
+        assert!(bash.response.success);
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let snapshot = coordinator
+                    .snapshots()
+                    .await
+                    .into_iter()
+                    .find(|snapshot| snapshot.id == id)
+                    .expect("Bash-race post-command snapshot");
+                if snapshot.cycles >= 2
+                    && snapshot.last_decision.as_deref().is_some_and(|decision| {
+                        decision.contains("No intervention for 1 newly idle run")
+                    })
+                {
+                    break;
+                }
+                match supervision_changes.recv().await {
+                    Ok(()) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(broadcast::error::RecvError::Closed) => {
+                        panic!("supervision stream closed before Bash-race reconsideration")
+                    }
+                }
+            }
+        })
+        .await
+        .expect("Bash-race reconsideration deadline");
+
+        coordinator
+            .request_stop(id)
+            .await
+            .expect("stop Bash-race supervision");
+        tokio::time::timeout(Duration::from_secs(8), supervision_task)
+            .await
+            .expect("Bash-race stop deadline")
+            .expect("Bash-race supervision join");
+        let stopped = coordinator
+            .snapshots()
+            .await
+            .into_iter()
+            .find(|snapshot| snapshot.id == id)
+            .expect("stopped Bash-race snapshot");
+        assert_eq!(stopped.status, SupervisionStatus::Stopped, "{stopped:?}");
+
+        manager
+            .shutdown()
+            .await
+            .expect("shutdown Bash-race manager");
+    }
+
+    #[tokio::test]
+    async fn supervision_skips_stale_send_when_target_switches_sessions_during_decision() {
+        let fixture = WorkflowFakePiFixture::new("supervision-session-race");
+        let environment = fixture.initialize_git_repository();
+        let limits = RuntimeLimits {
+            max_live_runs: 3,
+            startup_rpc_deadline_ms: 2_000,
+            ..RuntimeLimits::default()
+        };
+        let manager = spawn_runtime_manager(limits).expect("session-race runtime manager");
+        let project =
+            ProjectBinding::register(&fixture.root).expect("register session-race project");
+        let base = inspect_worktree_base(project.canonical_root(), &environment, limits)
+            .await
+            .expect("inspect session-race Git base");
+        let mut launch = PiLaunchSpec::new(
+            environment.pi_executable().to_path_buf(),
+            project.canonical_root(),
+            ProjectTrustPolicy::Inherit,
+        );
+        launch.session = SessionLaunch::NewWithId(PiSessionId::new());
+        let worker = manager
+            .start_run(RunStartSpec {
+                project_id: project.id(),
+                execution_isolation: ExecutionIsolation::LocalCheckout,
+                worktree: None,
+                launch: launch
+                    .resolve()
+                    .expect("resolve session-race worker launch"),
+                environment: environment.clone(),
+            })
+            .await
+            .expect("start session-race worker");
+        wait_supervisor_ready(&manager, limits, worker)
+            .await
+            .expect("session-race worker ready");
+        let original_session = manager
+            .hydrate()
+            .await
+            .expect("original session hydration")
+            .runs
+            .iter()
+            .find(|run| run.run.id() == worker)
+            .and_then(|run| run.run.session_state().session_id.clone())
+            .expect("original worker session id");
+
+        let coordinator = SupervisionCoordinator::new(limits);
+        let id = SupervisionId::new();
+        let stop = coordinator
+            .insert(SupervisionSnapshot::new(
+                id,
+                vec![project.id()],
+                project.id(),
+                None,
+                None,
+                None,
+                Some(1),
+            ))
+            .await
+            .expect("insert session-race supervision");
+        let context = SupervisionRuntimeContext {
+            manager: manager.clone(),
+            limits,
+            launch_cleanup_gate: Arc::new(Mutex::new(())),
+            worktrees: Arc::new(Mutex::new(WorktreeRegistry::ephemeral(limits))),
+            coordinator: coordinator.clone(),
+        };
+        let supervision_task = tokio::spawn(run_supervision(
+            context,
+            SupervisionPlan {
+                id,
+                project: project.clone(),
+                project_ids: HashSet::from([project.id()]),
+                environment,
+                base,
+                selection: LaunchSelection {
+                    context_files: ContextFilesPolicy::Disabled,
+                    extension_discovery: ExtensionDiscoveryPolicy::Disabled,
+                    provider: None,
+                    model: None,
+                    thinking: None,
+                },
+                prompt_templates: vec!["RACE_TEST_DELAY".to_owned()],
+                max_cycles: Some(1),
+            },
+            stop,
+        ));
+
+        wait_for_supervisor_turn_started(&coordinator, &manager, id).await;
+        let mut runtime_changes = manager.subscribe_state_changes();
+        let replacement = manager
+            .request(
+                worker,
+                RpcRequest::new(RpcCommand::SwitchSession {
+                    session_path: std::path::PathBuf::from("switched-session.jsonl"),
+                }),
+            )
+            .await
+            .expect("switch worker session while supervisor decides");
+        assert!(replacement.response.success);
+        let reconciliation_gap = manager
+            .hydrate()
+            .await
+            .expect("session-reconciliation gap hydration");
+        let gap_run = reconciliation_gap
+            .runs
+            .iter()
+            .find(|run| run.run.id() == worker)
+            .expect("worker remains registered during session reconciliation");
+        assert_eq!(
+            gap_run.run.session_state().session_id.as_deref(),
+            Some(original_session.as_str()),
+            "the fixture must keep the old session ID visible until delayed get_state reconciliation"
+        );
+        assert_eq!(
+            gap_run.run.session_replacement_generation(),
+            1,
+            "accepted replacement must invalidate stale autonomous decisions before session ID reconciliation"
+        );
+
+        tokio::time::timeout(Duration::from_secs(12), supervision_task)
+            .await
+            .expect("session-race supervision deadline")
+            .expect("session-race supervision join");
+        let snapshot = coordinator
+            .snapshots()
+            .await
+            .into_iter()
+            .find(|snapshot| snapshot.id == id)
+            .expect("session-race terminal snapshot");
+        assert_eq!(
+            snapshot.status,
+            SupervisionStatus::Completed,
+            "{snapshot:?}"
+        );
+        let decision = snapshot
+            .last_decision
+            .as_deref()
+            .expect("session-race last decision");
+        assert!(decision.contains("changed Pi sessions"), "{decision}");
+        assert!(
+            !fixture.root.join("workflow-worker-prompts.log").exists(),
+            "a decision based on the previous Pi session must not send into the replacement session"
+        );
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let hydration = manager
+                    .hydrate()
+                    .await
+                    .expect("eventual switched-session hydration");
+                let current = hydration
+                    .runs
+                    .iter()
+                    .find(|run| run.run.id() == worker)
+                    .and_then(|run| run.run.session_state().session_id.as_deref());
+                if current.is_some_and(|session_id| session_id != original_session) {
+                    break;
+                }
+                match runtime_changes.recv().await {
+                    Ok(()) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(broadcast::error::RecvError::Closed) => {
+                        panic!("runtime stream closed before delayed session reconciliation")
+                    }
+                }
+            }
+        })
+        .await
+        .expect("delayed session reconciliation deadline");
+
+        manager
+            .shutdown()
+            .await
+            .expect("shutdown session-race manager");
+    }
+
+    #[tokio::test]
+    async fn supervision_skips_stale_send_after_newer_manual_result_already_settled() {
+        let fixture = WorkflowFakePiFixture::new("supervision-newer-result-race");
+        let environment = fixture.initialize_git_repository();
+        let limits = RuntimeLimits {
+            max_live_runs: 3,
+            startup_rpc_deadline_ms: 2_000,
+            ..RuntimeLimits::default()
+        };
+        let manager = spawn_runtime_manager(limits).expect("newer-result runtime manager");
+        let project =
+            ProjectBinding::register(&fixture.root).expect("register newer-result project");
+        let base = inspect_worktree_base(project.canonical_root(), &environment, limits)
+            .await
+            .expect("inspect newer-result Git base");
+        let mut launch = PiLaunchSpec::new(
+            environment.pi_executable().to_path_buf(),
+            project.canonical_root(),
+            ProjectTrustPolicy::Inherit,
+        );
+        launch.session = SessionLaunch::NewWithId(PiSessionId::new());
+        let worker = manager
+            .start_run(RunStartSpec {
+                project_id: project.id(),
+                execution_isolation: ExecutionIsolation::LocalCheckout,
+                worktree: None,
+                launch: launch
+                    .resolve()
+                    .expect("resolve newer-result worker launch"),
+                environment: environment.clone(),
+            })
+            .await
+            .expect("start newer-result worker");
+        wait_supervisor_ready(&manager, limits, worker)
+            .await
+            .expect("newer-result worker ready");
+
+        let coordinator = SupervisionCoordinator::new(limits);
+        let id = SupervisionId::new();
+        let stop = coordinator
+            .insert(SupervisionSnapshot::new(
+                id,
+                vec![project.id()],
+                project.id(),
+                None,
+                None,
+                None,
+                Some(1),
+            ))
+            .await
+            .expect("insert newer-result supervision");
+        let context = SupervisionRuntimeContext {
+            manager: manager.clone(),
+            limits,
+            launch_cleanup_gate: Arc::new(Mutex::new(())),
+            worktrees: Arc::new(Mutex::new(WorktreeRegistry::ephemeral(limits))),
+            coordinator: coordinator.clone(),
+        };
+        let supervision_task = tokio::spawn(run_supervision(
+            context,
+            SupervisionPlan {
+                id,
+                project: project.clone(),
+                project_ids: HashSet::from([project.id()]),
+                environment,
+                base,
+                selection: LaunchSelection {
+                    context_files: ContextFilesPolicy::Disabled,
+                    extension_discovery: ExtensionDiscoveryPolicy::Disabled,
+                    provider: None,
+                    model: None,
+                    thinking: None,
+                },
+                prompt_templates: vec!["RACE_TEST_DELAY".to_owned()],
+                max_cycles: Some(1),
+            },
+            stop,
+        ));
+
+        wait_for_supervisor_turn_started(&coordinator, &manager, id).await;
+        let mut runtime_changes = manager.subscribe_state_changes();
+        submit_text_prompt(&manager, worker, "slow manual takeover")
+            .await
+            .expect("start manual takeover that will settle before supervisor reply");
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let hydration = manager
+                    .hydrate()
+                    .await
+                    .expect("newer-result worker hydration");
+                let run = hydration
+                    .runs
+                    .iter()
+                    .find(|run| run.run.id() == worker)
+                    .expect("newer-result worker remains live");
+                if run_is_idle_actionable(run) && run.run.assistant_message_generation() >= 1 {
+                    break;
+                }
+                match runtime_changes.recv().await {
+                    Ok(()) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(broadcast::error::RecvError::Closed) => {
+                        panic!("runtime stream closed before manual takeover settled")
+                    }
+                }
+            }
+        })
+        .await
+        .expect("manual takeover settlement deadline");
+
+        tokio::time::timeout(Duration::from_secs(12), supervision_task)
+            .await
+            .expect("newer-result supervision deadline")
+            .expect("newer-result supervision join");
+        let snapshot = coordinator
+            .snapshots()
+            .await
+            .into_iter()
+            .find(|snapshot| snapshot.id == id)
+            .expect("newer-result terminal snapshot");
+        assert_eq!(
+            snapshot.status,
+            SupervisionStatus::Completed,
+            "{snapshot:?}"
+        );
+        let decision = snapshot
+            .last_decision
+            .as_deref()
+            .expect("newer-result last decision");
+        assert!(decision.contains("newer assistant result"), "{decision}");
+
+        let prompts = fs::read_to_string(fixture.root.join("workflow-worker-prompts.log"))
+            .expect("read newer-result worker prompt audit");
+        assert_eq!(
+            prompts.lines().collect::<Vec<_>>(),
+            ["slow manual takeover"],
+            "a supervisor decision based on the older idle generation must not append another task"
+        );
+
+        manager
+            .shutdown()
+            .await
+            .expect("shutdown newer-result manager");
+    }
+
+    #[tokio::test]
+    async fn stopping_supervision_during_supervisor_turn_prevents_worker_directives() {
+        let fixture = WorkflowFakePiFixture::new("supervision-user-stop-race");
+        let environment = fixture.initialize_git_repository();
+        let limits = RuntimeLimits {
+            max_live_runs: 3,
+            startup_rpc_deadline_ms: 2_000,
+            ..RuntimeLimits::default()
+        };
+        let manager = spawn_runtime_manager(limits).expect("user-stop-race runtime manager");
+        let project =
+            ProjectBinding::register(&fixture.root).expect("register user-stop-race project");
+        let base = inspect_worktree_base(project.canonical_root(), &environment, limits)
+            .await
+            .expect("inspect user-stop-race Git base");
+        let mut launch = PiLaunchSpec::new(
+            environment.pi_executable().to_path_buf(),
+            project.canonical_root(),
+            ProjectTrustPolicy::Inherit,
+        );
+        launch.session = SessionLaunch::NewWithId(PiSessionId::new());
+        let worker = manager
+            .start_run(RunStartSpec {
+                project_id: project.id(),
+                execution_isolation: ExecutionIsolation::LocalCheckout,
+                worktree: None,
+                launch: launch
+                    .resolve()
+                    .expect("resolve user-stop-race worker launch"),
+                environment: environment.clone(),
+            })
+            .await
+            .expect("start user-stop-race worker");
+        wait_supervisor_ready(&manager, limits, worker)
+            .await
+            .expect("user-stop-race worker ready");
+
+        let coordinator = SupervisionCoordinator::new(limits);
+        let id = SupervisionId::new();
+        let stop = coordinator
+            .insert(SupervisionSnapshot::new(
+                id,
+                vec![project.id()],
+                project.id(),
+                None,
+                None,
+                None,
+                None,
+            ))
+            .await
+            .expect("insert user-stop-race supervision");
+        let context = SupervisionRuntimeContext {
+            manager: manager.clone(),
+            limits,
+            launch_cleanup_gate: Arc::new(Mutex::new(())),
+            worktrees: Arc::new(Mutex::new(WorktreeRegistry::ephemeral(limits))),
+            coordinator: coordinator.clone(),
+        };
+        let supervision_task = tokio::spawn(run_supervision(
+            context,
+            SupervisionPlan {
+                id,
+                project: project.clone(),
+                project_ids: HashSet::from([project.id()]),
+                environment,
+                base,
+                selection: LaunchSelection {
+                    context_files: ContextFilesPolicy::Disabled,
+                    extension_discovery: ExtensionDiscoveryPolicy::Disabled,
+                    provider: None,
+                    model: None,
+                    thinking: None,
+                },
+                prompt_templates: vec!["RACE_TEST_DELAY".to_owned()],
+                max_cycles: None,
+            },
+            stop,
+        ));
+
+        wait_for_supervisor_turn_started(&coordinator, &manager, id).await;
+        coordinator
+            .request_stop(id)
+            .await
+            .expect("request supervision stop while supervisor is working");
+        tokio::time::timeout(Duration::from_secs(12), supervision_task)
+            .await
+            .expect("user-stop-race supervision deadline")
+            .expect("user-stop-race supervision join");
+        let snapshot = coordinator
+            .snapshots()
+            .await
+            .into_iter()
+            .find(|snapshot| snapshot.id == id)
+            .expect("user-stop-race terminal snapshot");
+        assert_eq!(snapshot.status, SupervisionStatus::Stopped, "{snapshot:?}");
+        assert_eq!(
+            snapshot.cycles, 0,
+            "a cancelled supervisor turn must not be counted as a completed decision"
+        );
+        assert!(
+            !fixture.root.join("workflow-worker-prompts.log").exists(),
+            "explicit supervision Stop must prevent pending autonomous worker directives"
+        );
+
+        manager
+            .shutdown()
+            .await
+            .expect("shutdown user-stop-race manager");
+    }
+
+    #[tokio::test]
+    async fn supervisor_stop_path_terminates_an_idle_target_run() {
+        let fixture = WorkflowFakePiFixture::new("supervision-stop-target");
+        let environment = fixture.environment();
+        let limits = RuntimeLimits {
+            max_live_runs: 2,
+            startup_rpc_deadline_ms: 2_000,
+            ..RuntimeLimits::default()
+        };
+        let manager = spawn_runtime_manager(limits).expect("supervision stop runtime manager");
+        let project = ProjectBinding::register(&fixture.root).expect("register stop project");
+        let mut launch = PiLaunchSpec::new(
+            environment.pi_executable().to_path_buf(),
+            project.canonical_root(),
+            ProjectTrustPolicy::Inherit,
+        );
+        launch.session = SessionLaunch::NewWithId(PiSessionId::new());
+        let worker = manager
+            .start_run(RunStartSpec {
+                project_id: project.id(),
+                execution_isolation: ExecutionIsolation::LocalCheckout,
+                worktree: None,
+                launch: launch.resolve().expect("resolve stop worker launch"),
+                environment,
+            })
+            .await
+            .expect("start stop worker");
+        wait_supervisor_ready(&manager, limits, worker)
+            .await
+            .expect("stop worker ready");
+
+        terminate_supervised_run(&manager, worker)
+            .await
+            .expect("supervisor stop target");
+        let hydration = manager.hydrate().await.expect("stop target hydration");
+        let stopped = hydration
+            .runs
+            .iter()
+            .find(|run| run.run.id() == worker)
+            .expect("stopped worker remains registered");
+        assert!(stopped.run.process_state().is_terminal());
+
+        manager.shutdown().await.expect("shutdown stop manager");
+    }
+
+    #[tokio::test]
+    async fn supervision_directs_idle_runs_across_multiple_projects_and_leaves_them_alive() {
+        let fixture = WorkflowFakePiFixture::new("supervision-integration");
+        let second_root = fixture.root.join("second-project");
+        fs::create_dir_all(&second_root).expect("create second supervised project");
+        fs::write(second_root.join("seed.txt"), "second supervised project\n")
+            .expect("write second project seed");
+        let environment = fixture.initialize_git_repository();
+        let limits = RuntimeLimits {
+            max_live_runs: 4,
+            startup_rpc_deadline_ms: 2_000,
+            ..RuntimeLimits::default()
+        };
+        let manager = spawn_runtime_manager(limits).expect("supervision runtime manager");
+        let first_project =
+            ProjectBinding::register(&fixture.root).expect("register supervision project");
+        let second_project =
+            ProjectBinding::register(&second_root).expect("register second supervision project");
+        let base = inspect_worktree_base(first_project.canonical_root(), &environment, limits)
+            .await
+            .expect("inspect supervision Git base");
+
+        let mut first_worker_launch = PiLaunchSpec::new(
+            environment.pi_executable().to_path_buf(),
+            first_project.canonical_root(),
+            ProjectTrustPolicy::Inherit,
+        );
+        first_worker_launch.session = SessionLaunch::NewWithId(PiSessionId::new());
+        let first_worker = manager
+            .start_run(RunStartSpec {
+                project_id: first_project.id(),
+                execution_isolation: ExecutionIsolation::LocalCheckout,
+                worktree: None,
+                launch: first_worker_launch
+                    .resolve()
+                    .expect("resolve first worker launch"),
+                environment: environment.clone(),
+            })
+            .await
+            .expect("start first ordinary worker run");
+        let mut second_worker_launch = PiLaunchSpec::new(
+            environment.pi_executable().to_path_buf(),
+            second_project.canonical_root(),
+            ProjectTrustPolicy::Inherit,
+        );
+        second_worker_launch.session = SessionLaunch::NewWithId(PiSessionId::new());
+        let second_worker = manager
+            .start_run(RunStartSpec {
+                project_id: second_project.id(),
+                execution_isolation: ExecutionIsolation::LocalCheckout,
+                worktree: None,
+                launch: second_worker_launch
+                    .resolve()
+                    .expect("resolve second worker launch"),
+                environment: environment.clone(),
+            })
+            .await
+            .expect("start second ordinary worker run");
+        wait_supervisor_ready(&manager, limits, first_worker)
+            .await
+            .expect("first ordinary worker ready");
+        wait_supervisor_ready(&manager, limits, second_worker)
+            .await
+            .expect("second ordinary worker ready");
+
+        submit_text_prompt(&manager, first_worker, "first initial task")
+            .await
+            .expect("submit first worker prompt");
+        submit_text_prompt(&manager, second_worker, "second initial task")
+            .await
+            .expect("submit second worker prompt");
+        let mut worker_changes = manager.subscribe_state_changes();
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let hydration = manager
+                    .hydrate()
+                    .await
+                    .expect("worker completion hydration");
+                let first = hydration
+                    .runs
+                    .iter()
+                    .find(|run| run.run.id() == first_worker)
+                    .expect("first ordinary worker");
+                let second = hydration
+                    .runs
+                    .iter()
+                    .find(|run| run.run.id() == second_worker)
+                    .expect("second ordinary worker");
+                if run_is_idle_actionable(first)
+                    && run_is_idle_actionable(second)
+                    && first.run.assistant_message_generation() >= 1
+                    && second.run.assistant_message_generation() >= 1
+                {
+                    break;
+                }
+                match worker_changes.recv().await {
+                    Ok(()) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(broadcast::error::RecvError::Closed) => {
+                        panic!("runtime state stream closed before worker completion")
+                    }
+                }
+            }
+        })
+        .await
+        .expect("worker initial task completion deadline");
+
+        let coordinator = SupervisionCoordinator::new(limits);
+        let id = SupervisionId::new();
+        let stop = coordinator
+            .insert(SupervisionSnapshot::new(
+                id,
+                vec![first_project.id(), second_project.id()],
+                first_project.id(),
+                None,
+                None,
+                None,
+                Some(1),
             ))
             .await
             .expect("insert supervision session");
@@ -884,11 +2307,13 @@ mod tests {
             context,
             SupervisionPlan {
                 id,
-                project: project.clone(),
+                project: first_project.clone(),
+                project_ids: HashSet::from([first_project.id(), second_project.id()]),
                 environment: environment.clone(),
                 base,
                 selection,
-                max_cycles: 1,
+                prompt_templates: vec!["Improve testing after audits complete".to_owned()],
+                max_cycles: Some(1),
             },
             stop,
         ));
@@ -900,23 +2325,19 @@ mod tests {
                     .iter()
                     .find(|snapshot| snapshot.id == id)
                     .expect("supervision snapshot");
-                if snapshot.status == SupervisionStatus::Running && snapshot.watched_runs == 1 {
+                if snapshot.status == SupervisionStatus::Running && snapshot.watched_runs == 2 {
                     break;
                 }
                 match changed.recv().await {
                     Ok(()) | Err(broadcast::error::RecvError::Lagged(_)) => {}
                     Err(broadcast::error::RecvError::Closed) => {
-                        panic!("supervision change stream closed before worker baseline")
+                        panic!("supervision change stream closed before worker observation")
                     }
                 }
             }
         })
         .await
-        .expect("supervision baseline deadline");
-
-        submit_text_prompt(&manager, worker_run, "worker initial task")
-            .await
-            .expect("submit ordinary worker prompt");
+        .expect("supervision observation deadline");
 
         tokio::time::timeout(Duration::from_secs(15), supervision_task)
             .await
@@ -936,29 +2357,486 @@ mod tests {
         assert_eq!(snapshot.cycles, 1);
         assert!(snapshot.supervisor_run_id.is_none());
         assert!(snapshot.error.is_none());
+        let decision = snapshot
+            .last_decision
+            .as_deref()
+            .expect("last supervisor decision");
+        assert!(decision.contains("Sent next task to run"), "{decision}");
+        assert!(decision.contains("supervised continuation"), "{decision}");
 
         let hydration = manager
             .hydrate()
             .await
             .expect("worker hydration after supervision");
-        let worker = hydration
+        let first = hydration
             .runs
             .iter()
-            .find(|run| run.run.id() == worker_run)
-            .expect("ordinary worker remains registered");
-        assert_eq!(worker.run.process_state(), ProcessState::Ready);
+            .find(|run| run.run.id() == first_worker)
+            .expect("first worker remains registered");
+        let second = hydration
+            .runs
+            .iter()
+            .find(|run| run.run.id() == second_worker)
+            .expect("second worker remains registered");
+        assert_eq!(first.run.process_state(), ProcessState::Ready);
+        assert_eq!(second.run.process_state(), ProcessState::Ready);
 
-        let worker_prompts = fs::read_to_string(fixture.root.join("workflow-worker-prompts.log"))
-            .expect("read worker prompt audit");
+        let first_prompts = fs::read_to_string(fixture.root.join("workflow-worker-prompts.log"))
+            .expect("read first worker prompt audit");
+        let second_prompts = fs::read_to_string(second_root.join("workflow-worker-prompts.log"))
+            .expect("read second worker prompt audit");
         assert_eq!(
-            worker_prompts.lines().collect::<Vec<_>>(),
-            ["worker initial task", "supervised continuation"],
-            "independent supervisor must send a second prompt into the existing normal run"
+            first_prompts.lines().collect::<Vec<_>>(),
+            ["first initial task", "supervised continuation"],
+            "supervisor must continue the idle run in the first project"
         );
+        assert_eq!(
+            second_prompts.lines().collect::<Vec<_>>(),
+            ["second initial task", "supervised continuation"],
+            "supervisor must continue the idle run in the second project"
+        );
+        assert_no_session_stats_probes(&fixture.root);
+        assert_no_session_stats_probes(&fixture.worktree_parent());
 
         manager
             .shutdown()
             .await
             .expect("shutdown supervision manager");
+    }
+
+    #[tokio::test]
+    async fn continuous_supervision_reacts_to_one_new_result_then_noop_does_not_self_wake() {
+        let fixture = WorkflowFakePiFixture::new("supervision-continuous-no-poll");
+        let environment = fixture.initialize_git_repository();
+        let limits = RuntimeLimits {
+            max_live_runs: 3,
+            startup_rpc_deadline_ms: 2_000,
+            ..RuntimeLimits::default()
+        };
+        let manager = spawn_runtime_manager(limits).expect("continuous supervision manager");
+        let project = ProjectBinding::register(&fixture.root).expect("register continuous project");
+        let base = inspect_worktree_base(project.canonical_root(), &environment, limits)
+            .await
+            .expect("inspect continuous supervision Git base");
+
+        let mut launch = PiLaunchSpec::new(
+            environment.pi_executable().to_path_buf(),
+            project.canonical_root(),
+            ProjectTrustPolicy::Inherit,
+        );
+        launch.session = SessionLaunch::NewWithId(PiSessionId::new());
+        let worker = manager
+            .start_run(RunStartSpec {
+                project_id: project.id(),
+                execution_isolation: ExecutionIsolation::LocalCheckout,
+                worktree: None,
+                launch: launch.resolve().expect("resolve continuous worker launch"),
+                environment: environment.clone(),
+            })
+            .await
+            .expect("start continuous worker");
+        wait_supervisor_ready(&manager, limits, worker)
+            .await
+            .expect("continuous worker ready");
+        submit_text_prompt(&manager, worker, "continuous initial task")
+            .await
+            .expect("submit continuous initial task");
+
+        let mut runtime_changes = manager.subscribe_state_changes();
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let hydration = manager
+                    .hydrate()
+                    .await
+                    .expect("continuous worker hydration");
+                let run = hydration
+                    .runs
+                    .iter()
+                    .find(|run| run.run.id() == worker)
+                    .expect("continuous worker");
+                if run_is_idle_actionable(run) && run.run.assistant_message_generation() >= 1 {
+                    break;
+                }
+                match runtime_changes.recv().await {
+                    Ok(()) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(broadcast::error::RecvError::Closed) => {
+                        panic!("runtime state stream closed before continuous worker settled")
+                    }
+                }
+            }
+        })
+        .await
+        .expect("continuous worker initial settlement deadline");
+
+        let coordinator = SupervisionCoordinator::new(limits);
+        let id = SupervisionId::new();
+        let stop = coordinator
+            .insert(SupervisionSnapshot::new(
+                id,
+                vec![project.id()],
+                project.id(),
+                None,
+                None,
+                None,
+                None,
+            ))
+            .await
+            .expect("insert continuous supervision");
+        let mut supervision_changes = coordinator.subscribe();
+        let context = SupervisionRuntimeContext {
+            manager: manager.clone(),
+            limits,
+            launch_cleanup_gate: Arc::new(Mutex::new(())),
+            worktrees: Arc::new(Mutex::new(WorktreeRegistry::ephemeral(limits))),
+            coordinator: coordinator.clone(),
+        };
+        let supervision_task = tokio::spawn(run_supervision(
+            context,
+            SupervisionPlan {
+                id,
+                project: project.clone(),
+                project_ids: HashSet::from([project.id()]),
+                environment,
+                base,
+                selection: LaunchSelection {
+                    context_files: ContextFilesPolicy::Disabled,
+                    extension_discovery: ExtensionDiscoveryPolicy::Disabled,
+                    provider: None,
+                    model: None,
+                    thinking: None,
+                },
+                prompt_templates: Vec::new(),
+                max_cycles: None,
+            },
+            stop,
+        ));
+
+        tokio::time::timeout(Duration::from_secs(12), async {
+            loop {
+                let snapshots = coordinator.snapshots().await;
+                let snapshot = snapshots
+                    .iter()
+                    .find(|snapshot| snapshot.id == id)
+                    .expect("continuous supervision snapshot");
+                if snapshot.cycles == 2
+                    && snapshot.last_decision.as_deref().is_some_and(|decision| {
+                        decision.contains("No intervention for 1 newly idle run")
+                    })
+                {
+                    break;
+                }
+                match supervision_changes.recv().await {
+                    Ok(()) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(broadcast::error::RecvError::Closed) => {
+                        panic!("supervision stream closed before deliberate no-op cycle")
+                    }
+                }
+            }
+        })
+        .await
+        .expect("continuous supervision second-cycle deadline");
+
+        let state_probe = manager
+            .request(worker, RpcRequest::new(RpcCommand::GetState))
+            .await
+            .expect("inject unrelated runtime wake");
+        assert!(state_probe.response.success);
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        let after_wake = coordinator
+            .snapshots()
+            .await
+            .into_iter()
+            .find(|snapshot| snapshot.id == id)
+            .expect("continuous snapshot after unrelated wake");
+        assert_eq!(
+            after_wake.cycles, 2,
+            "unchanged assistant generation must not retrigger a no-op supervision cycle"
+        );
+        assert_eq!(after_wake.status, SupervisionStatus::Running);
+
+        coordinator
+            .request_stop(id)
+            .await
+            .expect("stop continuous supervision");
+        tokio::time::timeout(Duration::from_secs(8), supervision_task)
+            .await
+            .expect("continuous supervision stop deadline")
+            .expect("continuous supervision task join");
+        let stopped = coordinator
+            .snapshots()
+            .await
+            .into_iter()
+            .find(|snapshot| snapshot.id == id)
+            .expect("stopped continuous supervision snapshot");
+        assert_eq!(stopped.status, SupervisionStatus::Stopped, "{stopped:?}");
+        assert_eq!(stopped.cycles, 2);
+
+        let prompts = fs::read_to_string(fixture.root.join("workflow-worker-prompts.log"))
+            .expect("read continuous worker prompts");
+        assert_eq!(
+            prompts.lines().collect::<Vec<_>>(),
+            ["continuous initial task", "supervised continuation"],
+            "the deliberate no-op cycle must not inject another worker prompt"
+        );
+        assert_no_session_stats_probes(&fixture.root);
+        assert_no_session_stats_probes(&fixture.worktree_parent());
+
+        manager
+            .shutdown()
+            .await
+            .expect("shutdown continuous supervision manager");
+    }
+
+    #[tokio::test]
+    async fn stop_requested_before_supervisor_launch_is_stopped_not_failed() {
+        let fixture = WorkflowFakePiFixture::new("supervision-stop-before-launch");
+        let environment = fixture.initialize_git_repository();
+        let limits = RuntimeLimits {
+            max_live_runs: 2,
+            startup_rpc_deadline_ms: 2_000,
+            ..RuntimeLimits::default()
+        };
+        let manager = spawn_runtime_manager(limits).expect("prelaunch-stop runtime manager");
+        let project =
+            ProjectBinding::register(&fixture.root).expect("register prelaunch-stop project");
+        let base = inspect_worktree_base(project.canonical_root(), &environment, limits)
+            .await
+            .expect("inspect prelaunch-stop Git base");
+        let coordinator = SupervisionCoordinator::new(limits);
+        let id = SupervisionId::new();
+        let stop = coordinator
+            .insert(SupervisionSnapshot::new(
+                id,
+                vec![project.id()],
+                project.id(),
+                None,
+                None,
+                None,
+                None,
+            ))
+            .await
+            .expect("insert prelaunch-stop supervision");
+        coordinator
+            .request_stop(id)
+            .await
+            .expect("request stop before supervisor launch");
+
+        run_supervision(
+            SupervisionRuntimeContext {
+                manager: manager.clone(),
+                limits,
+                launch_cleanup_gate: Arc::new(Mutex::new(())),
+                worktrees: Arc::new(Mutex::new(WorktreeRegistry::ephemeral(limits))),
+                coordinator: coordinator.clone(),
+            },
+            SupervisionPlan {
+                id,
+                project: project.clone(),
+                project_ids: HashSet::from([project.id()]),
+                environment,
+                base,
+                selection: LaunchSelection {
+                    context_files: ContextFilesPolicy::Disabled,
+                    extension_discovery: ExtensionDiscoveryPolicy::Disabled,
+                    provider: None,
+                    model: None,
+                    thinking: None,
+                },
+                prompt_templates: Vec::new(),
+                max_cycles: None,
+            },
+            stop,
+        )
+        .await;
+
+        let snapshot = coordinator
+            .snapshots()
+            .await
+            .into_iter()
+            .find(|snapshot| snapshot.id == id)
+            .expect("prelaunch-stop snapshot");
+        assert_eq!(snapshot.status, SupervisionStatus::Stopped, "{snapshot:?}");
+        assert!(snapshot.supervisor_run_id.is_none());
+        assert!(snapshot.error.is_none());
+        assert_eq!(
+            manager
+                .capacity()
+                .await
+                .expect("prelaunch-stop capacity")
+                .active_runs,
+            0
+        );
+
+        manager
+            .shutdown()
+            .await
+            .expect("shutdown prelaunch-stop manager");
+    }
+
+    #[tokio::test]
+    async fn stop_during_supervisor_readiness_terminates_exact_starting_run() {
+        let fixture = WorkflowFakePiFixture::new("supervision-stop-during-startup");
+        fs::write(
+            fixture.root.join("workflow-delay-supervisor-startup"),
+            "delay supervisor get_state\n",
+        )
+        .expect("write delayed supervisor startup marker");
+        let environment = fixture.initialize_git_repository();
+        let limits = RuntimeLimits {
+            max_live_runs: 2,
+            startup_rpc_deadline_ms: 2_000,
+            ..RuntimeLimits::default()
+        };
+        let manager = spawn_runtime_manager(limits).expect("startup-stop runtime manager");
+        let project =
+            ProjectBinding::register(&fixture.root).expect("register startup-stop project");
+        let base = inspect_worktree_base(project.canonical_root(), &environment, limits)
+            .await
+            .expect("inspect startup-stop Git base");
+        let coordinator = SupervisionCoordinator::new(limits);
+        let id = SupervisionId::new();
+        let stop = coordinator
+            .insert(SupervisionSnapshot::new(
+                id,
+                vec![project.id()],
+                project.id(),
+                None,
+                None,
+                None,
+                None,
+            ))
+            .await
+            .expect("insert startup-stop supervision");
+        let mut changed = coordinator.subscribe();
+        let mut runtime_changes = manager.subscribe_state_changes();
+        let supervision_task = tokio::spawn(run_supervision(
+            SupervisionRuntimeContext {
+                manager: manager.clone(),
+                limits,
+                launch_cleanup_gate: Arc::new(Mutex::new(())),
+                worktrees: Arc::new(Mutex::new(WorktreeRegistry::ephemeral(limits))),
+                coordinator: coordinator.clone(),
+            },
+            SupervisionPlan {
+                id,
+                project: project.clone(),
+                project_ids: HashSet::from([project.id()]),
+                environment,
+                base,
+                selection: LaunchSelection {
+                    context_files: ContextFilesPolicy::Disabled,
+                    extension_discovery: ExtensionDiscoveryPolicy::Disabled,
+                    provider: None,
+                    model: None,
+                    thinking: None,
+                },
+                prompt_templates: Vec::new(),
+                max_cycles: None,
+            },
+            stop,
+        ));
+
+        let supervisor_run = tokio::time::timeout(Duration::from_secs(12), async {
+            loop {
+                let hydration = manager
+                    .hydrate()
+                    .await
+                    .expect("startup-stop hydration while launching");
+                if let Some(run) = hydration
+                    .runs
+                    .iter()
+                    .find(|run| !run.run.process_state().is_terminal())
+                {
+                    return run.run.id();
+                }
+                match runtime_changes.recv().await {
+                    Ok(()) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(broadcast::error::RecvError::Closed) => {
+                        panic!("runtime stream closed before supervisor child was registered")
+                    }
+                }
+            }
+        })
+        .await
+        .expect("supervisor child creation deadline");
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let snapshot = coordinator
+                    .snapshots()
+                    .await
+                    .into_iter()
+                    .find(|snapshot| snapshot.id == id)
+                    .expect("startup-stop supervision snapshot");
+                if snapshot.supervisor_run_id == Some(supervisor_run) {
+                    break;
+                }
+                match changed.recv().await {
+                    Ok(()) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(broadcast::error::RecvError::Closed) => {
+                        panic!("supervision stream closed before starting RunId was recorded")
+                    }
+                }
+            }
+        })
+        .await
+        .expect("starting supervisor ownership-record deadline");
+
+        let hydration = manager
+            .hydrate()
+            .await
+            .expect("startup-stop starting hydration");
+        let starting = hydration
+            .runs
+            .iter()
+            .find(|run| run.run.id() == supervisor_run)
+            .expect("starting supervisor run");
+        assert_eq!(starting.run.process_state(), ProcessState::Starting);
+
+        coordinator
+            .request_stop(id)
+            .await
+            .expect("request stop during supervisor readiness");
+        tokio::time::timeout(Duration::from_secs(3), supervision_task)
+            .await
+            .expect("startup-stop supervision deadline")
+            .expect("startup-stop supervision join");
+
+        let snapshot = coordinator
+            .snapshots()
+            .await
+            .into_iter()
+            .find(|snapshot| snapshot.id == id)
+            .expect("terminal startup-stop snapshot");
+        assert_eq!(snapshot.status, SupervisionStatus::Stopped, "{snapshot:?}");
+        assert!(snapshot.supervisor_run_id.is_none());
+        assert!(snapshot.error.is_none());
+
+        let hydration = manager
+            .hydrate()
+            .await
+            .expect("startup-stop terminal hydration");
+        let terminated = hydration
+            .runs
+            .iter()
+            .find(|run| run.run.id() == supervisor_run)
+            .expect("terminated supervisor run remains retained");
+        assert!(
+            terminated.run.process_state().is_terminal(),
+            "{terminated:?}"
+        );
+        assert_eq!(
+            manager
+                .capacity()
+                .await
+                .expect("startup-stop final capacity")
+                .active_runs,
+            0
+        );
+
+        manager
+            .shutdown()
+            .await
+            .expect("shutdown startup-stop manager");
     }
 }

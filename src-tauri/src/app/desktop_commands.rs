@@ -117,8 +117,139 @@ pub(super) struct PickDirectoryRequest {
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub(super) struct RunBashRequest {
+    run_id: RunId,
+    command: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct DesktopBashResult {
+    output: String,
+    exit_code: i64,
+    cancelled: bool,
+    truncated: bool,
+    full_output_path: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(super) struct ProbeProjectWorktreeRequest {
     project_path: PathBuf,
+}
+
+#[tauri::command]
+pub(super) async fn runtime_export_session_html(
+    runtime: tauri::State<'_, DesktopRuntime>,
+    request: RunControlRequest,
+) -> Result<PathBuf, String> {
+    let completion = runtime
+        .manager
+        .request(
+            request.run_id,
+            RpcRequest::new(RpcCommand::ExportHtml { output_path: None }),
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+    if !completion.response.success {
+        return Err(completion
+            .response
+            .error
+            .unwrap_or_else(|| "Pi rejected session HTML export".to_owned()));
+    }
+    let path = completion
+        .response
+        .data
+        .as_ref()
+        .and_then(|data| data.get("path"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|path| !path.is_empty())
+        .ok_or_else(|| "Pi returned no exported HTML path".to_owned())?;
+    if path.len() > runtime.limits.max_runtime_state_bytes_per_run {
+        return Err(format!(
+            "Pi export path uses {} bytes, exceeding path limit {}",
+            path.len(),
+            runtime.limits.max_runtime_state_bytes_per_run
+        ));
+    }
+    Ok(PathBuf::from(path))
+}
+
+#[tauri::command]
+pub(super) async fn runtime_run_bash(
+    runtime: tauri::State<'_, DesktopRuntime>,
+    request: RunBashRequest,
+) -> Result<DesktopBashResult, String> {
+    let command = request.command.trim();
+    if command.is_empty() {
+        return Err("command cannot be empty".to_owned());
+    }
+    if command.len() > runtime.limits.max_draft_bytes_per_session {
+        return Err(format!(
+            "command uses {} bytes, exceeding command limit {}",
+            command.len(),
+            runtime.limits.max_draft_bytes_per_session
+        ));
+    }
+    let completion = runtime
+        .manager
+        .request(
+            request.run_id,
+            RpcRequest::new(RpcCommand::Bash {
+                command: command.to_owned(),
+                exclude_from_context: Some(true),
+            }),
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+    let result = completion
+        .response
+        .bash_result()
+        .map_err(|error| error.to_string())?;
+    let (output, output_bounded) =
+        bounded_utf8_tail(&result.output, runtime.limits.max_tool_preview_bytes);
+    let full_output_path = result.full_output_path.and_then(|path| {
+        (path.as_os_str().to_string_lossy().len() <= runtime.limits.max_runtime_state_bytes_per_run)
+            .then_some(path)
+    });
+    Ok(DesktopBashResult {
+        output,
+        exit_code: result.exit_code,
+        cancelled: result.cancelled,
+        truncated: result.truncated || output_bounded,
+        full_output_path,
+    })
+}
+
+#[tauri::command]
+pub(super) async fn runtime_abort_bash(
+    runtime: tauri::State<'_, DesktopRuntime>,
+    request: RunControlRequest,
+) -> Result<(), String> {
+    let completion = runtime
+        .manager
+        .request(request.run_id, RpcRequest::new(RpcCommand::AbortBash))
+        .await
+        .map_err(|error| error.to_string())?;
+    if completion.response.success {
+        Ok(())
+    } else {
+        Err(completion
+            .response
+            .error
+            .unwrap_or_else(|| "Pi rejected command cancellation".to_owned()))
+    }
+}
+
+fn bounded_utf8_tail(value: &str, limit: usize) -> (String, bool) {
+    if value.len() <= limit {
+        return (value.to_owned(), false);
+    }
+    let mut start = value.len().saturating_sub(limit);
+    while start < value.len() && !value.is_char_boundary(start) {
+        start += 1;
+    }
+    (value[start..].to_owned(), true)
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -1619,6 +1750,7 @@ pub(super) async fn runtime_read_session_history(
         .canonicalize()
         .map_err(|error| format!("could not resolve Pi session file: {error}"))?;
     let project_root = run.run.execution_root().clone();
+    let latest_read = request.cursor.is_none();
     let cursor = request.cursor;
     let limits = runtime.limits;
     let read_path = canonical_session_path.clone();
@@ -1663,6 +1795,24 @@ pub(super) async fn runtime_read_session_history(
             "Pi session changed while history was loading; retry against current session"
                 .to_owned(),
         );
+    }
+    // The latest cold-history page is also the bridge into Pi's live
+    // append-only session synchronization. Seed only after the disk page has
+    // been proven to belong to the still-active session, then let the manager
+    // queue one `get_entries(since)` catch-up to close the append race between
+    // the file snapshot and this seed. Older history pages never rewind the
+    // live cursor.
+    if latest_read && let Some(append_cursor) = page.append_cursor.clone() {
+        runtime
+            .manager
+            .bootstrap_session_sync(
+                request.run_id,
+                session_id,
+                append_cursor,
+                page.leaf_id.clone(),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
     }
     Ok(page)
 }
@@ -2560,6 +2710,38 @@ mod tests {
             request.default_path,
             Some(PathBuf::from(r"C:\projects\pi-wizard"))
         );
+    }
+
+    #[test]
+    fn direct_bash_wire_shape_and_result_are_bounded_and_camel_case() {
+        let run_id = RunId::new();
+        let request: RunBashRequest = serde_json::from_value(json!({
+            "runId": run_id,
+            "command": "git status --short"
+        }))
+        .expect("deserialize direct Bash request");
+        assert_eq!(request.run_id, run_id);
+        assert_eq!(request.command, "git status --short");
+
+        let wire = serde_json::to_value(DesktopBashResult {
+            output: "ok".to_owned(),
+            exit_code: 0,
+            cancelled: false,
+            truncated: true,
+            full_output_path: Some(PathBuf::from("full-output.txt")),
+        })
+        .expect("serialize direct Bash result");
+        assert_eq!(wire["exitCode"], 0);
+        assert_eq!(wire["fullOutputPath"], "full-output.txt");
+        assert_eq!(wire["truncated"], true);
+        assert!(wire.get("exit_code").is_none());
+    }
+
+    #[test]
+    fn bounded_utf8_tail_preserves_character_boundaries() {
+        assert_eq!(bounded_utf8_tail("short", 8), ("short".to_owned(), false));
+        assert_eq!(bounded_utf8_tail("αβγ", 5), ("βγ".to_owned(), true));
+        assert_eq!(bounded_utf8_tail("abc", 0), (String::new(), true));
     }
 
     #[test]

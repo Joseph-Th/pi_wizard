@@ -163,6 +163,10 @@ pub struct RunRecord {
     started_unix_ms: u64,
     terminal_unix_ms: Option<u64>,
     change_revision: u64,
+    #[serde(skip)]
+    assistant_message_generation: u64,
+    #[serde(skip)]
+    session_replacement_generation: u64,
     process: ProcessState,
     agent_working: bool,
     compacting: bool,
@@ -218,6 +222,8 @@ impl RunRecord {
             started_unix_ms: current_unix_ms(),
             terminal_unix_ms: None,
             change_revision: 0,
+            assistant_message_generation: 0,
+            session_replacement_generation: 0,
             process: ProcessState::Starting,
             agent_working: false,
             compacting: false,
@@ -293,6 +299,26 @@ impl RunRecord {
     #[must_use]
     pub const fn change_revision(&self) -> u64 {
         self.change_revision
+    }
+
+    /// Monotonic backend-only generation for authoritative assistant
+    /// `message_end` events observed on this live run. This is intentionally
+    /// skipped from renderer serialization; orchestration owners use it to
+    /// detect completed model output without issuing Pi stats probes.
+    #[must_use]
+    pub const fn assistant_message_generation(&self) -> u64 {
+        self.assistant_message_generation
+    }
+
+    /// Monotonic backend-only generation for accepted Pi session replacement
+    /// commands. It advances as soon as Pi accepts new/switch/fork/clone,
+    /// before the follow-up `get_state` has established the replacement
+    /// session ID. Autonomous orchestration can therefore invalidate stale
+    /// decisions across the reconciliation gap without exposing another
+    /// renderer/session authority.
+    #[must_use]
+    pub const fn session_replacement_generation(&self) -> u64 {
+        self.session_replacement_generation
     }
 
     #[must_use]
@@ -435,6 +461,16 @@ impl RunRecord {
                 self.abort_requested = false;
                 self.retry_waiting = false;
                 self.summarization_retry_active = false;
+            }
+            RunMutation::AssistantMessageCompleted => {
+                self.require_process("assistant_message_completed", &[ProcessState::Ready])?;
+                self.assistant_message_generation =
+                    self.assistant_message_generation.saturating_add(1);
+            }
+            RunMutation::SessionReplacementAccepted => {
+                self.require_process("session_replacement_accepted", &[ProcessState::Ready])?;
+                self.session_replacement_generation =
+                    self.session_replacement_generation.saturating_add(1);
             }
             RunMutation::AutoRetryStarted => {
                 self.require_process("auto_retry_started", &[ProcessState::Ready])?;
@@ -605,6 +641,8 @@ pub enum RunMutation {
     ProcessReady,
     AgentStarted,
     AgentSettled,
+    AssistantMessageCompleted,
+    SessionReplacementAccepted,
     AutoRetryStarted,
     AutoRetryEnded,
     SummarizationRetryStarted,

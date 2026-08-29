@@ -121,8 +121,10 @@ let working = false;
 let assistantMessages = 0;
 let lastAssistantText = "";
 let supervisorTurns = 0;
-const sessionId = `workflow-${process.pid}`;
+let sessionId = `workflow-${process.pid}`;
+let delayNextStateAfterSwitch = false;
 const supervisorProcess = process.argv.includes("--no-context-files") && process.argv.includes("--no-extensions");
+const delayedSupervisorStartup = supervisorProcess && fs.existsSync("workflow-delay-supervisor-startup");
 
 function emit(value) {
   process.stdout.write(JSON.stringify(value) + "\n");
@@ -174,7 +176,14 @@ function state() {
 function handle(request) {
   switch (request.type) {
     case "get_state":
-      respond(request, state());
+      if (delayNextStateAfterSwitch) {
+        delayNextStateAfterSwitch = false;
+        setTimeout(() => respond(request, state()), 900);
+      } else if (delayedSupervisorStartup) {
+        setTimeout(() => respond(request, state()), 5_000);
+      } else {
+        respond(request, state());
+      }
       break;
     case "get_available_models":
       respond(request, {
@@ -192,6 +201,7 @@ function handle(request) {
       respond(request, {commands: []});
       break;
     case "get_session_stats":
+      fs.appendFileSync("workflow-session-stats.log", "probe\n");
       respond(request, {
         sessionFile: "",
         sessionId,
@@ -208,6 +218,37 @@ function handle(request) {
     case "get_last_assistant_text":
       respond(request, {text: lastAssistantText});
       break;
+    case "export_html":
+      respond(request, {path: "session-export.html"});
+      break;
+    case "bash":
+      if (request.command === "slow-bash") {
+        emit({type: "bash_execution_update", id: request.id, delta: "slow bash active"});
+        setTimeout(() => respond(request, {
+          output: "slow bash done",
+          exitCode: 0,
+          cancelled: false,
+          truncated: false,
+        }), 1_000);
+      } else {
+        respond(request, {
+          output: `fake output: ${request.command}`,
+          exitCode: 0,
+          cancelled: false,
+          truncated: false,
+        });
+      }
+      break;
+    case "abort_bash":
+      respond(request);
+      break;
+    case "switch_session":
+      sessionId = `workflow-switched-${process.pid}`;
+      assistantMessages = 0;
+      lastAssistantText = "";
+      delayNextStateAfterSwitch = true;
+      respond(request, {cancelled: false});
+      break;
     case "prompt":
       if (request.message === "reject this step") {
         reject(request, "fixture prompt rejection");
@@ -217,10 +258,17 @@ function handle(request) {
       working = true;
       emit({type: "agent_start"});
       if (supervisorProcess) {
-        const match = String(request.message).match(/runId=([0-9a-f-]{36}) status=idle/);
-        if (supervisorTurns === 0 && match) {
+        const matches = [...String(request.message).matchAll(/runId=([0-9a-f-]{36}) projectId=[0-9a-f-]{36} decisionRequired=true status=idle/g)];
+        const stopDuringBashRace = String(request.message).includes("STOP_DURING_BASH_RACE");
+        if (supervisorTurns === 0 && matches.length > 0) {
           lastAssistantText = JSON.stringify({
-            directives: [{runId: match[1], action: "send", message: "supervised continuation"}],
+            directives: matches.map((match) => stopDuringBashRace
+              ? {runId: match[1], action: "stop"}
+              : {
+                  runId: match[1],
+                  action: "send",
+                  message: "supervised continuation",
+                }),
           });
         } else {
           lastAssistantText = JSON.stringify({directives: []});
@@ -231,10 +279,23 @@ function handle(request) {
         lastAssistantText = `done: ${request.message}`;
       }
       setTimeout(() => {
+        emit({
+          type: "message_end",
+          message: {
+            role: "assistant",
+            content: [{type: "text", text: lastAssistantText}],
+          },
+        });
         assistantMessages += 1;
         working = false;
         emit({type: "agent_settled"});
-      }, String(request.message).startsWith("slow ") ? 200 : 20);
+      }, supervisorProcess && String(request.message).includes("RACE_TEST_DELAY")
+        ? 500
+        : String(request.message).startsWith("race ")
+          ? 1000
+          : String(request.message).startsWith("slow ")
+            ? 200
+            : 20);
       break;
     case "steer":
     case "follow_up":

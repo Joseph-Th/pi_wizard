@@ -296,6 +296,17 @@ impl LiveProjection {
             })
     }
 
+    /// `agent_settled` is the semantic end of Pi's model/tool turn. A normal
+    /// tool emits `tool_execution_end` first, but a cancelled/extension-owned
+    /// path can leave a preview behind if that display event is absent. Drop
+    /// only agent-owned tool previews here; direct Bash has an independent
+    /// request lifecycle and must remain visible until its own completion.
+    pub fn settle_agent_turn(&mut self) -> usize {
+        let abandoned = self.active_tools.len();
+        self.active_tools.clear();
+        abandoned
+    }
+
     #[must_use]
     pub fn assistant_block(&self, content_index: usize) -> Option<&AssistantContentBlock> {
         self.assistant_blocks.get(&content_index)

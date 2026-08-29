@@ -14,7 +14,7 @@ Pi Wizard provides these primary workflows:
 - **Needs Attention** — answer backend-owned Pi extension requests by exact run/request identity.
 - **Changes** — inspect bounded repository status and paged per-file diffs for a run's immutable execution root.
 - **Automation** — run finite saved prompt chains through ordinary Pi sessions under the same live-run ceiling as manual work.
-- **Supervision** — run one independent Pi supervisor session that may direct eligible project runs through validated Send/Steer/Follow-up actions.
+- **Supervision** — keep live runs moving across any selected set of projects with one independent Pi supervisor session. Idle results trigger bounded LLM decisions that may Send the next task, Steer/Follow up active work, or Stop a run that should not continue.
 
 ## Core model
 
@@ -40,13 +40,17 @@ The shared model picker is used by New Run, Automation, and Supervision.
 
 ## Session UX
 
-The session timeline is a user-facing activity feed, not a Pi protocol log.
+The run surface separates durable conversation from live execution detail.
 
-- User messages and assistant answers remain visible.
-- Pi reasoning/thinking is prominent and retained when Pi emits it.
-- Completed tool calls, shell commands, and raw tool output are not transcript rows.
-- While Pi is actively busy, the UI may show one compact human-readable activity line when it explains the wait.
-- Large history remains paged/windowed rather than resident in the renderer.
+- The upper **Conversation** pane shows user prompts and final assistant answers only. Prompts are preserved verbatim; final answers render sanitized Markdown with bounded syntax-highlighted code blocks.
+- The lower **Live activity** pane is always present and shows only current execution detail: model reasoning, active tool/output previews, direct command output, and the in-progress answer. Completed reasoning/answer text drops out after the turn settles so it is not duplicated above.
+- A persistent live-status label distinguishes an active model turn from idle state and shows a separate advisory when Pi still reports the turn active after an unusually quiet RPC interval.
+- Both panes auto-follow only while the user remains at the bottom; scrolling upward disables forced autoscroll.
+- Large persisted history remains paged/windowed rather than resident in the renderer.
+
+Supervision cards retain a bounded **Last decision** summary so continuous multi-project supervision remains inspectable without exposing the supervisor's raw protocol output.
+
+Run details also expose Pi-native session HTML export and a bounded cancellable one-shot command control. The command runs in the run's immutable execution root through Pi RPC, is excluded from model context, and is not a persistent terminal emulator. While direct Bash owns that execution root, Pi Wizard blocks overlapping model/session mutations and Close, keeps cancellation available from authoritative hydration after renderer reload, and lets continuous Supervision reconsider the run only after the command releases ownership.
 
 The composer maps directly to Pi semantics: **Send** when idle, **Steer** or **Follow up** while working, and **Stop** through the runtime manager's queue-preserving cancellation path.
 

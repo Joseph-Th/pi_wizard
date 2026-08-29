@@ -1072,6 +1072,11 @@ struct RuntimeManagerTask {
         HashMap<(RunId, String), oneshot::Sender<Result<ManagedRpcCompletion, String>>>,
     extension_waiters: HashMap<(RunId, String), oneshot::Sender<Result<(), String>>>,
     composer_submissions: HashMap<RunId, ActiveComposerSubmission>,
+    // An idle `prompt` can be accepted/written before Pi emits the
+    // authoritative `agent_start` event. Keep that narrow interval owned so
+    // another prompt or direct Bash command cannot concurrently mutate the
+    // same execution root while RunRecord still projects Idle.
+    pending_agent_starts: HashMap<RunId, RequestId>,
     pending_session_replacements: HashMap<RunId, PendingSessionReplacement>,
     draft_persistence: Option<DraftPersistenceWorkerHandle>,
     draft_events: mpsc::Receiver<DraftPersistenceEvent>,
@@ -1145,6 +1150,7 @@ fn spawn_runtime_manager_inner(
         request_waiters: HashMap::new(),
         extension_waiters: HashMap::new(),
         composer_submissions: HashMap::new(),
+        pending_agent_starts: HashMap::new(),
         pending_session_replacements: HashMap::new(),
         draft_events,
         draft_events_open: draft_persistence.is_some(),
@@ -1461,10 +1467,18 @@ impl RuntimeManagerTask {
             return;
         }
         if self.composer_submissions.contains_key(&run_id)
+            || self.pending_agent_starts.contains_key(&run_id)
             || self.pending_session_replacements.contains_key(&run_id)
         {
             let _ = reply.send(Err(
                 "wait for the pending composer or session operation before closing the run"
+                    .to_owned(),
+            ));
+            return;
+        }
+        if self.run_has_active_direct_bash(run_id) {
+            let _ = reply.send(Err(
+                "cancel or wait for the active direct Bash command before closing the run"
                     .to_owned(),
             ));
             return;
@@ -1737,6 +1751,7 @@ impl RuntimeManagerTask {
         self.closes.remove(&run_id);
         self.stops.remove(&run_id);
         self.composer_submissions.remove(&run_id);
+        self.pending_agent_starts.remove(&run_id);
         self.pending_session_replacements.remove(&run_id);
         self.request_waiters
             .retain(|(owner, _), _| *owner != run_id);
@@ -1909,6 +1924,12 @@ impl RuntimeManagerTask {
             )));
             return;
         }
+        if matches!(request.command, RpcCommand::Bash { .. })
+            && let Err(error) = self.validate_direct_bash_admission(run_id)
+        {
+            let _ = reply.send(Err(error));
+            return;
+        }
         if request.command.concurrency_class() == RpcConcurrencyClass::SessionReplacement
             && self.draft_persistence.is_some()
         {
@@ -1940,6 +1961,13 @@ impl RuntimeManagerTask {
     ) {
         if self.run_draft_restore_pending(run_id) {
             let _ = reply.send(Err("session draft restore is still pending".to_owned()));
+            return;
+        }
+        if self.run_has_active_direct_bash(run_id) {
+            let _ = reply.send(Err(
+                "a direct Bash command is active for this run; wait for it to finish or cancel it before replacing the Pi session"
+                    .to_owned(),
+            ));
             return;
         }
         let Some(session_id) = self.drafts.current_session_id(run_id).map(str::to_owned) else {
@@ -2194,6 +2222,13 @@ impl RuntimeManagerTask {
             let _ = reply.send(Err("session draft restore is still pending".to_owned()));
             return;
         }
+        if self.run_has_active_direct_bash(run_id) {
+            let _ = reply.send(Err(
+                "a direct Bash command is active for this run; wait for it to finish or cancel it before submitting model work"
+                    .to_owned(),
+            ));
+            return;
+        }
 
         let (availability, model_supports_images) = match self.store.get(run_id) {
             Some(run) => (
@@ -2315,6 +2350,40 @@ impl RuntimeManagerTask {
     }
 
     fn send_request(&mut self, run_id: RunId, request: RpcRequest) -> Result<(), String> {
+        if self.run_has_active_direct_bash(run_id) && request.command.blocked_by_direct_bash() {
+            return Err(format!(
+                "run {run_id} has an active direct Bash command; this Pi operation must wait until it finishes"
+            ));
+        }
+        if self.pending_agent_starts.contains_key(&run_id)
+            && request.command.blocked_by_direct_bash()
+        {
+            return Err(format!(
+                "run {run_id} has an idle prompt awaiting Pi agent_start; this Pi operation cannot overlap it"
+            ));
+        }
+        let starts_agent_turn = matches!(request.command, RpcCommand::Prompt { .. })
+            && self.store.get(run_id).is_some_and(|run| {
+                run.process_state() == ProcessState::Ready
+                    && run.activity_state() == ActivityState::Idle
+            });
+        if starts_agent_turn {
+            if self.pending_agent_starts.contains_key(&run_id) {
+                return Err(format!(
+                    "run {run_id} already has an idle prompt awaiting Pi agent_start"
+                ));
+            }
+            if self.run_has_active_direct_bash(run_id) {
+                return Err(format!(
+                    "run {run_id} has an active direct Bash command; model work cannot start until it finishes"
+                ));
+            }
+            if self.stops.contains_key(&run_id) {
+                return Err(format!(
+                    "run {run_id} has an active Stop transaction; model work cannot start"
+                ));
+            }
+        }
         let controller = self
             .controllers
             .get_mut(&run_id)
@@ -2330,8 +2399,58 @@ impl RuntimeManagerTask {
             .map_err(|error| error.to_string());
         if result.is_err() {
             controller.cancel_request(&request.id);
+        } else if starts_agent_turn {
+            self.pending_agent_starts.insert(run_id, request.id.clone());
         }
         result
+    }
+
+    fn run_has_active_direct_bash(&self, run_id: RunId) -> bool {
+        self.controllers
+            .get(&run_id)
+            .is_some_and(|controller| controller.live_projection().active_direct_bash_count() > 0)
+    }
+
+    fn validate_direct_bash_admission(&self, run_id: RunId) -> Result<(), String> {
+        let run = self
+            .store
+            .get(run_id)
+            .ok_or_else(|| format!("run {run_id} is not registered"))?;
+        if self.stops.contains_key(&run_id) {
+            return Err(format!(
+                "run {run_id} has an active Stop transaction; direct Bash cannot start"
+            ));
+        }
+        if self.composer_submissions.contains_key(&run_id)
+            || self.pending_agent_starts.contains_key(&run_id)
+        {
+            return Err(format!(
+                "run {run_id} has model work being submitted; direct Bash cannot start"
+            ));
+        }
+        if run.process_state() != ProcessState::Ready || run.activity_state() != ActivityState::Idle
+        {
+            return Err(format!(
+                "run {run_id} must be ready and idle before direct Bash can start"
+            ));
+        }
+        let queue = run.queue();
+        if queue.steering > 0
+            || queue.follow_up > 0
+            || run.pending_ui_requests() > 0
+            || run.is_retry_waiting()
+            || run.has_summarization_retry()
+        {
+            return Err(format!(
+                "run {run_id} has queued or pending Pi work; direct Bash cannot start"
+            ));
+        }
+        if self.run_has_active_direct_bash(run_id) {
+            return Err(format!(
+                "run {run_id} already has an active direct Bash command"
+            ));
+        }
+        Ok(())
     }
 
     fn bootstrap_session_sync_if_needed(
@@ -2510,6 +2629,13 @@ impl RuntimeManagerTask {
                 }
             }
             RunProcessEvent::RequestWriteFailed { request_id, detail } => {
+                if self
+                    .pending_agent_starts
+                    .get(&run_id)
+                    .is_some_and(|pending| pending == &request_id)
+                {
+                    self.pending_agent_starts.remove(&run_id);
+                }
                 if let Some(controller) = self.controllers.get_mut(&run_id) {
                     controller.cancel_request(&request_id);
                 }
@@ -2578,6 +2704,7 @@ impl RuntimeManagerTask {
                     .or_default()
                     .record(now, event_bytes);
                 let settled = event.kind == crate::rpc::RpcEventKind::AgentSettled;
+                let agent_started = event.kind == crate::rpc::RpcEventKind::AgentStart;
                 let (effect, cleared_stall) = {
                     let controller = self
                         .controllers
@@ -2590,6 +2717,9 @@ impl RuntimeManagerTask {
                     (effect, cleared_stall)
                 };
                 self.apply_rpc_effect(run_id, effect);
+                if agent_started || settled {
+                    self.pending_agent_starts.remove(&run_id);
+                }
                 self.refresh_stream_stall_watch(run_id, now);
                 if cleared_stall {
                     self.push_state_changed(run_id);
@@ -2615,6 +2745,13 @@ impl RuntimeManagerTask {
             .ok_or_else(|| format!("run {run_id} has no RPC controller"))?
             .complete_response(&response, &mut self.store)
             .map_err(|error| error.to_string())?;
+        let owns_pending_agent_start = self
+            .pending_agent_starts
+            .get(&run_id)
+            .is_some_and(|request_id| request_id.as_str() == response_id);
+        if owns_pending_agent_start && completed.outcome != RpcResponseOutcome::Accepted {
+            self.pending_agent_starts.remove(&run_id);
+        }
         let completes_startup = self.startups.get(&run_id).is_some_and(|startup| {
             startup.request_id.as_str() == response_id && response.command == "get_state"
         });
@@ -2654,6 +2791,12 @@ impl RuntimeManagerTask {
             // one-shot quiet-stream advisory used by live events. If it
             // discovers a non-working state, clear any stale local advisory.
             self.refresh_stream_stall_watch(run_id, Instant::now());
+            if self.store.get(run_id).is_some_and(|run| {
+                run.process_state() == ProcessState::Ready
+                    && run.activity_state() == ActivityState::Working
+            }) {
+                self.pending_agent_starts.remove(&run_id);
+            }
         }
         let reconcile_replaced_session = completed.outcome == RpcResponseOutcome::Accepted
             && completed.active.class == RpcConcurrencyClass::SessionReplacement;
@@ -3177,6 +3320,7 @@ impl RuntimeManagerTask {
     fn finalize_natural_exit(&mut self, run_id: RunId, code: Option<i32>) {
         self.startups.remove(&run_id);
         self.stream_stall_deadlines.remove(&run_id);
+        self.pending_agent_starts.remove(&run_id);
         let process_state = self.store.get(run_id).map(RunRecord::process_state);
         if process_state.is_none() || process_state.is_some_and(ProcessState::is_terminal) {
             self.processes.remove(&run_id);
@@ -3225,6 +3369,7 @@ impl RuntimeManagerTask {
     fn finalize_uncertain_termination(&mut self, run_id: RunId, detail: &str) {
         self.startups.remove(&run_id);
         self.stream_stall_deadlines.remove(&run_id);
+        self.pending_agent_starts.remove(&run_id);
         let process = self.store.get(run_id).map(RunRecord::process_state);
         if process.is_none() || process.is_some_and(ProcessState::is_terminal) {
             self.processes.remove(&run_id);
@@ -3267,6 +3412,7 @@ impl RuntimeManagerTask {
     }
 
     fn finish_stop(&mut self, run_id: RunId, mut result: RuntimeStopResult) {
+        self.pending_agent_starts.remove(&run_id);
         self.restore_stop_recovery_into_draft(run_id, &mut result);
         if let Some(active) = self.stops.remove(&run_id) {
             let _ = active.reply.send(Ok(result));
@@ -3274,6 +3420,7 @@ impl RuntimeManagerTask {
     }
 
     fn finish_hard_stop(&mut self, run_id: RunId, quarantined: bool) {
+        self.pending_agent_starts.remove(&run_id);
         if let Some(active) = self.stops.remove(&run_id) {
             let mut result =
                 RuntimeStopResult::terminated(active.transaction.recovered(), quarantined);
@@ -3876,6 +4023,120 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn settled_turn_advances_session_sync_without_get_state_message_count() {
+        let fixture = ManagerFixture::new("settled-session-sync");
+        let manager = spawn_runtime_manager(RuntimeLimits::default()).expect("manager");
+        let run_id = manager
+            .start_run(fixture.start_spec())
+            .await
+            .expect("start run");
+        synchronize(&manager, run_id, "settled-sync-startup").await;
+
+        manager
+            .bootstrap_session_sync(
+                run_id,
+                "fake-session".to_owned(),
+                "seed".to_owned(),
+                Some("seed".to_owned()),
+            )
+            .await
+            .expect("seed live session sync");
+        // Order one ordinary request behind the bootstrap catch-up so this
+        // assertion observes the completed empty get_entries page.
+        synchronize(&manager, run_id, "settled-sync-bootstrap").await;
+        let before = manager.hydrate().await.expect("seeded hydration");
+        let before_run = before
+            .runs
+            .iter()
+            .find(|run| run.run.id() == run_id)
+            .expect("run");
+        assert_eq!(before_run.run.session_state().message_count, Some(1));
+        let before_sync = &before_run.rpc.as_ref().expect("rpc").session_sync;
+        assert_eq!(before_sync.cursor(), Some("seed"));
+        let before_revision = before_sync.revision();
+
+        manager
+            .bootstrap_session_sync(
+                run_id,
+                "fake-session".to_owned(),
+                "stale-offline-cursor".to_owned(),
+                Some("stale-offline-leaf".to_owned()),
+            )
+            .await
+            .expect("repeated latest history bootstrap is a no-op");
+        let repeated = manager
+            .hydrate()
+            .await
+            .expect("repeated bootstrap hydration");
+        let repeated_sync = &repeated
+            .runs
+            .iter()
+            .find(|run| run.run.id() == run_id)
+            .expect("run")
+            .rpc
+            .as_ref()
+            .expect("rpc")
+            .session_sync;
+        assert_eq!(repeated_sync.cursor(), Some("seed"));
+        assert_eq!(
+            repeated_sync.revision(),
+            before_revision,
+            "an initialized healthy live cursor must not be rewound or revised by another cold-history read"
+        );
+
+        let mut state_changes = manager.subscribe_state_changes();
+        manager
+            .request(
+                run_id,
+                RpcRequest::new(RpcCommand::Prompt {
+                    message: "advance persisted session".to_owned(),
+                    images: Vec::new(),
+                    streaming_behavior: None,
+                }),
+            )
+            .await
+            .expect("prompt accepted");
+
+        let settled = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let snapshot = manager.hydrate().await.expect("settled hydration");
+                let run = snapshot
+                    .runs
+                    .iter()
+                    .find(|run| run.run.id() == run_id)
+                    .expect("run");
+                let sync = &run.rpc.as_ref().expect("rpc").session_sync;
+                if run.run.activity_state() == ActivityState::Idle
+                    && sync.revision() > before_revision
+                {
+                    break (
+                        run.run.session_state().message_count,
+                        sync.revision(),
+                        sync.cursor().map(str::to_owned),
+                    );
+                }
+                match state_changes.recv().await {
+                    Ok(()) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(broadcast::error::RecvError::Closed) => {
+                        panic!("runtime state stream closed before session sync advanced")
+                    }
+                }
+            }
+        })
+        .await
+        .expect("settled session-sync deadline");
+
+        assert_eq!(
+            settled.0,
+            Some(1),
+            "no get_state reconciliation should be required for the handoff signal"
+        );
+        assert!(settled.1 > before_revision);
+        assert_eq!(settled.2.as_deref(), Some("entry-1"));
+        manager.shutdown().await.expect("shutdown");
+    }
+
+    #[tokio::test]
     async fn unsupported_clear_queue_hard_stops_but_restores_last_bounded_user_queue_event() {
         let unsupported = FAKE_PI_JS.replace(
             r#"    case "clear_queue":
@@ -4091,6 +4352,249 @@ mod tests {
         let after = manager.hydrate().await.expect("after stop");
         assert_eq!(after.runs[0].run.activity_state(), ActivityState::Idle);
         assert!(!after.runs[0].rpc.as_ref().expect("rpc").stream_stalled);
+        manager.shutdown().await.expect("shutdown");
+    }
+
+    #[tokio::test]
+    async fn pending_idle_prompt_owns_mutation_window_until_agent_start() {
+        let fixture = ManagerFixture::new("pending-agent-start-exclusive");
+        let manager = spawn_runtime_manager(RuntimeLimits::default()).expect("manager");
+        let run_id = manager
+            .start_run(fixture.start_spec())
+            .await
+            .expect("start run");
+        synchronize(&manager, run_id, "pending-agent-start-startup").await;
+
+        let first_manager = manager.clone();
+        let first = tokio::spawn(async move {
+            first_manager
+                .request(
+                    run_id,
+                    RpcRequest::new(RpcCommand::Prompt {
+                        message: "delayed-accept".to_owned(),
+                        images: Vec::new(),
+                        streaming_behavior: None,
+                    }),
+                )
+                .await
+        });
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let diagnostics = manager.diagnostics().await.expect("pending diagnostics");
+                let run = diagnostics
+                    .runs
+                    .iter()
+                    .find(|run| run.run_id == run_id)
+                    .expect("pending run diagnostics");
+                if run.pending_rpc_requests > 0 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("pending prompt registration deadline");
+
+        let still_idle = manager.hydrate().await.expect("pending idle hydration");
+        assert_eq!(still_idle.runs[0].run.activity_state(), ActivityState::Idle);
+
+        let duplicate = manager
+            .request(
+                run_id,
+                RpcRequest::new(RpcCommand::Prompt {
+                    message: "must not overlap".to_owned(),
+                    images: Vec::new(),
+                    streaming_behavior: None,
+                }),
+            )
+            .await
+            .expect_err("second idle prompt must not cross the agent_start gap");
+        assert!(
+            duplicate.to_string().contains("awaiting Pi agent_start"),
+            "{duplicate}"
+        );
+
+        let bash = manager
+            .request(
+                run_id,
+                RpcRequest::new(RpcCommand::Bash {
+                    command: "echo blocked".to_owned(),
+                    exclude_from_context: Some(true),
+                }),
+            )
+            .await
+            .expect_err("direct Bash must not cross the pending prompt window");
+        assert!(
+            bash.to_string().contains("model work being submitted"),
+            "{bash}"
+        );
+
+        let first = first
+            .await
+            .expect("pending prompt task join")
+            .expect("pending prompt completion");
+        assert_eq!(first.response.outcome(), RpcResponseOutcome::Accepted);
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let hydration = manager.hydrate().await.expect("post-prompt hydration");
+                if hydration.runs[0].run.activity_state() == ActivityState::Idle
+                    && hydration.runs[0].run.assistant_message_generation() > 0
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("pending prompt settlement deadline");
+
+        let later_bash = manager
+            .request(
+                run_id,
+                RpcRequest::new(RpcCommand::Bash {
+                    command: "echo after".to_owned(),
+                    exclude_from_context: Some(true),
+                }),
+            )
+            .await
+            .expect("Bash admitted after prompt settlement");
+        assert_eq!(later_bash.response.outcome(), RpcResponseOutcome::Accepted);
+        manager.shutdown().await.expect("shutdown");
+    }
+
+    #[tokio::test]
+    async fn active_direct_bash_excludes_model_session_and_close_mutations() {
+        let fixture = ManagerFixture::new("direct-bash-exclusive");
+        let manager = spawn_runtime_manager(RuntimeLimits::default()).expect("manager");
+        let run_id = manager
+            .start_run(fixture.start_spec())
+            .await
+            .expect("start run");
+        synchronize(&manager, run_id, "direct-bash-exclusive-startup").await;
+
+        let bash_manager = manager.clone();
+        let bash = tokio::spawn(async move {
+            bash_manager
+                .request(
+                    run_id,
+                    RpcRequest::new(RpcCommand::Bash {
+                        command: "slow-bash".to_owned(),
+                        exclude_from_context: Some(true),
+                    }),
+                )
+                .await
+        });
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let hydration = manager.hydrate().await.expect("active Bash hydration");
+                let run = hydration
+                    .runs
+                    .iter()
+                    .find(|run| run.run.id() == run_id)
+                    .expect("active Bash run");
+                if run
+                    .rpc
+                    .as_ref()
+                    .is_some_and(|rpc| !rpc.live.direct_bash.is_empty())
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("active Bash projection deadline");
+
+        let hydration = manager.hydrate().await.expect("Bash idle-axis hydration");
+        assert_eq!(hydration.runs[0].run.activity_state(), ActivityState::Idle);
+
+        manager
+            .edit_draft(run_id, "model work after command".to_owned())
+            .await
+            .expect("typing may continue while direct Bash owns execution root");
+        let composer = manager
+            .submit_draft(run_id, ComposerAction::Send)
+            .await
+            .expect_err("composer must not overlap active direct Bash");
+        assert!(
+            composer
+                .to_string()
+                .contains("direct Bash command is active")
+        );
+
+        let raw_prompt = manager
+            .request(
+                run_id,
+                RpcRequest::new(RpcCommand::Prompt {
+                    message: "raw overlap".to_owned(),
+                    images: Vec::new(),
+                    streaming_behavior: None,
+                }),
+            )
+            .await
+            .expect_err("raw prompt must not overlap active direct Bash");
+        assert!(
+            raw_prompt
+                .to_string()
+                .contains("active direct Bash command")
+        );
+
+        let compact = manager
+            .request(
+                run_id,
+                RpcRequest::new(RpcCommand::Compact {
+                    custom_instructions: None,
+                }),
+            )
+            .await
+            .expect_err("compaction must not overlap active direct Bash");
+        assert!(compact.to_string().contains("active direct Bash command"));
+
+        let close = manager
+            .close_run(run_id)
+            .await
+            .expect_err("Close must not terminate a process with direct Bash active");
+        assert!(close.to_string().contains("active direct Bash command"));
+
+        let read = manager
+            .request(run_id, RpcRequest::new(RpcCommand::GetState))
+            .await
+            .expect("read-only state remains allowed during direct Bash");
+        assert_eq!(read.response.outcome(), RpcResponseOutcome::Accepted);
+        let cancel = manager
+            .request(run_id, RpcRequest::new(RpcCommand::AbortBash))
+            .await
+            .expect("direct Bash cancellation remains allowed");
+        assert_eq!(cancel.response.outcome(), RpcResponseOutcome::Accepted);
+
+        let bash = bash
+            .await
+            .expect("slow Bash task join")
+            .expect("slow Bash completion");
+        assert_eq!(bash.response.outcome(), RpcResponseOutcome::Accepted);
+        let after = manager.hydrate().await.expect("post-Bash hydration");
+        assert!(
+            after.runs[0]
+                .rpc
+                .as_ref()
+                .expect("rpc")
+                .live
+                .direct_bash
+                .is_empty()
+        );
+        assert_eq!(
+            after.runs[0].draft.as_ref().expect("preserved draft").text,
+            "model work after command"
+        );
+
+        let submitted = manager
+            .submit_draft(run_id, ComposerAction::Send)
+            .await
+            .expect("model work admitted after direct Bash completion");
+        assert!(submitted.accepted);
         manager.shutdown().await.expect("shutdown");
     }
 
@@ -5797,6 +6301,17 @@ mod tests {
             .await
             .expect("switch session response");
         assert_eq!(replacement.response.outcome(), RpcResponseOutcome::Accepted);
+        assert_eq!(
+            manager
+                .hydrate()
+                .await
+                .expect("post-replacement generation hydration")
+                .runs[0]
+                .run
+                .session_replacement_generation(),
+            1,
+            "accepted session replacement must invalidate stale backend decisions before reconciliation completes"
+        );
 
         // The manager queues its internal get_state before completing the
         // replacement waiter. A following writer command completes only
@@ -6190,6 +6705,7 @@ let modelName = "Fake Model";
 let thinkingLevel = "medium";
 let sessionName = "Fake Session";
 let autoCompactionEnabled = true;
+let entryGeneration = 0;
 
 function emit(value) {
   process.stdout.write(JSON.stringify(value) + "\n");
@@ -6253,6 +6769,24 @@ function handle(request) {
         pendingMessageCount: 0,
       });
       break;
+    case "get_entries": {
+      const since = request.since == null ? null : String(request.since);
+      if (entryGeneration > 0 && since === "seed") {
+        respond(request, {
+          entries: [{
+            type: "message",
+            id: `entry-${entryGeneration}`,
+            parentId: "seed",
+            timestamp: "2026-08-29T00:00:00Z",
+            message: {role: "assistant", content: [{type: "text", text: "Hello world"}]},
+          }],
+          leafId: `entry-${entryGeneration}`,
+        });
+      } else {
+        respond(request, {entries: [], leafId: since});
+      }
+      break;
+    }
     case "get_available_models":
       respond(request, {models: [
         {provider: "fake", id: "fake-model", name: "Fake Model", input: ["text", "image"]},
@@ -6341,6 +6875,27 @@ function handle(request) {
         respond(request, {cancelled: false});
       }
       break;
+    case "bash":
+      if (request.command === "slow-bash") {
+        emit({type: "bash_execution_update", id: request.id, delta: "slow bash active"});
+        setTimeout(() => respond(request, {
+          output: "slow bash done",
+          exitCode: 0,
+          cancelled: false,
+          truncated: false,
+        }), 250);
+      } else {
+        respond(request, {
+          output: `fake bash: ${request.command}`,
+          exitCode: 0,
+          cancelled: false,
+          truncated: false,
+        });
+      }
+      break;
+    case "abort_bash":
+      respond(request);
+      break;
     case "prompt":
       if (request.message === "reject") {
         reject(request, "fixture prompt rejection");
@@ -6408,6 +6963,7 @@ function handle(request) {
         break;
       }
       streamAssistant();
+      entryGeneration += 1;
       if (request.message === "hold") {
         emit({type: "queue_update", steering: ["recover steering"], followUp: ["recover follow up"]});
       } else {

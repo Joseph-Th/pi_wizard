@@ -76,6 +76,36 @@ impl RpcCommand {
         )
     }
 
+    /// Commands Pi Wizard must not start while one of its direct Bash
+    /// requests is active for the same run. Direct Bash operates against the
+    /// exact execution root outside model context, so overlapping it with a
+    /// model/session mutation would create two independent writers to the same
+    /// owned runtime. Read-only probes/export and `abort_bash` remain allowed.
+    #[must_use]
+    pub const fn blocked_by_direct_bash(&self) -> bool {
+        matches!(
+            self,
+            Self::Prompt { .. }
+                | Self::Steer { .. }
+                | Self::FollowUp { .. }
+                | Self::Bash { .. }
+                | Self::CycleModel
+                | Self::CycleThinkingLevel
+                | Self::SetModel { .. }
+                | Self::SetThinkingLevel { .. }
+                | Self::SetSteeringMode { .. }
+                | Self::SetFollowUpMode { .. }
+                | Self::Compact { .. }
+                | Self::SetAutoCompaction { .. }
+                | Self::SetAutoRetry { .. }
+                | Self::NewSession { .. }
+                | Self::SwitchSession { .. }
+                | Self::Fork { .. }
+                | Self::Clone
+                | Self::SetSessionName { .. }
+        )
+    }
+
     /// RPC concurrency category used by Pi Wizard's client-side command gate.
     ///
     /// Current Pi dispatches RPC frames asynchronously, while session replacement
@@ -747,5 +777,35 @@ mod tests {
             RpcCommand::GetState.concurrency_class(),
             RpcConcurrencyClass::Ordinary
         );
+    }
+
+    #[test]
+    fn direct_bash_blocks_mutating_session_commands_but_not_read_or_cancel_operations() {
+        let mutating = [
+            RpcCommand::Prompt {
+                message: "continue".to_owned(),
+                images: Vec::new(),
+                streaming_behavior: None,
+            },
+            RpcCommand::Compact {
+                custom_instructions: None,
+            },
+            RpcCommand::SetModel {
+                provider: "fake".to_owned(),
+                model_id: "model".to_owned(),
+            },
+            RpcCommand::SwitchSession {
+                session_path: PathBuf::from("other.jsonl"),
+            },
+        ];
+        assert!(mutating.iter().all(RpcCommand::blocked_by_direct_bash));
+
+        let safe = [
+            RpcCommand::GetState,
+            RpcCommand::GetSessionStats,
+            RpcCommand::ExportHtml { output_path: None },
+            RpcCommand::AbortBash,
+        ];
+        assert!(safe.iter().all(|command| !command.blocked_by_direct_bash()));
     }
 }

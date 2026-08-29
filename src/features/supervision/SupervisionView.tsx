@@ -3,7 +3,7 @@ import { createEffect, createSignal, For, Show } from "solid-js";
 import { invokeDesktop } from "../../lib/desktop";
 import { pathLeaf } from "../../lib/path";
 import type { DesktopProjectRecord } from "../../types/projects";
-import type { RuntimeCapacitySnapshot } from "../automation/types";
+import type { AutomationChain, RuntimeCapacitySnapshot } from "../automation/types";
 import { ModelPicker } from "../models/ModelPicker";
 import type { ModelSelection, ThinkingLevel } from "../models/types";
 import type { SupervisionSnapshot } from "./types";
@@ -11,6 +11,7 @@ import type { SupervisionSnapshot } from "./types";
 interface SupervisionViewProps {
   snapshots: SupervisionSnapshot[];
   projects: DesktopProjectRecord[];
+  chains: AutomationChain[];
   capacity: RuntimeCapacitySnapshot | undefined;
   piReady: boolean;
   onRefresh: () => Promise<unknown>;
@@ -18,44 +19,74 @@ interface SupervisionViewProps {
 }
 
 export function SupervisionView(props: SupervisionViewProps) {
-  const [projectId, setProjectId] = createSignal("");
+  const [projectIds, setProjectIds] = createSignal<string[]>([]);
+  const [playbookChainId, setPlaybookChainId] = createSignal("");
   const [model, setModel] = createSignal<ModelSelection>();
   const [thinking, setThinking] = createSignal<ThinkingLevel | "">("");
-  const [maxCycles, setMaxCycles] = createSignal("12");
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal<string>();
+  let selectionInitialized = false;
 
   createEffect(() => {
-    if (!projectId()) {
-      const project = props.projects.find((candidate) => candidate.status === "present");
-      if (project) setProjectId(project.id);
-    }
+    const available = props.projects
+      .filter((project) => project.status === "present")
+      .map((project) => project.id);
+    const availableSet = new Set(available);
+    setProjectIds((current) => {
+      if (!selectionInitialized) {
+        selectionInitialized = true;
+        return available;
+      }
+      return current.filter((projectId) => availableSet.has(projectId));
+    });
   });
 
-  const selectedProject = () =>
-    props.projects.find((project) => project.id === projectId() && project.status === "present");
+  const selectedPlaybook = () =>
+    props.chains.find((chain) => chain.id === playbookChainId());
 
-  const activeForSelectedProject = () =>
-    props.snapshots.find(
+  const overlappingSupervision = () => {
+    const selected = new Set(projectIds());
+    if (selected.size === 0) return undefined;
+    return props.snapshots.find(
       (snapshot) =>
-        snapshot.projectId === projectId() &&
-        !["completed", "stopped", "failed"].includes(snapshot.status),
+        !["completed", "stopped", "failed"].includes(snapshot.status) &&
+        snapshot.projectIds.some((projectId) => selected.has(projectId)),
     );
+  };
+
+  const projectNames = (ids: string[]) => {
+    const names = ids.map((id) => {
+      const project = props.projects.find((candidate) => candidate.id === id);
+      return project ? pathLeaf(project.canonicalRoot) : id.slice(0, 8);
+    });
+    if (names.length <= 4) return names.join(", ");
+    return `${names.slice(0, 4).join(", ")} +${names.length - 4}`;
+  };
+
+  const toggleProject = (projectId: string, selected: boolean) => {
+    setProjectIds((current) =>
+      selected
+        ? current.includes(projectId)
+          ? current
+          : [...current, projectId]
+        : current.filter((id) => id !== projectId),
+    );
+  };
 
   const start = async () => {
-    const project = projectId();
-    const cycles = Number.parseInt(maxCycles(), 10);
-    if (!project || !Number.isInteger(cycles) || cycles < 1 || busy()) return;
+    const projects = projectIds();
+    if (projects.length === 0 || busy()) return;
     setBusy(true);
     setError(undefined);
     try {
       await invokeDesktop<string>("runtime_start_supervision", {
         request: {
-          projectId: project,
+          projectIds: projects,
           provider: model()?.provider ?? null,
           model: model()?.id ?? null,
           thinking: thinking() || null,
-          maxCycles: cycles,
+          promptTemplates: selectedPlaybook()?.prompts ?? [],
+          maxCycles: null,
         },
       });
       await props.onRefresh();
@@ -86,8 +117,9 @@ export function SupervisionView(props: SupervisionViewProps) {
         <div>
           <h1>Supervision</h1>
           <p>
-            Run one independent Pi supervisor over live sessions for a project. It is not part of
-            an automation chain and consumes one normal live-run slot while active.
+            Keep live runs moving across multiple projects. The supervisor wakes when a selected
+            run becomes idle, reviews its last result, and chooses the next task or stops a run
+            that should not continue autonomously.
           </p>
         </div>
       </header>
@@ -95,42 +127,77 @@ export function SupervisionView(props: SupervisionViewProps) {
       <Show when={error()}>{(message) => <p class="app-error">Supervision: {message()}</p>}</Show>
 
       <section class="supervision-config" aria-label="Start supervision">
-        <div class="supervision-grid">
-          <label>
-            <span>Project</span>
-            <select
-              value={projectId()}
-              disabled={busy()}
-              onChange={(event) => {
-                setProjectId(event.currentTarget.value);
-                setModel(undefined);
-                setThinking("");
-              }}
-            >
-              <option value="">Select project</option>
-              <For each={props.projects}>
-                {(project) => (
-                  <option value={project.id} disabled={project.status !== "present"}>
-                    {pathLeaf(project.canonicalRoot)}{project.status === "present" ? "" : ` · ${project.status}`}
-                  </option>
-                )}
-              </For>
-            </select>
-          </label>
-          <label>
-            <span>Maximum supervisor cycles</span>
-            <input
-              type="number"
-              min="1"
-              value={maxCycles()}
-              disabled={busy()}
-              onInput={(event) => setMaxCycles(event.currentTarget.value)}
-            />
-          </label>
+        <div class="supervision-projects">
+          <header>
+            <div>
+              <strong>Projects</strong>
+              <span>{projectIds().length} selected</span>
+            </div>
+            <div>
+              <button
+                type="button"
+                disabled={busy()}
+                onClick={() =>
+                  setProjectIds(
+                    props.projects
+                      .filter((project) => project.status === "present")
+                      .map((project) => project.id),
+                  )
+                }
+              >
+                Select all
+              </button>
+              <button type="button" disabled={busy()} onClick={() => setProjectIds([])}>
+                Clear
+              </button>
+            </div>
+          </header>
+          <div class="supervision-project-list" aria-label="Supervised projects">
+            <For each={props.projects}>
+              {(project) => (
+                <label class={project.status === "present" ? undefined : "project-unavailable"}>
+                  <input
+                    type="checkbox"
+                    checked={projectIds().includes(project.id)}
+                    disabled={busy() || project.status !== "present"}
+                    onChange={(event) => toggleProject(project.id, event.currentTarget.checked)}
+                  />
+                  <span>
+                    <strong>{pathLeaf(project.canonicalRoot)}</strong>
+                    <small title={project.canonicalRoot}>
+                      {project.status === "present" ? project.canonicalRoot : `${project.status} · ${project.canonicalRoot}`}
+                    </small>
+                  </span>
+                </label>
+              )}
+            </For>
+          </div>
         </div>
 
+        <label class="supervision-playbook">
+          <span>Reusable prompt playbook</span>
+          <select
+            value={playbookChainId()}
+            disabled={busy()}
+            onChange={(event) => setPlaybookChainId(event.currentTarget.value)}
+          >
+            <option value="">No saved playbook · choose tasks from project state</option>
+            <For each={props.chains}>
+              {(chain) => (
+                <option value={chain.id}>
+                  {chain.name} · {chain.prompts.length} prompt{chain.prompts.length === 1 ? "" : "s"}
+                </option>
+              )}
+            </For>
+          </select>
+          <small>
+            Saved Automation prompts are guidance, not a fixed sequence. The supervisor chooses,
+            adapts, or skips them based on each run's current result.
+          </small>
+        </label>
+
         <ModelPicker
-          projectPath={selectedProject()?.canonicalRoot ?? ""}
+          projectPath=""
           disabled={busy()}
           contextFiles="disabled"
           model={model()}
@@ -147,20 +214,25 @@ export function SupervisionView(props: SupervisionViewProps) {
             class="primary-action"
             disabled={
               busy() ||
-              !projectId() ||
-              Boolean(activeForSelectedProject()) ||
+              projectIds().length === 0 ||
+              Boolean(overlappingSupervision()) ||
               Boolean(props.capacity && props.capacity.activeRuns >= props.capacity.liveRunLimit)
             }
             onClick={() => void start()}
           >
             {busy() ? "Working" : "Start supervision"}
           </button>
-          <Show when={activeForSelectedProject()}>
+          <Show when={overlappingSupervision()}>
             {(active) => (
               <span class="supervision-note">
-                This project already has active supervision {active().id.slice(0, 8)}.
+                At least one selected project is already covered by supervision {active().id.slice(0, 8)}.
               </span>
             )}
+          </Show>
+          <Show when={!overlappingSupervision() && projectIds().length > 0}>
+            <span class="supervision-note">
+              Continuous until stopped · {projectNames(projectIds())}
+            </span>
           </Show>
         </div>
       </section>
@@ -169,15 +241,14 @@ export function SupervisionView(props: SupervisionViewProps) {
         <h2>Sessions</h2>
         <For each={props.snapshots}>
           {(snapshot) => {
-            const project = () => props.projects.find((item) => item.id === snapshot.projectId);
             const terminal = () => ["completed", "stopped", "failed"].includes(snapshot.status);
             return (
               <article class="supervision-session">
                 <header>
                   <div>
-                    <strong>{project() ? pathLeaf(project()!.canonicalRoot) : snapshot.projectId.slice(0, 8)}</strong>
+                    <strong>{projectNames(snapshot.projectIds)}</strong>
                     <span>
-                      {snapshot.status} · {snapshot.cycles}/{snapshot.maxCycles} cycles · {snapshot.watchedRuns} watched run{snapshot.watchedRuns === 1 ? "" : "s"}
+                      {snapshot.status} · {snapshot.cycles}{snapshot.maxCycles == null ? " decisions · continuous" : `/${snapshot.maxCycles} decisions`} · {snapshot.watchedRuns} watched run{snapshot.watchedRuns === 1 ? "" : "s"}
                     </span>
                     <small>
                       {snapshot.provider && snapshot.model
@@ -197,6 +268,14 @@ export function SupervisionView(props: SupervisionViewProps) {
                 </header>
                 <Show when={snapshot.error}>
                   {(message) => <p class="error">Supervisor failed: {message()}</p>}
+                </Show>
+                <Show when={snapshot.lastDecision}>
+                  {(decision) => (
+                    <p class="supervision-last-decision">
+                      <strong>Last decision</strong>
+                      <span>{decision()}</span>
+                    </p>
+                  )}
                 </Show>
               </article>
             );

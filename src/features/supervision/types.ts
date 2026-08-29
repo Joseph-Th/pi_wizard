@@ -4,14 +4,16 @@ export type SupervisionStatus = "starting" | "running" | "completed" | "stopped"
 
 export interface SupervisionSnapshot {
   id: string;
-  projectId: string;
+  projectIds: string[];
+  hostProjectId: string;
   supervisorRunId: string | null;
   provider: string | null;
   model: string | null;
   thinking: ThinkingLevel | null;
   cycles: number;
-  maxCycles: number;
+  maxCycles: number | null;
   watchedRuns: number;
+  lastDecision: string | null;
   status: SupervisionStatus;
   error: string | null;
 }

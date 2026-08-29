@@ -21,14 +21,17 @@ import { pathLeaf } from "../../lib/path";
 
 import { formatBytes } from "./types";
 import type { RunHydration, SessionHistoryCursor, SessionHistoryPage, SessionTimelineItem, SessionTreeNode, SessionTreeSnapshot } from "./types";
+import { MarkdownText } from "./MarkdownText";
 
 export function historyLabel(item: SessionTimelineItem): string {
-  if (item.title) return item.title;
   switch (item.kind) {
     case "user":
-      return "You";
+      return "Prompt";
     case "assistant":
-      return "Assistant";
+      return "Final output";
+  }
+  if (item.title) return item.title;
+  switch (item.kind) {
     case "tool":
       return "Tool";
     case "bash":
@@ -48,11 +51,7 @@ export function historyTimestamp(timestamp: string | null): string | undefined {
   return Number.isNaN(parsed) ? timestamp : new Date(parsed).toLocaleString();
 }
 
-export function HistoryTimeline(props: {
-  run: RunHydration;
-  forkDisabled: boolean;
-  onFork: (entryId: string) => Promise<unknown>;
-}) {
+export function HistoryTimeline(props: { run: RunHydration }) {
   const MAX_HISTORY_RENDER_PAGES = 4;
   type LoadedHistoryPage = {
     cursor: SessionHistoryCursor | null;
@@ -64,15 +63,19 @@ export function HistoryTimeline(props: {
   const [error, setError] = createSignal<string>();
   const [newerCursors, setNewerCursors] = createSignal<(SessionHistoryCursor | null)[]>([]);
   const [loadedMessageCount, setLoadedMessageCount] = createSignal<number | null>(null);
+  const [loadedSessionSyncRevision, setLoadedSessionSyncRevision] = createSignal<number | null>(null);
   let requestSequence = 0;
   let loadedSessionId: string | undefined;
   let historyViewport: HTMLDivElement | undefined;
+  let historyPinnedToBottom = true;
 
   const fetchPage = async (
     cursor: SessionHistoryCursor | null,
     expectedSessionId: string,
   ): Promise<LoadedHistoryPage | undefined> => {
     const sequence = ++requestSequence;
+    const observedMessageCount = cursor === null ? props.run.run.session.messageCount : null;
+    const observedSessionSyncRevision = cursor === null ? (props.run.rpc?.sessionSync.revision ?? null) : null;
     setLoading(true);
     setError(undefined);
     try {
@@ -88,7 +91,14 @@ export function HistoryTimeline(props: {
         props.run.run.session.sessionId !== expectedSessionId
       )
         return undefined;
-      if (cursor === null) setLoadedMessageCount(props.run.run.session.messageCount);
+      // Record the count that was authoritative when this read started. If a
+      // message settles while the file read is in flight, the later hydration
+      // remains greater than this baseline and triggers one more latest-page
+      // refresh instead of incorrectly treating an older page as current.
+      if (cursor === null) {
+        setLoadedMessageCount(observedMessageCount);
+        setLoadedSessionSyncRevision(observedSessionSyncRevision);
+      }
       return { cursor, page: result };
     } catch (historyError) {
       if (sequence === requestSequence) setError(String(historyError));
@@ -108,6 +118,7 @@ export function HistoryTimeline(props: {
   };
 
   const scrollToBottom = () => {
+    historyPinnedToBottom = true;
     queueMicrotask(() => {
       if (historyViewport) historyViewport.scrollTop = historyViewport.scrollHeight;
     });
@@ -124,6 +135,7 @@ export function HistoryTimeline(props: {
       setLoading(false);
       setNewerCursors([]);
       setLoadedMessageCount(null);
+      setLoadedSessionSyncRevision(null);
       return;
     }
     if (sessionId === loadedSessionId) return;
@@ -131,6 +143,7 @@ export function HistoryTimeline(props: {
     setPages([]);
     setNewerCursors([]);
     setLoadedMessageCount(null);
+    setLoadedSessionSyncRevision(null);
     void (async () => {
       const latest = await fetchPage(null, sessionId);
       if (!latest) return;
@@ -187,23 +200,45 @@ export function HistoryTimeline(props: {
   };
 
   const hasNewActivity = () => {
-    const current = props.run.run.session.messageCount;
-    const loaded = loadedMessageCount();
-    return current !== null && loaded !== null && current > loaded;
+    const currentMessageCount = props.run.run.session.messageCount;
+    const loadedMessages = loadedMessageCount();
+    const currentSyncRevision = props.run.rpc?.sessionSync.revision ?? null;
+    const loadedSyncRevision = loadedSessionSyncRevision();
+    return (
+      (currentMessageCount !== null &&
+        loadedMessages !== null &&
+        currentMessageCount > loadedMessages) ||
+      (currentSyncRevision !== null &&
+        loadedSyncRevision !== null &&
+        currentSyncRevision > loadedSyncRevision)
+    );
   };
 
   const atLatestWindow = () =>
     pages().at(-1)?.cursor === null && newerCursors().length === 0;
+
+  createEffect(() => {
+    props.run.run.session.messageCount;
+    props.run.rpc?.sessionSync.revision;
+    if (
+      !hasNewActivity() ||
+      loading() ||
+      !atLatestWindow() ||
+      !historyPinnedToBottom
+    )
+      return;
+    loadLatest();
+  });
 
   const scannedBytes = () =>
     pages().reduce((total, loaded) => total + loaded.page.scannedBytes, 0);
 
   return (
     <Show when={props.run.run.session.sessionFile && props.run.run.session.sessionId}>
-      <section class="history-timeline" aria-label="Persisted Pi session history">
+      <section class="history-timeline" aria-label="Prompt and final answer history">
         <div class="history-toolbar">
-          <strong>Session history</strong>
-          <span>Bounded active-branch window · {pages().length}/{MAX_HISTORY_RENDER_PAGES} pages</span>
+          <strong>Conversation</strong>
+          <span>Prompts and final answers · {pages().length}/{MAX_HISTORY_RENDER_PAGES} bounded pages</span>
           <div>
             <button
               type="button"
@@ -232,13 +267,20 @@ export function HistoryTimeline(props: {
           <p class="history-note">New persisted activity is available. Latest refreshes the bounded window.</p>
         </Show>
         <Show when={pages().length > 0}>
-          <div class="history-window" ref={historyViewport}>
+          <div
+            class="history-window"
+            ref={historyViewport}
+            onScroll={() => {
+              if (!historyViewport) return;
+              historyPinnedToBottom =
+                historyViewport.scrollHeight - historyViewport.scrollTop - historyViewport.clientHeight <= 24;
+            }}
+          >
             <For each={pages()}>
               {(loaded) => (
                 <div class="history-page">
-                  <For each={loaded.page.items}>
+                  <For each={loaded.page.items.filter((item) => item.kind === "user" || item.kind === "assistant")}>
                     {(item) => {
-                      if (item.kind === "tool" || item.kind === "bash") return null;
                       const itemClass = `history-item history-${item.kind}${item.isError ? " history-error" : ""}`;
                       const itemHeader = (
                         <>
@@ -247,39 +289,18 @@ export function HistoryTimeline(props: {
                             <Show when={historyTimestamp(item.timestamp)}>
                               {(timestamp) => <span>{timestamp()}</span>}
                             </Show>
-                            <Show when={item.kind === "user"}>
-                              <button
-                                type="button"
-                                disabled={props.forkDisabled || loading()}
-                                onClick={() => void props.onFork(item.entryId)}
-                              >
-                                Fork here
-                              </button>
-                            </Show>
                           </div>
                         </>
                       );
                       return (
                         <article class={itemClass} data-timeline-row="true">
                           <header>{itemHeader}</header>
-                          <Show when={item.kind === "assistant" ? item.reasoning : null}>
-                            {(reasoning) => (
-                              <details class="history-reasoning" open>
-                                <summary>
-                                  <strong>Reasoning</strong>
-                                  <span>
-                                    Pi thinking{item.reasoningTruncated ? " · bounded" : ""}
-                                  </span>
-                                </summary>
-                                <pre>{reasoning()}</pre>
-                                <Show when={item.reasoningTruncated}>
-                                  <span class="truncation-note">Reasoning preview truncated</span>
-                                </Show>
-                              </details>
-                            )}
-                          </Show>
                           <Show when={item.text}>
-                            <pre>{item.text}</pre>
+                            {item.kind === "assistant" ? (
+                              <MarkdownText text={item.text} />
+                            ) : (
+                              <pre class="history-prompt-text">{item.text}</pre>
+                            )}
                           </Show>
                           <Show when={item.textTruncated}>
                             <span class="truncation-note">History preview truncated</span>
@@ -288,11 +309,11 @@ export function HistoryTimeline(props: {
                       );
                     }}
                   </For>
-                  <Show when={loaded.page.items.length === 0}>
+                  <Show when={loaded.page.items.filter((item) => item.kind === "user" || item.kind === "assistant").length === 0}>
                     <p class="history-note">
                       {loaded.page.nextCursor
-                        ? "No displayable entries in this bounded scan window. Load older to scan farther back on the active branch."
-                        : "No persisted displayable history is available for this session yet."}
+                        ? "No prompts or final answers in this bounded scan window. Load older to scan farther back on the active branch."
+                        : "No persisted prompts or final answers are available for this session yet."}
                     </p>
                   </Show>
                 </div>

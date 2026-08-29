@@ -21,11 +21,13 @@ const attention = [
   readFileSync(resolve(root, "src", "features", "attention", "ExtensionDialogCard.tsx"), "utf8"),
   readFileSync(resolve(root, "src", "features", "attention", "NeedsAttentionView.tsx"), "utf8"),
 ].join("\n");
+const composer = readFileSync(resolve(root, "src", "features", "runs", "composer.tsx"), "utf8");
 const runs = [
   readFileSync(resolve(root, "src", "features", "runs", "types.tsx"), "utf8"),
   readFileSync(resolve(root, "src", "features", "runs", "history.tsx"), "utf8"),
-  readFileSync(resolve(root, "src", "features", "runs", "composer.tsx"), "utf8"),
+  composer,
   readFileSync(resolve(root, "src", "features", "runs", "presentation.tsx"), "utf8"),
+  readFileSync(resolve(root, "src", "features", "runs", "MarkdownText.tsx"), "utf8"),
 ].join("\n");
 const desktop = readFileSync(resolve(root, "src", "lib", "desktop.ts"), "utf8");
 const mainCapability = JSON.parse(
@@ -78,7 +80,25 @@ requireContract(
   styles.includes("prefers-reduced-motion: reduce"),
   "reduced-motion preference must be honored",
 );
-requireContract(ui.includes('class="app-shell"'), "desktop shell must expose sidebar/main navigation");
+requireContract(
+  app.includes('class={`app-shell sidebar-width-${sidebarWidth()}`}'),
+  "desktop shell must expose sidebar/main navigation",
+);
+requireContract(
+  app.includes('role="separator"') &&
+    app.includes('aria-label="Resize navigation sidebar"') &&
+    app.includes("setPointerCapture") &&
+    app.includes('event.key !== "ArrowLeft" && event.key !== "ArrowRight"') &&
+    app.includes("Math.round((bounded - 208) / 16) * 16") &&
+    app.includes('class={`app-shell sidebar-width-${sidebarWidth()}`}') &&
+    !app.includes('style={`--sidebar-width') &&
+    styles.includes("--sidebar-width") &&
+    styles.includes(".sidebar-width-208") &&
+    styles.includes(".sidebar-width-480") &&
+    styles.includes(".attention") &&
+    styles.includes(".sidebar-resizer"),
+  "desktop navigation width must be pointer- and keyboard-adjustable through CSP-safe bounded static classes without constraining the main surface width",
+);
 requireContract(ui.includes('class="run-grid"'), "dashboard must render compact run cards");
 requireContract(
   mainCapability.windows?.length === 1 &&
@@ -114,11 +134,17 @@ requireContract(
     ui.includes('view() === "supervision"') &&
     supervision.includes('"runtime_start_supervision"') &&
     supervision.includes('"runtime_stop_supervision"') &&
+    supervision.includes("projectIds") &&
+    supervision.includes("promptTemplates") &&
+    supervision.includes("maxCycles: null") &&
+    supervision.includes("Reusable prompt playbook") &&
+    supervision.includes("Continuous until stopped") &&
+    app.includes("chains={automation()?.catalog.chains ?? []}") &&
     app.includes('"supervision://changed"') &&
     styles.includes(".automation-layout") &&
     styles.includes(".automation-step") &&
     styles.includes(".supervision-surface"),
-  "finite Automation and independent Supervision must be separate first-class keyboard-accessible navigation surfaces driven by backend invalidation events rather than polling",
+  "finite Automation and continuous multi-project Supervision must remain separate first-class keyboard-accessible surfaces driven by backend invalidation rather than polling",
 );
 requireContract(
   entry.includes("waitForDesktopBackend") &&
@@ -267,6 +293,24 @@ requireContract(
   "runtime diagnostics must be explicit pull-based bounded counters with mounted-row and development long-task measurements, not another polling loop",
 );
 requireContract(
+  ui.includes('"runtime_export_session_html"') &&
+    ui.includes("Export session HTML") &&
+    ui.includes('"runtime_run_bash"') &&
+    ui.includes('"runtime_abort_bash"') &&
+    ui.includes("One-shot command") &&
+    composer.includes("const hasActiveDirectBash = () =>") &&
+    composer.includes("composerDisabled = () => disabled() || props.run.draftRestorePending || hasActiveDirectBash()") &&
+    composer.includes("commandBusy() || hasActiveDirectBash()") &&
+    composer.includes("Direct Bash owns this execution root") &&
+    ui.includes('return "command running"') &&
+    ui.includes("(run.rpc?.live.directBash.length ?? 0) === 0") &&
+    ui.includes("and is excluded") &&
+    ui.includes("from model context.") &&
+    ui.includes("Live output appears in Live activity") &&
+    ui.includes("bounded output"),
+  "run details must expose Pi-native session HTML export and a bounded cancellable one-shot command surface whose backend-projected ownership survives renderer reload, blocks conflicting model/session controls and Close, and never adds command output to model context",
+);
+requireContract(
   ui.includes('class="run-identity-strip"') &&
     ui.includes("runModelLabel(run())") &&
     ui.includes("runThinkingLabel(run())") &&
@@ -300,25 +344,50 @@ requireContract(
   "renderer hydration must reject an unsupported backend schema instead of applying structurally incompatible state",
 );
 requireContract(
-  ui.includes("props.live?.reasoning") &&
+  ui.includes("const live = () => props.run.rpc?.live") &&
     ui.includes('class="live-block live-thinking live-reasoning"') &&
-    ui.includes('class="history-reasoning" open') &&
-    ui.includes("item.reasoning") &&
-    ui.includes("item.reasoningTruncated") &&
-    ui.includes("live-activity-status") &&
+    ui.includes('class="live-block live-tool"') &&
+    ui.includes('class="live-block live-command"') &&
+    ui.includes("Model turn active · thinking / generating") &&
+    ui.includes("Pi is idle and ready") &&
+    ui.includes("Pi still reports this turn active") &&
+    ui.includes("streamStalled") &&
     ui.includes("Reading project files") &&
     ui.includes("Searching the codebase") &&
     ui.includes("Editing files") &&
     ui.includes("Checking repository state") &&
     ui.includes("toolActivityLabel(tool.toolName)") &&
+    ui.includes("pinnedToBottom") &&
+    ui.includes("viewport.scrollTop = viewport.scrollHeight") &&
+    ui.includes("props.run.run.agentWorking") &&
+    ui.includes("const visibleReasoning = () =>") &&
+    ui.includes('loaded.page.items.filter((item) => item.kind === "user" || item.kind === "assistant")') &&
+    ui.includes("historyPinnedToBottom") &&
+    ui.includes("loadLatest()") &&
+    ui.includes("const observedMessageCount = cursor === null ? props.run.run.session.messageCount : null") &&
+    ui.includes("const observedSessionSyncRevision = cursor === null ? (props.run.rpc?.sessionSync.revision ?? null) : null") &&
+    ui.includes("sessionSync: SessionSyncState") &&
+    ui.includes("currentSyncRevision > loadedSyncRevision") &&
+    desktopHost.includes("let latest_read = request.cursor.is_none();") &&
+    desktopHost.includes("bootstrap_session_sync(") &&
+    desktopHost.includes("page.append_cursor.clone()") &&
+    ui.includes('<pre class="history-prompt-text">{item.text}</pre>') &&
+    ui.includes("<MarkdownText text={item.text} />") &&
+    ui.includes("DOMPurify.sanitize") &&
+    ui.includes("markedHighlight") &&
+    ui.includes("return escapeHtml(code)") &&
+    ui.includes("html({ text })") &&
+    ui.includes("return escapeHtml(text)") &&
+    ui.includes('ALLOWED_ATTR: ["class"]') &&
+    !ui.includes("USE_PROFILES: { html: true }") &&
+    styles.includes(".live-activity-idle") &&
+    styles.includes(".history-prompt-text") &&
+    !composer.includes("const hasContent = () =>") &&
     !ui.includes("Running tool:") &&
     !ui.includes("Running shell command") &&
-    ui.includes('if (item.kind === "tool" || item.kind === "bash") return null') &&
-    !ui.includes("show output") &&
-    !ui.includes("Tool request") &&
     !ui.includes("VERBOSE_THINKING_BYTES") &&
     !ui.includes("collapseThinking"),
-  "Pi reasoning must remain prominent and continuous while completed tool protocol disappears from the conversation and only one human-readable live activity status explains active work",
+  "the top conversation must preserve prompts verbatim and render only final answers as sanitized rich text, seed Pi get_entries synchronization from a validated latest history page, and follow session-sync revisions so final output cannot disappear at settlement while the lower activity pane drops transient content",
 );
 requireContract(
   ui.includes('type InspectorKind = "details" | "changes" | "tree"') &&

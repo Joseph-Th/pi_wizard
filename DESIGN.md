@@ -42,7 +42,7 @@ New surfaces must materially improve Pi orchestration without creating another r
 
 Finite user-started automation is in scope as one independent feature. A saved chain is deliberately small: a name plus an ordered list of prompts. Starting a chain chooses the project, worker concurrency, local/worktree execution policy, and worker model/thinking selection. The runtime fills only available live-run slots, starts one new Pi session per prompt, and advances on backend run-state transitions rather than timers or repository polling. For concurrent work in one project, chains use unique Git worktrees; completed worker processes are closed to release capacity while their Pi session history and Git worktrees remain available for review. Automation has no supervisor toggle and no supervisor lifecycle state.
 
-**Supervision** is a separate orchestration feature, not a mode of automation and not a replacement agent engine. A supervision session is one ordinary Pi session counted against the same live-run ceiling. The user starts it for a project independently from any automation chain, chooses its model/thinking level, and may stop it without cancelling worker runs. It observes bounded summaries of that project's eligible live runs only when semantic workflow state changes and may return a small validated set of Send/Steer/Follow-up directives addressed to exact RunIds. Manual sessions and automation workers are both eligible targets. Unknown runs, oversized messages, malformed output, and unsupported actions are rejected rather than guessed. There is no token-level supervisor loop and no periodic “are you done?” polling.
+**Supervision** is a separate orchestration feature, not a mode of automation and not a replacement agent engine. A supervision session is one ordinary Pi session counted against the same live-run ceiling. The user selects one or more registered projects, chooses its model/thinking level, and may optionally reuse the prompts from a saved Automation chain as an adaptable playbook. The supervisor runs continuously until explicitly stopped or failed. Each eligible run is considered once when it is already idle at supervision start and again whenever a new assistant result settles. The supervisor receives bounded project/run/result summaries and may return a small validated set of Send/Steer/Follow-up/Stop directives addressed to exact RunIds. Its default job is to choose the next useful task for newly idle work rather than leave healthy runs unused; when a result reports a problem, it decides whether a bounded recovery task is appropriate or the run should stop. Manual sessions and automation workers across all selected projects are eligible targets. Unknown runs, oversized messages, duplicate targets, malformed output, and unsupported actions are rejected rather than guessed. There is no token-level supervisor loop and no periodic “are you done?” polling.
 
 ## 4. Mental model
 
@@ -101,6 +101,8 @@ Historical sessions are paged/searchable rather than all materialized into a lon
 
 Each session row is intentionally cheap: title, project/worktree indicator, and coarse state. No per-row Git command, filesystem watcher, token calculation, or history hydration is allowed.
 
+The sidebar width is user-adjustable within bounded desktop limits by pointer or keyboard. Primary navigation controls occupy a consistent full row so resizing changes available label space without producing uneven button geometry. The main surface consumes the remaining window width instead of retaining a fixed desktop-content maximum.
+
 ### Multi-agent dashboard
 
 The dashboard is the orchestration home. It shows one compact card per live run:
@@ -123,24 +125,25 @@ Chains are finite. Cancel stops the chain from launching more work but does not 
 
 ### Supervision
 
-Supervision is a separate first-class main view. It selects a registered project, a supervisor model/thinking level, and a finite cycle budget, then starts one dedicated Pi supervisor session in its own Git worktree. It can supervise live runs that were started manually or by Automation. Stopping supervision terminates only the app-owned supervisor process; it never implicitly stops, closes, or cancels worker runs.
+Supervision is a separate first-class main view. It selects any set of present registered projects plus a supervisor model/thinking level, then starts one dedicated Pi supervisor session in its own Git worktree. At least one selected project must be Git-backed so that worktree has an explicit host, but observed worker runs may belong to any selected project. A saved Automation chain may be selected as a reusable prompt playbook; its prompts are suggestions the supervisor may adapt, reorder, skip, or replace according to each run's latest result rather than a fixed execution sequence.
 
-Supervision status is presented separately from Automation execution status. A failed or malformed supervisor response ends/disables that supervision session without changing the ownership or lifecycle of the runs it was observing.
+Supervision is continuous while the desktop remains open. An idle run with a newly unseen assistant result wakes the supervisor once; a deliberate no-op does not retrigger until that run produces another result. This preserves event-driven operation without polling while making “keep these projects productively busy” the default behavior. Stopping supervision terminates only the app-owned supervisor process. A supervisor-issued **Stop** directive is different: it explicitly terminates the addressed worker after fresh run/project validation when the supervisor judges that autonomous continuation is unsafe or unproductive.
+
+Supervision status is presented separately from Automation execution status and names the covered project set. Each session retains one bounded user-facing summary of the last applied decision, such as the run continued/stopped and a short next-task preview, so autonomous progress is inspectable without rendering raw supervisor protocol. A failed or malformed supervisor response ends/disables that supervision session without changing unrelated worker ownership or lifecycle.
 
 ## 6. Session view
 
-### Timeline
+### Conversation and live activity
 
-The timeline groups activity into semantic turns rather than exposing raw protocol events.
+The run surface separates the durable conversation from current execution detail so the same information is not repeated in two panes.
 
-- user messages are always visible;
-- assistant text streams in place;
-- reasoning/thinking follows Pi settings, streams prominently, accumulates across Pi's thinking/tool/thinking message boundaries for the active turn, and remains visible after the completed message is persisted;
-- tool protocol is not transcript content: completed tool calls, shell commands, and their output do not appear in session history;
-- while Pi is actively using a tool, the live surface may show one quiet human-readable activity line only when it explains the current wait (for example reading files, searching code, editing files, or running a command); raw tool output stays out of the conversation;
-- compaction/retry/session events are lightweight notices rather than full message blocks; compaction abort/failure/overflow-retry and provider/summarization retry state remain visible when they affect recovery, and a quiet Working stream may show a one-shot advisory without being relabeled failed or idle.
+- **Conversation** is the upper persisted pane. It contains user prompts and final assistant answers only. User prompts are preserved as verbatim input text rather than interpreted as Markdown; final assistant text renders as sanitized Markdown with local syntax highlighting. Persisted reasoning and tool/Bash protocol entries remain available in Pi JSONL but are deliberately omitted from this conversational projection. Fork controls live in Session Tree rather than being mixed into this pane.
+- **Live activity** is the lower transient pane and is always mounted so lifecycle status never disappears merely because the first live projection has not arrived yet. It contains the current reasoning stream, bounded active tool previews, bounded direct-command output, and the streaming assistant answer while the turn is active. Once the turn settles, completed reasoning and answer text are removed from this pane and its status becomes idle; the durable final answer appears only in Conversation.
+- While Pi reports active agent work, the lower pane always shows an explicit model-turn status even when no tool is running and no reasoning token is currently arriving. When thinking is enabled the label says the turn is thinking/generating; otherwise it says generating/waiting for provider. A separate quiet-stream advisory makes prolonged RPC silence visible without declaring the process frozen or retrying automatically.
+- Both panes follow new content only while their viewport remains at the bottom. If the user scrolls upward, new output does not steal the scroll position. Returning to the live edge restores automatic following.
+- Compaction/retry/session events remain lightweight notices rather than conversation rows; compaction abort/failure/overflow-retry and provider/summarization retry state stay visible when they affect recovery.
 
-Only a virtualized window of turn groups is mounted. Older content loads in bounded pages as the user navigates upward.
+Only bounded history pages and bounded live projections are mounted. Older conversation content loads in bounded pages as the user navigates upward.
 
 ### Composer
 
@@ -165,6 +168,8 @@ Slash-command autocomplete is populated from Pi's runtime command discovery rath
 The composer supports Pi-native image attachments with explicit count/per-image/aggregate limits. Picker, paste, drag/drop, IPC, and restored drafts all pass through the same backend validation; an oversized attachment is rejected before it can become a large reactive/IPC payload. When Pi explicitly declares the selected model text-only, the UI disables new image ingestion and blocks submission of existing image drafts while keeping those images removable/preserved. Missing capability metadata stays compatible rather than being guessed as unsupported.
 
 An idle session also exposes **Compact context**, which invokes Pi's native manual compaction. The label describes the user job, while Pi remains responsible for summary/context semantics and the runtime reconciles authoritative state after completion. Run details may also send Pi's native automatic-provider-retry enable/disable command. Because current `get_state` does not report that flag, the UI never presents a cached choice as authoritative current state after reload/recovery.
+
+Run details expose two additional Pi-native utilities without turning the application into an IDE. **Export session HTML** delegates to Pi's `export_html` RPC operation and reports the path Pi returns. **One-shot command** delegates to Pi's direct Bash RPC in the run's immutable execution root with `excludeFromContext` enabled, shows bounded live/final output, and exposes Pi's Bash cancellation operation while the request is active. Direct-Bash ownership comes from backend hydration rather than component-local request state, so reload keeps the command visibly active and cancellation reachable. While it owns the execution root, composer submission, model/session-mutating controls, another direct command, and Close remain unavailable. It is not a persistent PTY, shell history, or second terminal runtime.
 
 Draft text is session-scoped and durable. Switching sessions never carries a draft to another session and never silently discards it. The UI can remain visually quiet when persistence is healthy, but a failed save is visible and retryable. Extension-driven `set_editor_text` updates participate in the same draft state rather than replacing it behind the user's back.
 
@@ -234,6 +239,7 @@ Recent history should open on the latest bounded window. For a live Pi process, 
 - Draft durability is explicit and failures remain visible/retryable.
 - Stop never reports a safe idle/reusable state when abort or process termination is uncertain.
 - A live run owns one immutable execution root; worktrees are never silently pooled or reassigned.
+- One execution root never has independent Pi Wizard mutation owners at the same time: an accepted idle Prompt owns the pre-`agent_start` handoff, and active direct Bash excludes model/session mutations and Close until completion/cancellation.
 - Passive navigation surfaces do not start Git, session, or filesystem polling.
 - Navigation never owns Pi-process lifetime.
 - Host execution is never labeled sandboxed, and UI labels never imply permissions Pi does not enforce.
@@ -250,8 +256,8 @@ The interface should be dense but quiet:
 - native desktop spacing rather than oversized chat cards;
 - one accent color for selection/activity, with status primarily expressed through text/icon shape rather than saturated color;
 - monospaced treatment reserved for paths, commands, diffs, and code;
-- minimal animation, limited to state transitions that communicate causality;
-- no continuously animated activity when a static working indicator is sufficient;
+- minimal animation, limited to state transitions and one low-motion active-turn pulse that makes ongoing model work perceptible when no tokens/tools are currently arriving;
+- the active-turn pulse honors reduced-motion preferences and never substitutes for the explicit text status;
 - keyboard focus is always visible;
 - theme follows system by default.
 

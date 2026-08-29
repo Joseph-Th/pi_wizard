@@ -5,6 +5,11 @@
   gap: 0.9rem;
 }
 
+.supervision-surface {
+  width: 100%;
+  min-width: 0;
+}
+
 .supervision-config,
 .supervision-session {
   padding: 0.9rem;
@@ -13,19 +18,6 @@
   background: color-mix(in srgb, CanvasText 2%, transparent);
 }
 
-.supervision-grid {
-  display: grid;
-  grid-template-columns: minmax(14rem, 2fr) minmax(10rem, 1fr);
-  gap: 0.65rem;
-}
-
-.supervision-grid label {
-  display: grid;
-  gap: 0.3rem;
-  min-width: 0;
-}
-
-.supervision-grid label > span,
 .supervision-note,
 .supervision-session small,
 .supervision-session header span {
@@ -68,10 +60,6 @@
 }
 
 @media (max-width: 760px) {
-  .supervision-grid {
-    grid-template-columns: 1fr;
-  }
-
   .supervision-session > header {
     flex-direction: column;
   }

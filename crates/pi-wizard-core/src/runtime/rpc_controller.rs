@@ -235,6 +235,7 @@ impl RunRpcController {
                     capabilities_changed = true;
                 }
                 "new_session" | "switch_session" | "fork" | "clone" => {
+                    store.apply(self.run_id, RunMutation::SessionReplacementAccepted)?;
                     self.session_sync.reset_for_session_replacement();
                 }
                 _ => {}
@@ -279,6 +280,13 @@ impl RunRpcController {
             }
             RpcEventKind::AgentSettled => {
                 store.apply(self.run_id, RunMutation::AgentSettled)?;
+                if self.live.settle_agent_turn() > 0 {
+                    // Missing tool-end display traffic must not leave Git review
+                    // looking current after Pi has authoritatively settled the
+                    // turn. This is deliberately conservative because tool
+                    // semantics are extension-owned and may have mutated files.
+                    store.apply(self.run_id, RunMutation::ChangesMayHaveChanged)?;
+                }
                 RunRpcEffect::SemanticStateChanged
             }
             RpcEventKind::CompactionStart => {
@@ -540,6 +548,7 @@ impl RunRpcController {
                             block.content,
                         )
                     }))?;
+                store.apply(self.run_id, RunMutation::AssistantMessageCompleted)?;
                 RunRpcEffect::SemanticStateChanged
             }
             RpcEventKind::ToolExecutionStart => {
@@ -1435,6 +1444,20 @@ mod tests {
             )
             .expect("message end");
         assert!(matches!(effect, RunRpcEffect::SemanticStateChanged));
+        assert_eq!(
+            store
+                .get(run_id)
+                .expect("run")
+                .assistant_message_generation(),
+            1
+        );
+        assert!(
+            serde_json::to_value(store.get(run_id).expect("run"))
+                .expect("serialize run")
+                .get("assistantMessageGeneration")
+                .is_none(),
+            "orchestration generation is backend-only and must not expand renderer hydration"
+        );
         let snapshot = controller.live_projection().snapshot();
         assert_eq!(snapshot.assistant_blocks.len(), 2);
         assert_eq!(snapshot.assistant_blocks[0].text, "final answer");
@@ -1555,6 +1578,45 @@ mod tests {
         assert_eq!(
             store.get(run_id).expect("run").activity_state(),
             ActivityState::Idle
+        );
+    }
+
+    #[test]
+    fn agent_settled_discards_unfinished_tool_preview_and_invalidates_review() {
+        let run_id = RunId::new();
+        let mut store = ready_store(run_id);
+        let mut controller = RunRpcController::new(run_id, RuntimeLimits::default());
+        controller
+            .apply_event(&event(br#"{"type":"agent_start"}"#), &mut store)
+            .expect("agent start");
+        controller
+            .apply_event(
+                &event(br#"{"type":"tool_execution_start","toolCallId":"orphan-tool","toolName":"write","args":{}}"#),
+                &mut store,
+            )
+            .expect("tool start");
+        controller
+            .apply_event(
+                &event(br#"{"type":"tool_execution_update","toolCallId":"orphan-tool","toolName":"write","partialResult":{"content":[{"type":"text","text":"partial"}]}}"#),
+                &mut store,
+            )
+            .expect("tool update");
+        assert_eq!(controller.live_projection().active_tool_count(), 1);
+        assert_eq!(store.get(run_id).expect("run").change_revision(), 0);
+
+        controller
+            .apply_event(&event(br#"{"type":"agent_settled"}"#), &mut store)
+            .expect("agent settled");
+
+        assert_eq!(controller.live_projection().active_tool_count(), 0);
+        assert_eq!(
+            store.get(run_id).expect("run").activity_state(),
+            ActivityState::Idle
+        );
+        assert_eq!(
+            store.get(run_id).expect("run").change_revision(),
+            1,
+            "an unfinished tool at semantic settlement conservatively invalidates Git review"
         );
     }
 

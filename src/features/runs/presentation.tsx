@@ -61,6 +61,7 @@ export function runStateLabel(run: RunHydration): string {
   if (run.run.compacting) return "compacting";
   if (run.rpc?.retry && !run.rpc.retry.finished) return "retrying";
   if (run.rpc?.streamStalled) return "possibly stalled";
+  if ((run.rpc?.live.directBash.length ?? 0) > 0) return "command running";
   if (run.run.agentWorking) return "working";
   if (run.run.queue.steering + run.run.queue.followUp > 0) return "queued";
   return "ready";
@@ -136,6 +137,7 @@ export function canCloseRun(run: RunHydration): boolean {
   if (run.run.process !== "ready") return false;
   return (
     !run.run.agentWorking &&
+    (run.rpc?.live.directBash.length ?? 0) === 0 &&
     run.composerAvailability === "ready" &&
     !run.composerSubmissionPending &&
     !run.draftRestorePending &&
@@ -148,6 +150,7 @@ export function runDisplayPriority(run: RunHydration): number {
   if (
     run.run.process === "ready" &&
     (run.run.agentWorking ||
+      (run.rpc?.live.directBash.length ?? 0) > 0 ||
       Boolean(run.rpc?.retry && !run.rpc.retry.finished) ||
       Boolean(run.rpc?.summarizationRetry && !run.rpc.summarizationRetry.finished))
   )

@@ -65,6 +65,14 @@ export interface PiProbeReport {
   directNpmNode: boolean;
 }
 
+interface DesktopBashResult {
+  output: string;
+  exitCode: number;
+  cancelled: boolean;
+  truncated: boolean;
+  fullOutputPath: string | null;
+}
+
 export function fileToBase64(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -164,43 +172,136 @@ export function DroppedBytes(props: { count: number }) {
   );
 }
 
-export function LiveTimeline(props: { live: LiveProjectionSnapshot | undefined }) {
+export function LiveTimeline(props: { run: RunHydration }) {
+  const live = () => props.run.rpc?.live;
   const visibleTextBlocks = () =>
-    (props.live?.assistantBlocks ?? []).filter((block) => block.kind === "text");
-  const activeTool = () => props.live?.activeTools.at(-1);
-  const hasDirectBash = () => (props.live?.directBash.length ?? 0) > 0;
+    props.run.run.agentWorking
+      ? (live()?.assistantBlocks ?? []).filter((block) => block.kind === "text")
+      : [];
+  const visibleReasoning = () =>
+    props.run.run.agentWorking ? live()?.reasoning : undefined;
+  const activeTool = () => live()?.activeTools.at(-1);
+  const hasDirectBash = () => (live()?.directBash.length ?? 0) > 0;
   const activityLabel = () => {
     if (hasDirectBash()) return "Running a command…";
     const tool = activeTool();
     if (!tool) return undefined;
     return `${toolActivityLabel(tool.toolName)}…`;
   };
-  const hasContent = () =>
-    Boolean(
-      props.live &&
-        (props.live.reasoning || visibleTextBlocks().length > 0 || activityLabel()),
-    );
+  const modelActivityLabel = () => {
+    if (props.run.run.process === "starting") return "Pi process is starting";
+    if (props.run.run.process === "stopping") return "Pi process is stopping";
+    if (props.run.run.process === "exited") return "Pi process finished";
+    if (props.run.run.process === "failed") return "Pi process failed";
+    if (props.run.run.process === "quarantined") return "Pi process termination is uncertain";
+    if (props.run.run.agentWorking && props.run.rpc?.streamStalled)
+      return "Pi still reports this turn active, but no RPC activity has arrived for about two minutes";
+    const activity = activityLabel();
+    if (activity) {
+      return props.run.run.agentWorking ? `Model turn active · ${activity}` : activity;
+    }
+    if (!props.run.run.agentWorking) return "Pi is idle and ready";
+    const thinking = props.run.run.session.thinkingLevel;
+    return thinking && thinking !== "off"
+      ? "Model turn active · thinking / generating"
+      : "Model turn active · generating / waiting for provider";
+  };
+  const activityStatusClass = () => {
+    if (props.run.rpc?.streamStalled) return "live-activity-warning";
+    if (
+      props.run.run.agentWorking ||
+      hasDirectBash() ||
+      props.run.run.process === "starting" ||
+      props.run.run.process === "stopping"
+    )
+      return "live-activity-active";
+    return "live-activity-idle";
+  };
+  let viewport: HTMLElement | undefined;
+  let pinnedToBottom = true;
+
+  const scrollToBottomIfPinned = () => {
+    if (!pinnedToBottom) return;
+    queueMicrotask(() => {
+      if (viewport) viewport.scrollTop = viewport.scrollHeight;
+    });
+  };
+
+  createEffect(() => {
+    const projection = live();
+    props.run.run.agentWorking;
+    props.run.rpc?.streamStalled;
+    projection?.reasoning.length;
+    for (const block of projection?.assistantBlocks ?? []) block.text.length;
+    for (const tool of projection?.activeTools ?? []) tool.output.length;
+    for (const bash of projection?.directBash ?? []) bash.output.length;
+    scrollToBottomIfPinned();
+  });
+
+  onMount(scrollToBottomIfPinned);
 
   return (
-    <Show when={hasContent()}>
-      <section class="live-timeline" aria-label="Live Pi output">
-        <Show when={props.live?.reasoning}>
+    <section
+      class="live-timeline"
+      aria-label="Live Pi activity"
+      ref={viewport}
+      onScroll={() => {
+        if (!viewport) return;
+        pinnedToBottom = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight <= 24;
+      }}
+    >
+        <header class="live-timeline-heading">
+          <div>
+            <strong>Live activity</strong>
+            <span>Reasoning, tools, commands and streaming output</span>
+          </div>
+          <span class={activityStatusClass()} role="status" aria-live="polite">
+            {modelActivityLabel()}
+          </span>
+        </header>
+        <Show when={visibleReasoning()}>
           {(reasoning) => (
             <article class="live-block live-thinking live-reasoning" data-timeline-row="true">
               <header>
                 <strong>Reasoning</strong>
-                <span>Pi thinking</span>
+                <span>Model thinking stream</span>
               </header>
               <pre>{reasoning()}</pre>
-              <DroppedBytes count={props.live?.reasoningDroppedBytes ?? 0} />
+              <DroppedBytes count={live()?.reasoningDroppedBytes ?? 0} />
             </article>
           )}
         </Show>
+        <For each={live()?.activeTools ?? []}>
+          {(tool) => (
+            <article class="live-block live-tool" data-timeline-row="true">
+              <header>
+                <strong>{toolActivityLabel(tool.toolName)}</strong>
+                <span>{tool.toolName}</span>
+              </header>
+              <Show when={tool.output}>
+                {(output) => <pre>{output()}</pre>}
+              </Show>
+              <DroppedBytes count={tool.droppedBytes} />
+            </article>
+          )}
+        </For>
+        <For each={live()?.directBash ?? []}>
+          {(bash) => (
+            <article class="live-block live-command" data-timeline-row="true">
+              <header>
+                <strong>Command output</strong>
+                <span>{bash.requestId.slice(0, 12)}</span>
+              </header>
+              <pre>{bash.output}</pre>
+              <DroppedBytes count={bash.droppedBytes} />
+            </article>
+          )}
+        </For>
         <For each={visibleTextBlocks()}>
           {(block) => (
             <article class="live-block live-text" data-timeline-row="true">
               <header>
-                <strong>Assistant</strong>
+                <strong>Answer</strong>
                 <span>{block.complete ? "Complete" : "Streaming"}</span>
               </header>
               <pre>{block.text}</pre>
@@ -208,16 +309,7 @@ export function LiveTimeline(props: { live: LiveProjectionSnapshot | undefined }
             </article>
           )}
         </For>
-        <Show when={activityLabel()}>
-          {(label) => (
-            <div class="live-activity-status" role="status" aria-live="polite" data-timeline-row="true">
-              <span class="activity-pulse" aria-hidden="true" />
-              <span>{label()}</span>
-            </div>
-          )}
-        </Show>
       </section>
-    </Show>
   );
 }
 
@@ -268,6 +360,13 @@ export function ComposerCard(props: {
   const [statsError, setStatsError] = createSignal<string>();
   const [lastCompaction, setLastCompaction] = createSignal<CompactionResult>();
   const [lastAutoRetryCommand, setLastAutoRetryCommand] = createSignal<boolean>();
+  const [commandDraft, setCommandDraft] = createSignal("");
+  const [commandBusy, setCommandBusy] = createSignal(false);
+  const [commandError, setCommandError] = createSignal<string>();
+  const [commandResult, setCommandResult] = createSignal<DesktopBashResult>();
+  const [exportBusy, setExportBusy] = createSignal(false);
+  const [exportError, setExportError] = createSignal<string>();
+  const [exportPath, setExportPath] = createSignal<string>();
   const [commandSuggestionIndex, setCommandSuggestionIndex] = createSignal(0);
   const [reviewSummary, setReviewSummary] = createSignal<GitReviewSummary>();
   const [reviewChangeRevision, setReviewChangeRevision] = createSignal<number>();
@@ -305,10 +404,67 @@ export function ComposerCard(props: {
   });
 
   const commands = () => props.run.rpc?.capabilities.commands ?? [];
+  const hasActiveDirectBash = () => (props.run.rpc?.live.directBash.length ?? 0) > 0;
   const exactCommand = () => {
     const name = slashCommandName(props.state.value());
     if (!name) return undefined;
     return commands().find((command) => command.name === name);
+  };
+
+  const exportSessionHtml = async () => {
+    if (exportBusy() || props.run.run.process !== "ready") return;
+    setExportBusy(true);
+    setExportError(undefined);
+    try {
+      const path = await invokeDesktop<string>("runtime_export_session_html", {
+        request: { runId: props.run.run.id },
+      });
+      setExportPath(path);
+    } catch (error) {
+      setExportError(String(error));
+    } finally {
+      setExportBusy(false);
+    }
+  };
+
+  const runDirectCommand = async () => {
+    const command = commandDraft().trim();
+    if (
+      commandBusy() ||
+      hasActiveDirectBash() ||
+      !command ||
+      props.run.run.process !== "ready" ||
+      props.run.composerAvailability !== "ready"
+    )
+      return;
+    setCommandBusy(true);
+    setCommandError(undefined);
+    setCommandResult(undefined);
+    try {
+      const result = await invokeDesktop<DesktopBashResult>("runtime_run_bash", {
+        request: { runId: props.run.run.id, command },
+      });
+      setCommandResult(result);
+      await props.onResolved();
+    } catch (error) {
+      setCommandError(String(error));
+      await props.onResolved();
+    } finally {
+      setCommandBusy(false);
+    }
+  };
+
+  const abortDirectCommand = async () => {
+    if (!commandBusy() && !hasActiveDirectBash()) return;
+    try {
+      await invokeDesktop<void>("runtime_abort_bash", {
+        request: { runId: props.run.run.id },
+      });
+      await props.onResolved();
+    } catch (error) {
+      setCommandError(String(error));
+      await props.onResolved();
+    }
   };
 
   const setAutoRetry = async (enabled: boolean) => {
@@ -391,6 +547,7 @@ export function ComposerCard(props: {
     controlBusy() ||
     submitting() ||
     stopping() ||
+    hasActiveDirectBash() ||
     props.run.run.process !== "ready" ||
     props.run.composerAvailability === "blocked_by_compaction";
 
@@ -684,6 +841,7 @@ export function ComposerCard(props: {
     if (
       submitting() ||
       stopping() ||
+      hasActiveDirectBash() ||
       props.run.composerSubmissionPending ||
       props.run.draftRestorePending
     )
@@ -762,7 +920,7 @@ export function ComposerCard(props: {
   };
 
   const disabled = () => submitting() || stopping() || props.run.composerSubmissionPending;
-  const composerDisabled = () => disabled() || props.run.draftRestorePending;
+  const composerDisabled = () => disabled() || props.run.draftRestorePending || hasActiveDirectBash();
 
   return (
     <article class="composer-card">
@@ -964,7 +1122,72 @@ export function ComposerCard(props: {
         >
           {statsBusy() ? "Reading usage" : "Session usage"}
         </button>
+        <button
+          type="button"
+          disabled={exportBusy() || props.run.run.process !== "ready"}
+          onClick={() => void exportSessionHtml()}
+        >
+          {exportBusy() ? "Exporting" : "Export session HTML"}
+        </button>
         </div>
+        <form
+          class="direct-command-control"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void runDirectCommand();
+          }}
+        >
+          <label>
+            <span>One-shot command</span>
+            <input
+              value={commandDraft()}
+              disabled={commandBusy() || hasActiveDirectBash() || props.run.composerAvailability !== "ready"}
+              placeholder="git status --short"
+              onInput={(event) => setCommandDraft(event.currentTarget.value)}
+            />
+          </label>
+          <button
+            type="submit"
+            disabled={
+              commandBusy() ||
+              hasActiveDirectBash() ||
+              !commandDraft().trim() ||
+              props.run.run.process !== "ready" ||
+              props.run.composerAvailability !== "ready"
+            }
+          >
+            Run command
+          </button>
+          <Show when={commandBusy() || hasActiveDirectBash()}>
+            <button type="button" onClick={() => void abortDirectCommand()}>
+              Cancel command
+            </button>
+          </Show>
+          <Show when={hasActiveDirectBash()}>
+            <small role="status">Direct Bash owns this execution root until the command finishes or is cancelled.</small>
+          </Show>
+          <small>
+            Runs in this run's immutable execution root through Pi's bounded Bash RPC and is excluded
+            from model context. Live output appears in Live activity.
+          </small>
+        </form>
+        <Show when={commandResult()}>
+          {(result) => (
+            <section class="direct-command-result" aria-label="Last one-shot command result">
+              <header>
+                <strong>Last command · exit {result().exitCode}</strong>
+                <span>
+                  {result().cancelled ? "cancelled" : "completed"}
+                  {result().truncated ? " · bounded output" : ""}
+                </span>
+              </header>
+              <pre>{result().output || "No output"}</pre>
+              <Show when={result().fullOutputPath}>
+                {(path) => <small title={path()}>Full Pi output: {path()}</small>}
+              </Show>
+            </section>
+          )}
+        </Show>
         <Show when={lastCompaction()}>
           {(result) => (
             <p class="session-usage-note">
@@ -993,6 +1216,11 @@ export function ComposerCard(props: {
           )}
         </Show>
         <Show when={statsError()}>{(error) => <p class="error">Session usage: {error()}</p>}</Show>
+        <Show when={commandError()}>{(error) => <p class="error">Command: {error()}</p>}</Show>
+        <Show when={exportPath()}>
+          {(path) => <p class="session-usage-note" title={path()}>Session HTML exported to {path()}</p>}
+        </Show>
+        <Show when={exportError()}>{(error) => <p class="error">Session export: {error()}</p>}</Show>
         </section>
       </Show>
       <Show when={controlError()}>{(error) => <p class="error">Session control: {error()}</p>}</Show>
@@ -1138,12 +1366,8 @@ export function ComposerCard(props: {
           onFork={forkSession}
         />
       </Show>
-      <HistoryTimeline
-        run={props.run}
-        forkDisabled={controlDisabled() || props.run.composerAvailability !== "ready"}
-        onFork={forkSession}
-      />
-      <LiveTimeline live={props.run.rpc?.live} />
+      <HistoryTimeline run={props.run} />
+      <LiveTimeline run={props.run} />
       <div
         class="composer-input"
         onDragOver={(event) => {

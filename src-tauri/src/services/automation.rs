@@ -20,7 +20,7 @@ use tokio::sync::{Mutex, broadcast, watch};
 
 use crate::LaunchSelection;
 use crate::services::internal_run::terminate_internal_run;
-use crate::services::pi_session::{session_assistant_messages, submit_text_prompt};
+use crate::services::pi_session::submit_text_prompt;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -189,7 +189,7 @@ pub(crate) struct AutomationExecutionPlan {
 
 struct AutomationWorker {
     step_index: usize,
-    assistant_messages_at_start: usize,
+    assistant_generation_at_start: u64,
     turn_activity_observed: bool,
 }
 
@@ -198,7 +198,7 @@ enum AutomationLaunchAttempt {
     CancelledBeforeStart,
     Started {
         run_id: RunId,
-        assistant_messages_at_start: usize,
+        assistant_generation_at_start: u64,
     },
     FailedAfterStart {
         run_id: RunId,
@@ -309,8 +309,7 @@ async fn run_automation_execution_inner(
                 .await?;
                 continue;
             }
-            let assistant_messages = session_assistant_messages(&context.manager, run_id).await?;
-            if automation_worker_turn_complete(worker, assistant_messages) {
+            if automation_worker_turn_complete(worker, run.run.assistant_message_generation()) {
                 idle_workers.push(run_id);
             }
         }
@@ -424,14 +423,14 @@ async fn run_automation_execution_inner(
                 }
                 Ok(AutomationLaunchAttempt::Started {
                     run_id,
-                    assistant_messages_at_start,
+                    assistant_generation_at_start,
                 }) => {
                     next_step += 1;
                     workers.insert(
                         run_id,
                         AutomationWorker {
                             step_index,
-                            assistant_messages_at_start,
+                            assistant_generation_at_start,
                             turn_activity_observed: false,
                         },
                     );
@@ -678,9 +677,9 @@ async fn launch_automation_worker(
         .await
         .map_err(|error| error.to_string())?;
     drop(_gate);
-    let assistant_messages_at_start =
+    let assistant_generation_at_start =
         match wait_automation_run_ready(&context.manager, context.limits, run_id).await {
-            Ok(messages) => messages,
+            Ok(generation) => generation,
             Err(error) => {
                 return Ok(AutomationLaunchAttempt::FailedAfterStart { run_id, error });
             }
@@ -690,12 +689,12 @@ async fn launch_automation_worker(
     }
     Ok(AutomationLaunchAttempt::Started {
         run_id,
-        assistant_messages_at_start,
+        assistant_generation_at_start,
     })
 }
 
-fn automation_worker_turn_complete(worker: &AutomationWorker, assistant_messages: usize) -> bool {
-    worker.turn_activity_observed || assistant_messages > worker.assistant_messages_at_start
+fn automation_worker_turn_complete(worker: &AutomationWorker, assistant_generation: u64) -> bool {
+    worker.turn_activity_observed || assistant_generation > worker.assistant_generation_at_start
 }
 
 fn automation_execution_key(execution_id: AutomationExecutionId) -> String {
@@ -746,7 +745,7 @@ async fn wait_automation_run_ready(
     manager: &RuntimeManagerHandle,
     limits: RuntimeLimits,
     run_id: RunId,
-) -> Result<usize, String> {
+) -> Result<u64, String> {
     let mut state_changes = manager.subscribe_state_changes();
     let deadline = Duration::from_millis(limits.startup_rpc_deadline_ms.saturating_add(1_000));
     tokio::time::timeout(deadline, async {
@@ -764,7 +763,7 @@ async fn wait_automation_run_ready(
                 ));
             }
             if run.run.process_state() == ProcessState::Ready && !run.draft_restore_pending {
-                return session_assistant_messages(manager, run_id).await;
+                return Ok(run.run.assistant_message_generation());
             }
             match state_changes.recv().await {
                 Ok(()) | Err(broadcast::error::RecvError::Lagged(_)) => {}
@@ -789,7 +788,7 @@ mod tests {
     fn worker_completion_accepts_real_activity_or_a_new_assistant_message() {
         let mut worker = AutomationWorker {
             step_index: 0,
-            assistant_messages_at_start: 3,
+            assistant_generation_at_start: 3,
             turn_activity_observed: false,
         };
         assert!(!automation_worker_turn_complete(&worker, 3));
@@ -894,6 +893,10 @@ mod tests {
                 .expect("final capacity")
                 .active_runs,
             0
+        );
+        assert!(
+            !fixture.root.join("workflow-session-stats.log").exists(),
+            "automation completion must not poll Pi get_session_stats"
         );
         manager
             .shutdown()

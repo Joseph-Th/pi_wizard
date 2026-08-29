@@ -24,14 +24,16 @@ impl SupervisionStatus {
 #[serde(rename_all = "camelCase")]
 pub struct SupervisionSnapshot {
     pub id: SupervisionId,
-    pub project_id: ProjectId,
+    pub project_ids: Vec<ProjectId>,
+    pub host_project_id: ProjectId,
     pub supervisor_run_id: Option<RunId>,
     pub provider: Option<String>,
     pub model: Option<String>,
     pub thinking: Option<ThinkingLevel>,
     pub cycles: usize,
-    pub max_cycles: usize,
+    pub max_cycles: Option<usize>,
     pub watched_runs: usize,
+    pub last_decision: Option<String>,
     pub status: SupervisionStatus,
     pub error: Option<String>,
 }
@@ -40,15 +42,19 @@ impl SupervisionSnapshot {
     #[must_use]
     pub fn new(
         id: SupervisionId,
-        project_id: ProjectId,
+        mut project_ids: Vec<ProjectId>,
+        host_project_id: ProjectId,
         provider: Option<String>,
         model: Option<String>,
         thinking: Option<ThinkingLevel>,
-        max_cycles: usize,
+        max_cycles: Option<usize>,
     ) -> Self {
+        project_ids.sort_by_key(ToString::to_string);
+        project_ids.dedup();
         Self {
             id,
-            project_id,
+            project_ids,
+            host_project_id,
             supervisor_run_id: None,
             provider,
             model,
@@ -56,6 +62,7 @@ impl SupervisionSnapshot {
             cycles: 0,
             max_cycles,
             watched_runs: 0,
+            last_decision: None,
             status: SupervisionStatus::Starting,
             error: None,
         }
@@ -68,16 +75,22 @@ mod tests {
 
     #[test]
     fn supervision_state_is_independent_from_automation_identity() {
+        let first = ProjectId::new();
+        let second = ProjectId::new();
         let snapshot = SupervisionSnapshot::new(
             SupervisionId::new(),
-            ProjectId::new(),
+            vec![first, second],
+            first,
             Some("provider".to_owned()),
             Some("model".to_owned()),
             Some(ThinkingLevel::High),
-            12,
+            None,
         );
         assert_eq!(snapshot.status, SupervisionStatus::Starting);
-        assert_eq!(snapshot.max_cycles, 12);
+        assert_eq!(snapshot.project_ids.len(), 2);
+        assert_eq!(snapshot.host_project_id, first);
+        assert_eq!(snapshot.max_cycles, None);
+        assert!(snapshot.last_decision.is_none());
         assert!(snapshot.supervisor_run_id.is_none());
     }
 }

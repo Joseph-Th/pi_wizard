@@ -47,6 +47,14 @@ export interface StartRunResult {
   initialTaskError: string | null;
 }
 
+export interface SessionSyncState {
+  initialized: boolean;
+  cursor: string | null;
+  leafId: string | null;
+  resyncRequired: boolean;
+  revision: number;
+}
+
 export function dialogTimeoutLabel(dialog: PendingExtensionDialog): string {
   const remaining = dialog.remainingTimeoutMs;
   if (remaining === null) return "No Pi-side timeout";
@@ -339,6 +347,7 @@ export interface RunHydration {
   draftRestorePending: boolean;
   rpc: {
     capabilities: RunCapabilities;
+    sessionSync: SessionSyncState;
     pendingDialogs: PendingExtensionDialog[];
     live: LiveProjectionSnapshot;
     extensionUi: ExtensionUiSnapshot;
@@ -508,6 +517,8 @@ export interface SessionTimelineItem {
 
 export interface SessionHistoryPage {
   sessionId: string;
+  appendCursor: string | null;
+  leafId: string | null;
   items: SessionTimelineItem[];
   nextCursor: SessionHistoryCursor | null;
   scannedBytes: number;

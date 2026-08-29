@@ -44,6 +44,8 @@ These are possible directions, not queued work:
 
 Each candidate requires explicit user demand and a design update before implementation. A Git worktree must never be relabeled as a security sandbox to approximate the first item.
 
+Continuous foreground Supervision is already implemented product scope. **Scheduled autonomous jobs** here means time-triggered or background execution that continues independently of a user-started desktop supervision session.
+
 ## Compatibility-driven work
 
 Upstream Pi changes may require work without changing product scope. Treat these as maintenance when they affect supported behavior:

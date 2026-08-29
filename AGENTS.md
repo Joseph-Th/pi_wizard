@@ -52,6 +52,7 @@ Optimize for Windows desktop reliability, Pi integration, Git/worktree correctne
 
 - Process lifecycle and agent activity are separate state axes; Pi `agent_settled` does not mean the process exited.
 - A live run has one immutable canonical execution root. Navigation cannot retarget it.
+- The execution root has one Pi Wizard mutation owner at a time. An accepted idle Prompt owns the pre-`agent_start` handoff; active direct Bash excludes overlapping model/session mutation and Close until it completes or is cancelled. Read-only probes/export and Bash cancellation may remain available.
 - Stop preserves recoverable queued user text before aborting. Unconfirmed termination becomes `Quarantined`; such a run cannot accept further RPC writes or be shown as safely stopped.
 - Process termination targets the exact owned process identity/tree. Never kill by executable name or wildcard.
 - Windows production runs must not retain unresolved command-shell wrappers or open console windows.
