@@ -16,6 +16,7 @@ python tools/verify.py full
 
 - Rust formatting check;
 - locked deterministic `pi-wizard-core` tests with an explicit four-thread harness cap. This limits incidental Windows `.cmd`/Node/process-tree fixture overlap independently from the product's eight-session live-run ceiling instead of letting Cargo scale OS-process tests to the host CPU count; production lifecycle deadlines remain unchanged;
+- a renderer/Tauri surface contract that enumerates every `runtime_*` command literal, requires a matching host `generate_handler!` registration, rejects newly introduced renderer-side Tauri API modules until their ACL is reviewed, and requires the main-window event listen/unlisten permissions;
 - deterministic renderer crash-loop and accessibility structure contract tests;
 - strict TypeScript type checking.
 
@@ -32,7 +33,8 @@ python tools/verify.py full
 - an ignored desktop cold/warm app-owned-state startup measurement with a deliberately loose regression ceiling;
 - desktop configuration/version/CSP/icon checks;
 - an optimized Tauri Windows desktop build with `--no-bundle`;
-- a post-build PE-header assertion that the release executable is `IMAGE_SUBSYSTEM_WINDOWS_GUI`, preventing a console/terminal window from being created when the packaged desktop app starts.
+- a post-build PE-header assertion that the release executable is `IMAGE_SUBSYSTEM_WINDOWS_GUI`, preventing a console/terminal window from being created when the packaged desktop app starts;
+- a packaged-WebView smoke that launches that exact release executable under a loopback-only WebView2 DevTools port, exercises representative custom IPC plus `plugin:event|listen`/`unlisten`, navigates every primary surface, and fails on visible ACL/CSP/runtime-update errors. This is the release boundary that catches Tauri capability mistakes which source-only or process-alive checks cannot detect.
 
 Runtime diagnostics tests prove the snapshot is explicit/pull-only, serializes only bounded counter data, reports exact process ownership and bounded per-run state/backlog values, counts delivered UI events without retaining them, and uses a fixed recent RPC traffic window that decays to zero without a timer. Desktop tests prove active Git-review and session-catalog job counts come from the existing job owners, while the renderer source contract keeps diagnostics behind an explicit refresh action and development long-task observation behind `import.meta.env.DEV`.
 

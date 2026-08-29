@@ -37,6 +37,7 @@ def quick() -> None:
         ]
     )
     run([sys.executable, "-B", str(ROOT / "tools" / "test_smoke_live_pi.py")])
+    run([sys.executable, "-B", str(ROOT / "tools" / "test_tauri_surface_contract.py")])
     run([tool("npm"), "run", "test:renderer-recovery"])
     run([tool("npm"), "run", "test:accessibility"])
     run([tool("npm"), "run", "check"])
@@ -89,6 +90,7 @@ def full() -> None:
     run([sys.executable, str(ROOT / "tools" / "release_check.py")])
     run([tool("npm"), "run", "desktop:build"])
     run([sys.executable, str(ROOT / "tools" / "check_windows_gui_subsystem.py")])
+    run([tool("node"), str(ROOT / "tools" / "smoke_packaged_desktop.mjs")])
 
 
 def main() -> None:

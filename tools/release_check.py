@@ -17,6 +17,9 @@ def main() -> None:
     cargo = tomllib.loads((ROOT / "Cargo.toml").read_text(encoding="utf-8"))
     package = json.loads((ROOT / "package.json").read_text(encoding="utf-8"))
     tauri = json.loads((ROOT / "src-tauri" / "tauri.conf.json").read_text(encoding="utf-8"))
+    main_capability_path = ROOT / "src-tauri" / "capabilities" / "main.json"
+    require(main_capability_path.is_file(), "main-window Tauri capability is required")
+    main_capability = json.loads(main_capability_path.read_text(encoding="utf-8"))
     desktop_main = (ROOT / "src-tauri" / "src" / "main.rs").read_text(encoding="utf-8")
 
     version = cargo["workspace"]["package"]["version"]
@@ -28,6 +31,12 @@ def main() -> None:
     require(
         build["devUrl"].startswith("http://127.0.0.1:"),
         "development URL must remain loopback-only",
+    )
+
+    windows = tauri["app"].get("windows", [])
+    require(
+        len(windows) == 1 and windows[0].get("label") == "main",
+        "the desktop window must keep the explicit 'main' label used by its Tauri capability",
     )
 
     security = tauri["app"]["security"]["csp"]
@@ -61,6 +70,20 @@ def main() -> None:
 
     identifier = tauri.get("identifier", "")
     require(bool(identifier) and "." in identifier, "desktop application identifier is required")
+
+    require(
+        main_capability.get("windows") == ["main"],
+        "main-window capability must stay scoped to the Tauri main window",
+    )
+    event_permissions = set(main_capability.get("permissions", []))
+    require(
+        "core:event:allow-listen" in event_permissions,
+        "main window must be allowed to listen for backend invalidation events",
+    )
+    require(
+        "core:event:allow-unlisten" in event_permissions,
+        "main window must be allowed to unregister backend invalidation listeners",
+    )
 
     scripts = package["scripts"]
     require("desktop:build" in scripts, "release desktop build command is required")

@@ -29,6 +29,9 @@ const runs = [
   readFileSync(resolve(root, "src", "features", "runs", "presentation.tsx"), "utf8"),
 ].join("\n");
 const desktop = readFileSync(resolve(root, "src", "lib", "desktop.ts"), "utf8");
+const mainCapability = JSON.parse(
+  readFileSync(resolve(root, "src-tauri", "capabilities", "main.json"), "utf8"),
+);
 const desktopHost = [
   readFileSync(resolve(root, "src-tauri", "src", "app", "mod.rs"), "utf8"),
   readFileSync(resolve(root, "src-tauri", "src", "app", "desktop_commands.rs"), "utf8"),
@@ -78,6 +81,13 @@ requireContract(
 );
 requireContract(ui.includes('class="app-shell"'), "desktop shell must expose sidebar/main navigation");
 requireContract(ui.includes('class="run-grid"'), "dashboard must render compact run cards");
+requireContract(
+  mainCapability.windows?.length === 1 &&
+    mainCapability.windows[0] === "main" &&
+    mainCapability.permissions?.includes("core:event:allow-listen") &&
+    mainCapability.permissions?.includes("core:event:allow-unlisten"),
+  "the packaged main window must have Tauri ACL permission to install and remove backend event listeners",
+);
 requireContract(
   ui.includes('view() === "automation"') &&
     ui.includes("function AutomationView") &&

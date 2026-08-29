@@ -12,6 +12,7 @@
   "app": {
     "windows": [
       {
+        "label": "main",
         "title": "Pi Wizard",
         "width": 1180,
         "height": 760,
