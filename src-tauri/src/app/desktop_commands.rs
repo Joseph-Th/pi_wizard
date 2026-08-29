@@ -785,6 +785,14 @@ pub(super) struct RuntimeAttachmentLimits {
     max_name_bytes: usize,
 }
 
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct DesktopStartupSnapshot {
+    runtime: RuntimeHydrationSnapshot,
+    capacity: DesktopRuntimeCapacity,
+    attachment_limits: RuntimeAttachmentLimits,
+}
+
 #[derive(Clone, Copy, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct SubmitDraftRequest {
@@ -937,9 +945,32 @@ pub(super) fn runtime_attachment_limits(
     }
 }
 
+async fn desktop_startup_snapshot(
+    runtime: &DesktopRuntime,
+) -> Result<DesktopStartupSnapshot, String> {
+    let hydration = runtime
+        .manager
+        .hydrate()
+        .await
+        .map_err(|error| error.to_string())?;
+    let capacity = runtime.capacity_report().await?;
+    Ok(DesktopStartupSnapshot {
+        runtime: hydration,
+        capacity,
+        attachment_limits: RuntimeAttachmentLimits {
+            max_attachments: runtime.limits.max_attachments_per_prompt,
+            max_image_bytes: runtime.limits.max_attachment_bytes_per_image,
+            max_aggregate_bytes: runtime.limits.max_attachment_bytes_per_prompt,
+            max_name_bytes: runtime.limits.max_attachment_name_bytes,
+        },
+    })
+}
+
 #[tauri::command]
-pub(super) fn runtime_backend_ready(_runtime: tauri::State<'_, DesktopRuntime>) -> bool {
-    true
+pub(super) async fn runtime_backend_ready(
+    runtime: tauri::State<'_, DesktopRuntime>,
+) -> Result<DesktopStartupSnapshot, String> {
+    desktop_startup_snapshot(&runtime).await
 }
 
 #[tauri::command]
@@ -1820,12 +1851,21 @@ mod tests {
     }
 
     #[test]
-    fn fresh_desktop_runtime_hydrates_through_runtime_manager() {
+    fn fresh_desktop_startup_snapshot_proves_runtime_manager_hydration() {
         let runtime = DesktopRuntime::new().expect("desktop runtime");
-        let snapshot = tauri::async_runtime::block_on(runtime.manager.hydrate()).expect("hydrate");
-        assert_eq!(snapshot.schema_version, RUNTIME_HYDRATION_SCHEMA_VERSION);
-        assert_eq!(snapshot.runtime_revision, 0);
-        assert!(snapshot.runs.is_empty());
+        let snapshot =
+            tauri::async_runtime::block_on(desktop_startup_snapshot(&runtime)).expect("startup");
+        assert_eq!(
+            snapshot.runtime.schema_version,
+            RUNTIME_HYDRATION_SCHEMA_VERSION
+        );
+        assert_eq!(snapshot.runtime.runtime_revision, 0);
+        assert!(snapshot.runtime.runs.is_empty());
+        assert_eq!(snapshot.capacity.active_runs, 0);
+        assert_eq!(
+            snapshot.attachment_limits.max_attachments,
+            runtime.limits.max_attachments_per_prompt
+        );
         tauri::async_runtime::block_on(runtime.manager.shutdown()).expect("shutdown manager");
     }
 

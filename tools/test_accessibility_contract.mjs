@@ -99,7 +99,7 @@ requireContract(
     ui.includes("refreshHydration(),") &&
     ui.includes("refreshCapacity(),") &&
     ui.includes("const installRuntimeListeners = async () =>") &&
-    ui.includes('onClick={() => void connectBackend()}') &&
+    ui.includes("void connectBackend();") &&
     ui.includes("Git-isolated workers") &&
     !automation.includes("supervisor") &&
     ui.includes('view() === "supervision"') &&
@@ -115,10 +115,19 @@ requireContract(
   entry.includes("waitForDesktopBackend") &&
     entry.includes("<BackendGate />") &&
     entry.includes("Starting Pi Wizard") &&
-    desktop.includes('invokeDesktop<boolean>("runtime_backend_ready")') &&
-    desktopHost.includes("fn runtime_backend_ready") &&
+    desktop.includes('invokeDesktop<T>("runtime_backend_ready")') &&
+    desktopHost.includes("async fn runtime_backend_ready") &&
+    desktopHost.includes("DesktopStartupSnapshot") &&
+    desktopHost.includes(".manager") &&
+    desktopHost.includes(".hydrate()") &&
     desktopHost.includes("desktop_commands::runtime_backend_ready") &&
+    entry.includes("waitForDesktopBackend<AppStartupSnapshot>()") &&
+    app.includes("props.startup.runtime") &&
+    app.includes("props.startup.capacity") &&
+    app.includes("props.startup.attachmentLimits") &&
+    !app.includes('invokeDesktop<RuntimeAttachmentLimits>("runtime_attachment_limits")') &&
     app.includes("void connectBackend();") &&
+    !app.includes("Runtime state unavailable") &&
     !app.includes("invokeDesktopAtStartup") &&
     !app.includes("retryStartupOperation") &&
     !app.includes("Backend connection failed"),

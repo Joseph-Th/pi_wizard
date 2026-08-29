@@ -57,20 +57,30 @@ import {
   PiRuntimeNoticePanel,
 } from "../features/runs/RunSurface";
 
-export function App() {
-  const [runtime, setRuntime] = createSignal<RuntimeHydration>();
+export interface AppStartupSnapshot {
+  runtime: RuntimeHydration;
+  capacity: RuntimeCapacitySnapshot;
+  attachmentLimits: RuntimeAttachmentLimits;
+}
+
+export function App(props: { startup: AppStartupSnapshot }) {
+  const [runtime, setRuntime] = createSignal<RuntimeHydration>(props.startup.runtime);
   const [runtimeError, setRuntimeError] = createSignal<string>();
-  const [capacity, setCapacity] = createSignal<RuntimeCapacitySnapshot>();
+  const [capacity, setCapacity] = createSignal<RuntimeCapacitySnapshot>(props.startup.capacity);
   const [capacityError, setCapacityError] = createSignal<string>();
   const [automation, setAutomation] = createSignal<DesktopAutomationSnapshot>();
   const [automationError, setAutomationError] = createSignal<string>();
   const [supervision, setSupervision] = createSignal<SupervisionSnapshot[]>([]);
   const [supervisionError, setSupervisionError] = createSignal<string>();
   const [capacityBusy, setCapacityBusy] = createSignal(false);
-  const [liveRunLimitDraft, setLiveRunLimitDraft] = createSignal("");
+  const [liveRunLimitDraft, setLiveRunLimitDraft] = createSignal(
+    String(props.startup.capacity.liveRunLimit),
+  );
   const [piProbe, setPiProbe] = createSignal<PiProbeReport>();
   const [piProbeError, setPiProbeError] = createSignal<string>();
-  const [attachmentLimits, setAttachmentLimits] = createSignal<RuntimeAttachmentLimits>();
+  const [attachmentLimits, setAttachmentLimits] = createSignal<RuntimeAttachmentLimits>(
+    props.startup.attachmentLimits,
+  );
   const [deliveredEvents, setDeliveredEvents] = createSignal(0);
   const [diagnostics, setDiagnostics] = createSignal<DesktopRuntimeDiagnostics>();
   const [diagnosticsBusy, setDiagnosticsBusy] = createSignal(false);
@@ -593,9 +603,10 @@ export function App() {
   };
 
   onMount(() => {
-    // The root renderer does not mount App until the Tauri backend has
-    // positively answered runtime_backend_ready. Subscribe before hydrating
-    // so a runtime change during this handoff cannot be lost.
+    // The root renderer does not mount App until runtime_backend_ready has
+    // already returned a real RuntimeManager hydration plus capacity and
+    // attachment limits. Subscribe before the reconciliation hydration so a
+    // runtime change during the bootstrap-to-listener handoff cannot be lost.
     void connectBackend();
 
     void invokeDesktop<PiProbeReport>("probe_pi_environment")
@@ -604,14 +615,6 @@ export function App() {
       })
       .catch((error) => {
         if (!disposed) setPiProbeError(String(error));
-      });
-
-    void invokeDesktop<RuntimeAttachmentLimits>("runtime_attachment_limits")
-      .then((limits) => {
-        if (!disposed) setAttachmentLimits(limits);
-      })
-      .catch((error) => {
-        if (!disposed) setRuntimeError(`Attachment limits unavailable: ${String(error)}`);
       });
 
     if (import.meta.env.DEV && typeof PerformanceObserver !== "undefined") {
@@ -880,24 +883,7 @@ export function App() {
               </For>
             </section>
           </Show>
-          <Show when={runtimeError() && !runtime()}>
-            <section class="runtime-recovery" aria-label="Renderer recovery">
-              <div>
-                <strong>Runtime state unavailable</strong>
-                <span>Retry reinstalls runtime listeners and rehydrates state without restarting Pi runs.</span>
-              </div>
-              <div class="runtime-recovery-actions">
-                <button type="button" onClick={() => void connectBackend()}>
-                  Retry
-                </button>
-                <button type="button" onClick={() => window.location.reload()}>
-                  Reload UI
-                </button>
-              </div>
-            </section>
-          </Show>
-
-          <Show when={runtime() ? runtimeError() : undefined}>
+          <Show when={runtimeError()}>
             {(error) => <p class="app-error">Runtime update failed: {error()}</p>}
           </Show>
 

@@ -15,16 +15,14 @@ const STARTUP_BACKEND_RETRY_DELAYS_MS = [
   5_000,
 ] as const;
 
-export async function waitForDesktopBackend(): Promise<void> {
+export async function waitForDesktopBackend<T>(): Promise<T> {
   let lastError: unknown;
   for (const delayMs of STARTUP_BACKEND_RETRY_DELAYS_MS) {
     if (delayMs > 0) {
       await new Promise<void>((resolve) => window.setTimeout(resolve, delayMs));
     }
     try {
-      const ready = await invokeDesktop<boolean>("runtime_backend_ready");
-      if (ready) return;
-      lastError = new Error("desktop backend reported that it is not ready");
+      return await invokeDesktop<T>("runtime_backend_ready");
     } catch (error) {
       lastError = error;
     }

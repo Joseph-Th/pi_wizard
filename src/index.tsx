@@ -1,7 +1,7 @@
 import { createSignal, ErrorBoundary, onCleanup, onMount, Show } from "solid-js";
 import { render } from "solid-js/web";
 
-import { App } from "./app/App";
+import { App, type AppStartupSnapshot } from "./app/App";
 import { waitForDesktopBackend } from "./lib/desktop";
 import {
   boundRendererErrorDetail,
@@ -40,7 +40,7 @@ function clearRendererCrashCount() {
   }
 }
 
-function StableApp() {
+function StableApp(props: { startup: AppStartupSnapshot }) {
   let stableTimer: number | undefined;
   onMount(() => {
     stableTimer = window.setTimeout(clearRendererCrashCount, STABLE_RENDERER_WINDOW_MS);
@@ -48,11 +48,11 @@ function StableApp() {
   onCleanup(() => {
     if (stableTimer !== undefined) window.clearTimeout(stableTimer);
   });
-  return <App />;
+  return <App startup={props.startup} />;
 }
 
 function BackendGate() {
-  const [ready, setReady] = createSignal(false);
+  const [startup, setStartup] = createSignal<AppStartupSnapshot>();
   const [error, setError] = createSignal<string>();
   let disposed = false;
   let attempt = 0;
@@ -60,9 +60,9 @@ function BackendGate() {
   const connect = () => {
     const currentAttempt = ++attempt;
     setError(undefined);
-    void waitForDesktopBackend()
-      .then(() => {
-        if (!disposed && currentAttempt === attempt) setReady(true);
+    void waitForDesktopBackend<AppStartupSnapshot>()
+      .then((snapshot) => {
+        if (!disposed && currentAttempt === attempt) setStartup(snapshot);
       })
       .catch((startupError) => {
         if (!disposed && currentAttempt === attempt) setError(String(startupError));
@@ -77,7 +77,7 @@ function BackendGate() {
 
   return (
     <Show
-      when={ready()}
+      when={startup()}
       fallback={
         <main class="renderer-recovery-screen">
           <section class="renderer-recovery-card" aria-label="Desktop startup">
@@ -103,7 +103,7 @@ function BackendGate() {
         </main>
       }
     >
-      <StableApp />
+      {(snapshot) => <StableApp startup={snapshot()} />}
     </Show>
   );
 }
