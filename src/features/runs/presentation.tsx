@@ -11,7 +11,6 @@ import type {
 } from "../automation/types";
 import { ModelPicker } from "../models/ModelPicker";
 import type { ModelSelection } from "../models/types";
-import { ProjectManager } from "../projects/ProjectManager";
 import { ProjectLauncher } from "../projects/ProjectLauncher";
 import { SessionCatalogBrowser } from "../sessions/SessionCatalogBrowser";
 import { RecentSessionsView } from "../sessions/RecentSessionsView";
@@ -71,6 +70,24 @@ export function runQueuedCount(run: RunHydration): number {
   return run.run.queue.steering + run.run.queue.followUp;
 }
 
+export function toolActivityLabel(toolName: string): string {
+  const name = toolName.toLowerCase();
+  if (name.includes("read")) return "Reading project files";
+  if (name.includes("search") || name.includes("grep") || name.includes("find"))
+    return "Searching the codebase";
+  if (name.includes("edit") || name.includes("write") || name.includes("patch"))
+    return "Editing files";
+  if (name.includes("git")) return "Checking repository state";
+  if (
+    name.includes("bash") ||
+    name.includes("shell") ||
+    name.includes("exec") ||
+    name.includes("run")
+  )
+    return "Running a command";
+  return "Working with a project tool";
+}
+
 export function runActivityLabel(run: RunHydration): string {
   const pending = run.rpc?.pendingDialogs[0];
   if (pending) return `Waiting for input: ${pending.request.kind.title}`;
@@ -93,8 +110,8 @@ export function runActivityLabel(run: RunHydration): string {
   }
   if (run.rpc?.streamStalled) return "No Pi RPC event for about 2 minutes";
   const tool = run.rpc?.live.activeTools[0];
-  if (tool) return `Running tool: ${tool.toolName}`;
-  if ((run.rpc?.live.directBash.length ?? 0) > 0) return "Running shell command";
+  if (tool) return toolActivityLabel(tool.toolName);
+  if ((run.rpc?.live.directBash.length ?? 0) > 0) return "Running a command";
   if (run.run.agentWorking) return "Pi is working";
   const queued = runQueuedCount(run);
   if (queued > 0) return `${queued} queued message${queued === 1 ? "" : "s"}`;

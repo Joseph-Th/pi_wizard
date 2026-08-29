@@ -304,6 +304,13 @@ async function main() {
     );
 
     const modelPicker = await client.evaluate(String.raw`(async () => {
+      const invoke = window.__TAURI_INTERNALS__.invoke;
+      const projects = await invoke("runtime_list_projects", {});
+      const oldProjectManager = document.querySelector(".project-manager");
+      const sidebar = document.querySelector(".app-sidebar");
+      const projectsNavButton = [...sidebar.querySelectorAll("button")].some(
+        (candidate) => candidate.textContent.trim() === "Projects"
+      );
       const newRun = [...document.querySelectorAll("button")].find(
         (candidate) => candidate.textContent.trim() === "New run"
       );
@@ -324,12 +331,36 @@ async function main() {
       const modelSelect = [...document.querySelectorAll("select")].find((candidate) =>
         [...candidate.options].some((option) => option.textContent.includes("Alpha"))
       );
+      const refreshDisabledBeforeProjectSelection = refresh?.disabled ?? null;
+      const selectableModelsBeforeProjectSelection = modelSelect?.options.length ?? 0;
+      const projectSelect = document.querySelector(".project-preset-row select");
+      const presentProjects = projects.filter((project) => project.status === "present");
+      const projectOptionValues = projectSelect
+        ? [...projectSelect.options].map((option) => option.value)
+        : [];
+      let routedProjectPath = null;
+      if (projectSelect && presentProjects.length > 0) {
+        projectSelect.value = presentProjects[0].canonicalRoot;
+        projectSelect.dispatchEvent(new Event("change", { bubbles: true }));
+        await new Promise((resolveDelay) => window.setTimeout(resolveDelay, 150));
+        routedProjectPath = document.querySelector(".project-preset-path")?.textContent.trim() ?? null;
+      }
       return {
         refreshFound: Boolean(refresh),
-        refreshDisabled: refresh?.disabled ?? null,
+        refreshDisabled: refreshDisabledBeforeProjectSelection,
         globalModelsVisible: text.includes("3 models available from Pi without project context"),
         diagnosticsVisible: text.includes("Model diagnostics"),
-        selectableModels: modelSelect?.options.length ?? 0,
+        selectableModels: selectableModelsBeforeProjectSelection,
+        oldProjectManager: Boolean(oldProjectManager),
+        projectsNavButton,
+        projectPresetSelect: Boolean(projectSelect),
+        canonicalProjectOptions: presentProjects.every((project) =>
+          projectOptionValues.includes(project.canonicalRoot)
+        ),
+        routedProjectPath,
+        expectedProjectPath: presentProjects[0]?.canonicalRoot ?? null,
+        manageSavedProjects:
+          presentProjects.length === 0 || Boolean(document.querySelector(".project-preset-manager")),
         visibleError:
           text.includes("Pi model discovery:") ||
           text.includes("not allowed by ACL") ||
@@ -342,6 +373,17 @@ async function main() {
     requireContract(modelPicker.globalModelsVisible === true, "global Pi models did not load before project selection");
     requireContract(modelPicker.diagnosticsVisible === true, "model probe diagnostics are missing");
     requireContract(modelPicker.selectableModels >= 4, "Pi model choices are not selectable in the packaged renderer");
+    requireContract(modelPicker.oldProjectManager === false, "obsolete Projects sidebar manager is still mounted");
+    requireContract(modelPicker.projectsNavButton === false, "obsolete Projects sidebar navigation is still visible");
+    requireContract(modelPicker.projectPresetSelect === true, "New Run project preset dropdown is missing");
+    requireContract(modelPicker.canonicalProjectOptions === true, "saved project presets do not use canonical registered paths");
+    if (modelPicker.expectedProjectPath) {
+      requireContract(
+        modelPicker.routedProjectPath === modelPicker.expectedProjectPath,
+        "selecting a saved project preset did not route New Run to its canonical directory",
+      );
+    }
+    requireContract(modelPicker.manageSavedProjects === true, "saved project management is not reachable from New Run");
     requireContract(modelPicker.visibleError === false, "model picker shows a packaged discovery/runtime error");
 
     const navigation = await client.evaluate(String.raw`(async () => {
@@ -386,7 +428,7 @@ async function main() {
     );
 
     console.log("packaged desktop WebView smoke passed");
-    console.log("verified: custom IPC, event listen/unlisten ACL, global model discovery with enabled refresh, main navigation, no visible ACL/CSP/runtime-update failure");
+    console.log("verified: custom IPC, event listen/unlisten ACL, global model discovery, project preset routing without sidebar manager, main navigation, no visible ACL/CSP/runtime-update failure");
   } finally {
     client?.close();
     await stopChild(child);

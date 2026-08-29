@@ -261,7 +261,7 @@ impl RunRpcController {
     ) -> Result<RunRpcEffect, RunRpcControllerError> {
         let effect = match event.kind {
             RpcEventKind::AgentStart => {
-                self.live.clear_assistant_message();
+                self.live.start_agent_turn();
                 if self
                     .compaction
                     .as_ref()
@@ -481,7 +481,7 @@ impl RunRpcController {
                 RunRpcEffect::SemanticStateChanged
             }
             RpcEventKind::MessageStart => {
-                self.live.clear_assistant_message();
+                self.live.start_assistant_message();
                 RunRpcEffect::AssistantMessageReset
             }
             RpcEventKind::MessageUpdate => {
@@ -1449,6 +1449,36 @@ mod tests {
             AssistantContentKind::Thinking
         );
         assert!(snapshot.assistant_blocks[1].complete);
+        assert_eq!(snapshot.reasoning, "final reasoning");
+
+        controller
+            .apply_event(&event(br#"{"type":"message_start"}"#), &mut store)
+            .expect("next assistant message");
+        let carried = controller.live_projection().snapshot();
+        assert_eq!(carried.reasoning, "final reasoning");
+        assert!(carried.assistant_blocks.is_empty());
+
+        controller
+            .apply_event(
+                &event(br#"{"type":"message_update","assistantMessageEvent":{"type":"thinking_start","contentIndex":0}}"#),
+                &mut store,
+            )
+            .expect("next thinking start");
+        controller
+            .apply_event(
+                &event(br#"{"type":"message_update","assistantMessageEvent":{"type":"thinking_delta","contentIndex":0,"delta":"next step"}}"#),
+                &mut store,
+            )
+            .expect("next thinking delta");
+        assert_eq!(
+            controller.live_projection().snapshot().reasoning,
+            "final reasoning\n\nnext step"
+        );
+
+        controller
+            .apply_event(&event(br#"{"type":"agent_start"}"#), &mut store)
+            .expect("new agent turn");
+        assert!(controller.live_projection().snapshot().reasoning.is_empty());
     }
 
     #[test]

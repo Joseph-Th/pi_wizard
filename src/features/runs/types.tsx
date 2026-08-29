@@ -11,7 +11,6 @@ import type {
 } from "../automation/types";
 import { ModelPicker } from "../models/ModelPicker";
 import type { ModelSelection } from "../models/types";
-import { ProjectManager } from "../projects/ProjectManager";
 import { ProjectLauncher } from "../projects/ProjectLauncher";
 import { SessionCatalogBrowser } from "../sessions/SessionCatalogBrowser";
 import { RecentSessionsView } from "../sessions/RecentSessionsView";
@@ -168,6 +167,8 @@ export interface DirectBashSnapshot {
 }
 
 export interface LiveProjectionSnapshot {
+  reasoning: string;
+  reasoningDroppedBytes: number;
   assistantBlocks: AssistantContentSnapshot[];
   activeTools: ToolPreviewSnapshot[];
   directBash: DirectBashSnapshot[];
@@ -500,6 +501,8 @@ export interface SessionTimelineItem {
   title: string | null;
   text: string;
   textTruncated: boolean;
+  reasoning: string | null;
+  reasoningTruncated: boolean;
   isError: boolean;
 }
 
@@ -538,7 +541,7 @@ export interface RuntimeHydration {
   runs: RunHydration[];
 }
 
-export const RUNTIME_HYDRATION_SCHEMA_VERSION = 9;
+export const RUNTIME_HYDRATION_SCHEMA_VERSION = 10;
 
 export function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;

@@ -11,7 +11,6 @@ import type {
 } from "../automation/types";
 import { ModelPicker } from "../models/ModelPicker";
 import type { ModelSelection } from "../models/types";
-import { ProjectManager } from "../projects/ProjectManager";
 import { ProjectLauncher } from "../projects/ProjectLauncher";
 import { SessionCatalogBrowser } from "../sessions/SessionCatalogBrowser";
 import { RecentSessionsView } from "../sessions/RecentSessionsView";
@@ -23,7 +22,7 @@ import { pathLeaf } from "../../lib/path";
 import { diffPageSegments, formatBytes } from "./types";
 import type { CommandSummary, CompactionResult, ComposerAction, ComposerAvailability, ComposerSubmitResult, DraftSnapshot, ExtensionUiSnapshot, GitDiffCursor, GitFileDiffPage, GitReviewSummary, LiveProjectionSnapshot, ModelSummary, PendingExtensionDialog, RunHydration, RuntimeAttachmentLimits, RuntimeStopResult, SessionStats, ThinkingLevel } from "./types";
 import { HistoryTimeline, SessionTreeInspector } from "./history";
-import { runHasStoppableActivity } from "./presentation";
+import { runHasStoppableActivity, toolActivityLabel } from "./presentation";
 
 export interface RuntimeManagerSignal {
   kind: "runDirty";
@@ -166,77 +165,57 @@ export function DroppedBytes(props: { count: number }) {
 }
 
 export function LiveTimeline(props: { live: LiveProjectionSnapshot | undefined }) {
-  const VERBOSE_THINKING_BYTES = 480;
+  const visibleTextBlocks = () =>
+    (props.live?.assistantBlocks ?? []).filter((block) => block.kind === "text");
+  const activeTool = () => props.live?.activeTools.at(-1);
+  const hasDirectBash = () => (props.live?.directBash.length ?? 0) > 0;
+  const activityLabel = () => {
+    if (hasDirectBash()) return "Running a command…";
+    const tool = activeTool();
+    if (!tool) return undefined;
+    return `${toolActivityLabel(tool.toolName)}…`;
+  };
   const hasContent = () =>
     Boolean(
       props.live &&
-        (props.live.assistantBlocks.length > 0 ||
-          props.live.activeTools.length > 0 ||
-          props.live.directBash.length > 0),
+        (props.live.reasoning || visibleTextBlocks().length > 0 || activityLabel()),
     );
 
   return (
     <Show when={hasContent()}>
       <section class="live-timeline" aria-label="Live Pi output">
-        <For each={props.live?.assistantBlocks ?? []}>
-          {(block) => {
-            const label =
-              block.kind === "thinking"
-                ? "Thinking"
-                : block.kind === "tool_call"
-                  ? "Tool call"
-                  : "Assistant";
-            const collapseThinking =
-              block.kind === "thinking" &&
-              block.complete &&
-              block.text.length > VERBOSE_THINKING_BYTES;
-            return collapseThinking ? (
-              <details class="live-block live-thinking live-thinking-collapsed" data-timeline-row="true">
-                <summary>
-                  <strong>{label}</strong>
-                  <span>
-                    Complete{block.droppedBytes > 0 ? " · bounded" : " · show reasoning"}
-                  </span>
-                </summary>
-                <pre>{block.text}</pre>
-                <DroppedBytes count={block.droppedBytes} />
-              </details>
-            ) : (
-              <article class={`live-block live-${block.kind}`} data-timeline-row="true">
-                <header>
-                  <strong>{label}</strong>
-                  <span>{block.complete ? "Complete" : "Streaming"}</span>
-                </header>
-                <pre>{block.text}</pre>
-                <DroppedBytes count={block.droppedBytes} />
-              </article>
-            );
-          }}
-        </For>
-        <For each={props.live?.activeTools ?? []}>
-          {(tool) => (
-            <article class="live-block live-tool" data-timeline-row="true">
+        <Show when={props.live?.reasoning}>
+          {(reasoning) => (
+            <article class="live-block live-thinking live-reasoning" data-timeline-row="true">
               <header>
-                <strong>{tool.toolName}</strong>
-                <span>Tool running</span>
+                <strong>Reasoning</strong>
+                <span>Pi thinking</span>
               </header>
-              <pre>{tool.output}</pre>
-              <DroppedBytes count={tool.droppedBytes} />
+              <pre>{reasoning()}</pre>
+              <DroppedBytes count={props.live?.reasoningDroppedBytes ?? 0} />
+            </article>
+          )}
+        </Show>
+        <For each={visibleTextBlocks()}>
+          {(block) => (
+            <article class="live-block live-text" data-timeline-row="true">
+              <header>
+                <strong>Assistant</strong>
+                <span>{block.complete ? "Complete" : "Streaming"}</span>
+              </header>
+              <pre>{block.text}</pre>
+              <DroppedBytes count={block.droppedBytes} />
             </article>
           )}
         </For>
-        <For each={props.live?.directBash ?? []}>
-          {(bash) => (
-            <article class="live-block live-bash" data-timeline-row="true">
-              <header>
-                <strong>Shell</strong>
-                <span>{bash.requestId.slice(0, 8)}</span>
-              </header>
-              <pre>{bash.output}</pre>
-              <DroppedBytes count={bash.droppedBytes} />
-            </article>
+        <Show when={activityLabel()}>
+          {(label) => (
+            <div class="live-activity-status" role="status" aria-live="polite" data-timeline-row="true">
+              <span class="activity-pulse" aria-hidden="true" />
+              <span>{label()}</span>
+            </div>
           )}
-        </For>
+        </Show>
       </section>
     </Show>
   );

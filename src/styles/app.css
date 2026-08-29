@@ -363,10 +363,16 @@
 }
 
 .live-thinking {
-  opacity: 0.8;
+  opacity: 0.94;
 }
 
-.live-thinking-collapsed summary,
+.live-reasoning,
+.history-reasoning {
+  border-left: 3px solid color-mix(in srgb, CanvasText 30%, transparent);
+  background: color-mix(in srgb, CanvasText 4%, transparent);
+}
+
+.history-reasoning summary,
 .history-collapsible summary {
   display: flex;
   justify-content: space-between;
@@ -376,10 +382,32 @@
   list-style-position: inside;
 }
 
-.live-thinking-collapsed summary span,
+.history-reasoning summary span,
 .history-collapsible summary span {
   color: GrayText;
   font-size: 0.7rem;
+}
+
+.history-reasoning summary {
+  padding-bottom: 0.35rem;
+}
+
+.live-activity-status {
+  display: flex;
+  gap: 0.45rem;
+  align-items: center;
+  padding: 0.15rem 0.15rem 0.1rem;
+  color: GrayText;
+  font-size: 0.76rem;
+}
+
+.activity-pulse {
+  width: 0.42rem;
+  height: 0.42rem;
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: currentColor;
+  opacity: 0.65;
 }
 
 .history-timeline {
@@ -453,8 +481,6 @@
   border-left-width: 3px;
 }
 
-.history-tool,
-.history-bash,
 .history-custom,
 .history-compaction,
 .history-branch_summary {
@@ -1526,7 +1552,6 @@ body {
 .app-brand span,
 .sidebar-note,
 .sidebar-heading span,
-.project-row small,
 .runtime-details,
 .surface-heading p,
 .run-card small,
@@ -1544,8 +1569,6 @@ body {
 
 .primary-nav button,
 .sidebar-run,
-.project-use,
-.project-row-actions button,
 .sidebar-heading button,
 .runtime-details button,
 .surface-heading button,
@@ -1562,8 +1585,7 @@ body {
   border-color: color-mix(in srgb, Highlight 45%, CanvasText 20%);
 }
 
-.sidebar-runs,
-.project-manager {
+.sidebar-runs {
   display: grid;
   gap: 0.4rem;
 }
@@ -1580,8 +1602,7 @@ body {
   font-size: 0.7rem;
 }
 
-.sidebar-run,
-.project-use {
+.sidebar-run {
   display: grid;
   gap: 0.15rem;
   width: 100%;
@@ -1591,9 +1612,7 @@ body {
 
 .sidebar-run strong,
 .sidebar-run span,
-.sidebar-run small,
-.project-use strong,
-.project-use span {
+.sidebar-run small {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1605,36 +1624,16 @@ body {
   font-size: 0.72rem;
 }
 
-.sidebar-run small,
-.project-use span {
+.sidebar-run small {
   color: GrayText;
   font-size: 0.68rem;
 }
 
-.project-row {
-  display: grid;
-  gap: 0.35rem;
-  padding: 0.4rem;
-  border: 1px solid color-mix(in srgb, CanvasText 10%, transparent);
-  border-radius: 0.4rem;
-}
-
-.project-row:not(.project-present) {
-  border-style: dashed;
-}
-
-.project-use {
-  border: 0;
-  background: transparent;
-}
-
-.project-row-actions,
 .run-card-actions {
   display: flex;
   gap: 0.4rem;
 }
 
-.project-row-actions button,
 .run-card-actions button {
   flex: 1 1 0;
   font-size: 0.72rem;
@@ -2224,6 +2223,78 @@ body {
 
 .path-picker-row button {
   padding-inline: 0.75rem;
+}
+
+.project-preset-path {
+  display: block;
+  min-width: 0;
+  margin-top: 0.3rem;
+  overflow: hidden;
+  color: GrayText;
+  font-size: 0.75rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-preset-manager {
+  grid-column: 1 / -1;
+  padding: 0.6rem 0.7rem;
+  border: 1px solid color-mix(in srgb, CanvasText 10%, transparent);
+  border-radius: 0.45rem;
+}
+
+.project-preset-manager > summary {
+  cursor: pointer;
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+
+.project-preset-list {
+  display: grid;
+  gap: 0.4rem;
+  margin-top: 0.55rem;
+}
+
+.project-preset-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.65rem;
+  align-items: center;
+  padding-top: 0.4rem;
+  border-top: 1px solid color-mix(in srgb, CanvasText 8%, transparent);
+}
+
+.project-preset-item > div:first-child {
+  display: grid;
+  min-width: 0;
+  gap: 0.1rem;
+}
+
+.project-preset-item > div:first-child strong,
+.project-preset-item > div:first-child span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-preset-item > div:first-child span {
+  color: GrayText;
+  font-size: 0.72rem;
+}
+
+.project-preset-item > div:last-child {
+  display: flex;
+  gap: 0.35rem;
+}
+
+.project-preset-item button {
+  padding: 0.35rem 0.5rem;
+  font-size: 0.72rem;
+}
+
+.project-preset-item:not(.project-present) {
+  opacity: 0.78;
 }
 
 .extension-ui-panel {

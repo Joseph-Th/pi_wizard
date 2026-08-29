@@ -11,7 +11,6 @@ import type {
 } from "../features/automation/types";
 import { ModelPicker } from "../features/models/ModelPicker";
 import type { ModelSelection } from "../features/models/types";
-import { ProjectManager } from "../features/projects/ProjectManager";
 import { ProjectLauncher } from "../features/projects/ProjectLauncher";
 import { SessionCatalogBrowser } from "../features/sessions/SessionCatalogBrowser";
 import { RecentSessionsView } from "../features/sessions/RecentSessionsView";
@@ -95,7 +94,7 @@ export function App(props: { startup: AppStartupSnapshot }) {
   const [selectedRunId, setSelectedRunId] = createSignal<string>();
   const [preferredProjectPath, setPreferredProjectPath] = createSignal("");
   const [projects, setProjects] = createSignal<DesktopProjectRecord[]>([]);
-  const [projectRefreshKey, setProjectRefreshKey] = createSignal(0);
+  const [projectError, setProjectError] = createSignal<string>();
   const [runActionError, setRunActionError] = createSignal<string>();
   const [closingRunId, setClosingRunId] = createSignal<string>();
   const [dismissingRunId, setDismissingRunId] = createSignal<string>();
@@ -133,6 +132,18 @@ export function App(props: { startup: AppStartupSnapshot }) {
     }
     setRuntime(snapshot);
     setRuntimeError(undefined);
+  };
+
+  const refreshProjects = async () => {
+    try {
+      const next = await invokeDesktop<DesktopProjectRecord[]>("runtime_list_projects");
+      if (!disposed) {
+        setProjects(next);
+        setProjectError(undefined);
+      }
+    } catch (error) {
+      if (!disposed) setProjectError(String(error));
+    }
   };
 
   const refreshDiagnostics = async () => {
@@ -356,7 +367,7 @@ export function App(props: { startup: AppStartupSnapshot }) {
 
   const handleStarted = async (result: StartRunResult) => {
     await refreshRuntimeState();
-    setProjectRefreshKey((value) => value + 1);
+    await refreshProjects();
     openRun(result.runId);
     if (result.initialTaskError) {
       setNotifications((current) =>
@@ -608,6 +619,7 @@ export function App(props: { startup: AppStartupSnapshot }) {
     // attachment limits. Subscribe before the reconciliation hydration so a
     // runtime change during the bootstrap-to-listener handoff cannot be lost.
     void connectBackend();
+    void refreshProjects();
 
     void invokeDesktop<PiProbeReport>("probe_pi_environment")
       .then((report) => {
@@ -746,15 +758,6 @@ export function App(props: { startup: AppStartupSnapshot }) {
               <p class="sidebar-note">No runs yet.</p>
             </Show>
           </section>
-
-          <ProjectManager
-            refreshKey={projectRefreshKey()}
-            onProjects={setProjects}
-            onUse={(path) => {
-              setPreferredProjectPath(path);
-              setView("launcher");
-            }}
-          />
 
           <details class="runtime-details">
             <summary>Runtime</summary>
@@ -950,12 +953,17 @@ export function App(props: { startup: AppStartupSnapshot }) {
             <ProjectLauncher
               piReady={Boolean(piProbe())}
               preferredProjectPath={preferredProjectPath()}
+              projects={projects()}
+              onProjectsChanged={refreshProjects}
               onStarted={handleStarted}
               onOpenRun={openRun}
               isExecutionRootActive={isExecutionRootActive}
               activeRunIdForExecutionRoot={activeRunIdForExecutionRoot}
               activeRunIdForSessionPath={activeRunIdForSessionPath}
             />
+            <Show when={projectError()}>
+              {(message) => <p class="error">Saved projects: {message()}</p>}
+            </Show>
           </Show>
 
           <Show when={view() === "sessions"}>

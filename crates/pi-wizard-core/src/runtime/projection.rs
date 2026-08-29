@@ -10,6 +10,7 @@ use crate::{RequestId, RuntimeLimits};
 #[derive(Debug)]
 pub struct LiveProjection {
     assistant_blocks: BTreeMap<usize, AssistantContentBlock>,
+    turn_reasoning: BoundedText,
     assistant_resident_bytes: usize,
     max_assistant_bytes: usize,
     max_assistant_blocks: usize,
@@ -25,6 +26,7 @@ impl LiveProjection {
     pub fn new(limits: RuntimeLimits) -> Self {
         Self {
             assistant_blocks: BTreeMap::new(),
+            turn_reasoning: BoundedText::new(limits.max_stream_text_bytes_per_run),
             assistant_resident_bytes: 0,
             max_assistant_bytes: limits.max_stream_text_bytes_per_run,
             max_assistant_blocks: limits.max_stream_content_blocks_per_message,
@@ -180,9 +182,35 @@ impl LiveProjection {
         Ok(())
     }
 
-    pub fn clear_assistant_message(&mut self) {
+    /// Begins a new agent turn. Reasoning from the previous turn is no longer
+    /// live UI state; persisted Pi history remains authoritative for it.
+    pub fn start_agent_turn(&mut self) {
+        self.turn_reasoning = BoundedText::new(self.max_assistant_bytes);
         self.assistant_blocks.clear();
         self.assistant_resident_bytes = 0;
+    }
+
+    /// Begins another assistant message inside the same agent turn. Pi often
+    /// alternates thinking -> tool -> thinking, with a fresh message for each
+    /// model step. Preserve completed thinking across those message boundaries
+    /// so the user sees one continuous reasoning trail instead of a flash.
+    pub fn start_assistant_message(&mut self) {
+        let prior_reasoning: Vec<_> = self
+            .assistant_blocks
+            .values()
+            .filter(|block| block.kind == AssistantContentKind::Thinking)
+            .map(|block| block.content.as_str().to_owned())
+            .filter(|text| !text.trim().is_empty())
+            .collect();
+        self.assistant_blocks.clear();
+        for segment in prior_reasoning {
+            if !self.turn_reasoning.as_str().is_empty() {
+                self.turn_reasoning.append("\n\n");
+            }
+            self.turn_reasoning.append(&segment);
+        }
+        self.assistant_resident_bytes = self.turn_reasoning.len_bytes();
+        self.enforce_assistant_budget();
     }
 
     /// Replaces the transient streamed assistant message with Pi's completed
@@ -192,7 +220,7 @@ impl LiveProjection {
         I: IntoIterator<Item = (usize, AssistantContentKind, String)>,
     {
         let mut next = BTreeMap::new();
-        let mut resident_bytes = 0usize;
+        let mut resident_bytes = self.turn_reasoning.len_bytes();
         for (content_index, kind, content) in blocks {
             if next.contains_key(&content_index) {
                 return Err(ProjectionError::DuplicateAssistantBlock { content_index });
@@ -333,6 +361,27 @@ impl LiveProjection {
 
     #[must_use]
     pub fn snapshot(&self) -> LiveProjectionSnapshot {
+        let mut reasoning = BoundedText::new(self.max_assistant_bytes);
+        if !self.turn_reasoning.as_str().is_empty() {
+            reasoning.append(self.turn_reasoning.as_str());
+        }
+        let mut reasoning_dropped_bytes = self.turn_reasoning.dropped_bytes();
+        for block in self
+            .assistant_blocks
+            .values()
+            .filter(|block| block.kind == AssistantContentKind::Thinking)
+        {
+            if block.content.as_str().trim().is_empty() {
+                continue;
+            }
+            if !reasoning.as_str().is_empty() {
+                reasoning.append("\n\n");
+            }
+            reasoning.append(block.content.as_str());
+            reasoning_dropped_bytes =
+                reasoning_dropped_bytes.saturating_add(block.content.dropped_bytes());
+        }
+        reasoning_dropped_bytes = reasoning_dropped_bytes.saturating_add(reasoning.dropped_bytes());
         let assistant_blocks = self
             .assistant_blocks
             .values()
@@ -366,6 +415,8 @@ impl LiveProjection {
             .collect();
         direct_bash.sort_by(|left, right| left.request_id.as_str().cmp(right.request_id.as_str()));
         LiveProjectionSnapshot {
+            reasoning: reasoning.as_str().to_owned(),
+            reasoning_dropped_bytes,
             assistant_blocks,
             active_tools,
             direct_bash,
@@ -399,7 +450,34 @@ impl LiveProjection {
             return;
         }
 
-        for block in self.assistant_blocks.values_mut() {
+        // The transcript is for the user, not the protocol. Under pressure,
+        // discard current answer/tool-call preview bytes before reasoning.
+        for block in self
+            .assistant_blocks
+            .values_mut()
+            .filter(|block| block.kind != AssistantContentKind::Thinking)
+        {
+            if excess == 0 {
+                break;
+            }
+            let dropped = block.content.drop_oldest_bytes(excess);
+            self.assistant_resident_bytes = self.assistant_resident_bytes.saturating_sub(dropped);
+            excess = self
+                .assistant_resident_bytes
+                .saturating_sub(self.max_assistant_bytes);
+        }
+        if excess > 0 {
+            let dropped = self.turn_reasoning.drop_oldest_bytes(excess);
+            self.assistant_resident_bytes = self.assistant_resident_bytes.saturating_sub(dropped);
+            excess = self
+                .assistant_resident_bytes
+                .saturating_sub(self.max_assistant_bytes);
+        }
+        for block in self
+            .assistant_blocks
+            .values_mut()
+            .filter(|block| block.kind == AssistantContentKind::Thinking)
+        {
             if excess == 0 {
                 break;
             }
@@ -423,6 +501,8 @@ pub enum AssistantContentKind {
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LiveProjectionSnapshot {
+    pub reasoning: String,
+    pub reasoning_dropped_bytes: u64,
     pub assistant_blocks: Vec<AssistantContentSnapshot>,
     pub active_tools: Vec<ToolPreviewSnapshot>,
     pub direct_bash: Vec<DirectBashSnapshot>,

@@ -8,7 +8,6 @@ use serde_json::Value;
 use thiserror::Error;
 
 use crate::RuntimeLimits;
-use crate::bounded::BoundedText;
 
 const REVERSE_SCAN_BLOCK_BYTES: usize = 64 * 1024;
 
@@ -42,6 +41,8 @@ pub struct SessionTimelineItem {
     pub title: Option<String>,
     pub text: String,
     pub text_truncated: bool,
+    pub reasoning: Option<String>,
+    pub reasoning_truncated: bool,
     pub is_error: bool,
 }
 
@@ -646,6 +647,8 @@ fn timeline_item(entry: &Value, limits: RuntimeLimits) -> Option<SessionTimeline
                 title: Some("Compaction".to_owned()),
                 text,
                 text_truncated,
+                reasoning: None,
+                reasoning_truncated: false,
                 is_error: false,
             })
         }
@@ -660,6 +663,8 @@ fn timeline_item(entry: &Value, limits: RuntimeLimits) -> Option<SessionTimeline
                 title: Some("Branch summary".to_owned()),
                 text,
                 text_truncated,
+                reasoning: None,
+                reasoning_truncated: false,
                 is_error: false,
             })
         }
@@ -684,6 +689,8 @@ fn timeline_item(entry: &Value, limits: RuntimeLimits) -> Option<SessionTimeline
                     .map(|value| bounded_prefix(value, 256).0),
                 text,
                 text_truncated,
+                reasoning: None,
+                reasoning_truncated: false,
                 is_error: false,
             })
         }
@@ -710,16 +717,17 @@ fn message_item(
                 title: Some("You".to_owned()),
                 text,
                 text_truncated,
+                reasoning: None,
+                reasoning_truncated: false,
                 is_error: false,
             })
         }
         "assistant" => {
             let content = message.get("content")?;
-            let (mut text, mut text_truncated) =
-                assistant_text(content, limits.max_session_history_item_text_bytes);
-            if text.is_empty()
-                && let Some(error) = message.get("errorMessage").and_then(Value::as_str)
-            {
+            let (mut text, mut text_truncated, reasoning, reasoning_truncated) =
+                assistant_content(content, limits.max_session_history_item_text_bytes);
+            if text.is_empty() && reasoning.is_none() {
+                let error = message.get("errorMessage").and_then(Value::as_str)?;
                 (text, text_truncated) =
                     bounded_prefix(error, limits.max_session_history_item_text_bytes);
             }
@@ -733,51 +741,15 @@ fn message_item(
                     .map(|value| bounded_prefix(value, 256).0),
                 text,
                 text_truncated,
+                reasoning,
+                reasoning_truncated,
                 is_error: message.get("stopReason").and_then(Value::as_str) == Some("error"),
             })
         }
-        "toolResult" => {
-            let content = message.get("content")?;
-            let (text, text_truncated) =
-                content_text_tail(content, limits.max_session_history_item_text_bytes);
-            Some(SessionTimelineItem {
-                entry_id,
-                timestamp,
-                kind: SessionTimelineKind::Tool,
-                title: message
-                    .get("toolName")
-                    .and_then(Value::as_str)
-                    .map(|value| bounded_prefix(value, 256).0),
-                text,
-                text_truncated,
-                is_error: message
-                    .get("isError")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false),
-            })
-        }
-        "bashExecution" => {
-            let output = message.get("output").and_then(Value::as_str).unwrap_or("");
-            let (text, text_truncated) =
-                bounded_tail(output, limits.max_session_history_item_text_bytes);
-            let exit_code = message.get("exitCode").and_then(Value::as_i64);
-            Some(SessionTimelineItem {
-                entry_id,
-                timestamp,
-                kind: SessionTimelineKind::Bash,
-                title: message
-                    .get("command")
-                    .and_then(Value::as_str)
-                    .map(|value| bounded_prefix(value, 512).0),
-                text,
-                text_truncated: text_truncated
-                    || message
-                        .get("truncated")
-                        .and_then(Value::as_bool)
-                        .unwrap_or(false),
-                is_error: exit_code.is_some_and(|code| code != 0),
-            })
-        }
+        // Tool protocol is not conversation history. Active tool status is a
+        // live concern; completed output belongs in dedicated review/debug
+        // surfaces rather than the user-facing transcript.
+        "toolResult" | "bashExecution" => None,
         "custom" => {
             if !message
                 .get("display")
@@ -799,6 +771,8 @@ fn message_item(
                     .map(|value| bounded_prefix(value, 256).0),
                 text,
                 text_truncated,
+                reasoning: None,
+                reasoning_truncated: false,
                 is_error: false,
             })
         }
@@ -813,6 +787,8 @@ fn message_item(
                 title: Some("Branch summary".to_owned()),
                 text,
                 text_truncated,
+                reasoning: None,
+                reasoning_truncated: false,
                 is_error: false,
             })
         }
@@ -827,6 +803,8 @@ fn message_item(
                 title: Some("Compaction".to_owned()),
                 text,
                 text_truncated,
+                reasoning: None,
+                reasoning_truncated: false,
                 is_error: false,
             })
         }
@@ -834,12 +812,13 @@ fn message_item(
     }
 }
 
-fn assistant_text(content: &Value, max_bytes: usize) -> (String, bool) {
+fn assistant_content(content: &Value, max_bytes: usize) -> (String, bool, Option<String>, bool) {
     let Some(blocks) = content.as_array() else {
-        return content_text(content, max_bytes);
+        let (text, text_truncated) = content_text(content, max_bytes);
+        return (text, text_truncated, None, false);
     };
     let mut collector = TextCollector::new(max_bytes);
-    let mut tool_names = Vec::new();
+    let mut reasoning = TextCollector::new(max_bytes);
     for block in blocks {
         match block.get("type").and_then(Value::as_str) {
             Some("text") => {
@@ -847,49 +826,23 @@ fn assistant_text(content: &Value, max_bytes: usize) -> (String, bool) {
                     collector.append_segment(text);
                 }
             }
-            Some("toolCall") if tool_names.len() < 16 => {
-                if let Some(name) = block.get("name").and_then(Value::as_str) {
-                    tool_names.push(name);
+            Some("thinking") => {
+                if let Some(text) = block.get("thinking").and_then(Value::as_str) {
+                    reasoning.append_segment(text);
                 }
             }
+            Some("toolCall") => {}
             _ => {}
         }
     }
-    if collector.text.is_empty() && !tool_names.is_empty() {
-        collector.append_segment("Tool calls:");
-        for name in tool_names {
-            collector.append_segment(name);
-        }
-    }
-    collector.finish()
-}
-
-/// Tool and shell output is usually most useful at the end, where exit
-/// diagnostics and compiler failures accumulate. Historical output therefore
-/// follows the same newest-suffix policy as the live bounded tool projection.
-fn content_text_tail(content: &Value, max_bytes: usize) -> (String, bool) {
-    if let Some(text) = content.as_str() {
-        return bounded_tail(text, max_bytes);
-    }
-    let Some(blocks) = content.as_array() else {
-        return (String::new(), false);
-    };
-    let mut output = BoundedText::new(max_bytes);
-    let mut has_content = false;
-    for block in blocks {
-        let segment = match block.get("type").and_then(Value::as_str) {
-            Some("text") => block.get("text").and_then(Value::as_str),
-            Some("image") => Some("[image attachment]"),
-            _ => None,
-        };
-        let Some(segment) = segment else { continue };
-        if has_content {
-            output.append("\n");
-        }
-        output.append(segment);
-        has_content = true;
-    }
-    (output.as_str().to_owned(), output.dropped_bytes() > 0)
+    let (text, text_truncated) = collector.finish();
+    let (reasoning, reasoning_truncated) = reasoning.finish();
+    (
+        text,
+        text_truncated,
+        (!reasoning.is_empty()).then_some(reasoning),
+        reasoning_truncated,
+    )
 }
 
 fn content_text(content: &Value, max_bytes: usize) -> (String, bool) {
@@ -975,12 +928,6 @@ fn bounded_prefix(value: &str, max_bytes: usize) -> (String, bool) {
     (value[..end].to_owned(), true)
 }
 
-fn bounded_tail(value: &str, max_bytes: usize) -> (String, bool) {
-    let mut bounded = BoundedText::new(max_bytes);
-    bounded.replace(value);
-    (bounded.as_str().to_owned(), bounded.dropped_bytes() > 0)
-}
-
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -1049,6 +996,39 @@ mod tests {
             "timestamp":"2026-08-27T00:00:02.000Z",
             "message":{"role":"assistant","content":[{"type":"text","text":text}],"model":"fixture","stopReason":"stop"}
         })
+    }
+
+    #[test]
+    fn assistant_history_preserves_pi_reasoning_separately_from_answer() {
+        let fixture = Fixture::new("assistant-reasoning");
+        fixture.write(&[serde_json::json!({
+            "type":"message","id":"a1","parentId":null,
+            "timestamp":"2026-08-27T00:00:02.000Z",
+            "message":{
+                "role":"assistant",
+                "content":[
+                    {"type":"thinking","thinking":"inspect state then patch"},
+                    {"type":"text","text":"done"}
+                ],
+                "model":"fixture","stopReason":"stop"
+            }
+        })]);
+
+        let page = read_session_history_page(
+            &fixture.session,
+            &fixture.project,
+            "session-1",
+            None,
+            RuntimeLimits::default(),
+        )
+        .expect("history with reasoning");
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].text, "done");
+        assert_eq!(
+            page.items[0].reasoning.as_deref(),
+            Some("inspect state then patch")
+        );
+        assert!(!page.items[0].reasoning_truncated);
     }
 
     #[test]
@@ -1226,11 +1206,19 @@ mod tests {
     }
 
     #[test]
-    fn historical_tool_and_bash_output_keep_the_newest_bounded_suffix() {
+    fn historical_tool_and_bash_protocol_is_not_rendered_as_conversation() {
         let fixture = Fixture::new("output-tail");
         fixture.write(&[
             serde_json::json!({
-                "type":"message","id":"tool","parentId":null,
+                "type":"message","id":"assistant-tool","parentId":null,
+                "timestamp":"2026-08-27T00:00:00.500Z",
+                "message":{
+                    "role":"assistant","model":"fixture","stopReason":"toolUse",
+                    "content":[{"type":"toolCall","id":"call","name":"read","arguments":{"path":"large.rs"}}]
+                }
+            }),
+            serde_json::json!({
+                "type":"message","id":"tool","parentId":"assistant-tool",
                 "timestamp":"2026-08-27T00:00:01.000Z",
                 "message":{
                     "role":"toolResult","toolCallId":"call","toolName":"bash",
@@ -1246,22 +1234,15 @@ mod tests {
                 }
             }),
         ]);
-        let limits = RuntimeLimits {
-            max_session_history_item_text_bytes: 6,
-            ..RuntimeLimits::default()
-        };
         let page = read_session_history_page(
             &fixture.session,
             &fixture.project,
             "session-1",
             None,
-            limits,
+            RuntimeLimits::default(),
         )
         .expect("history page");
-        assert_eq!(page.items[0].text, "456789");
-        assert_eq!(page.items[1].text, "efghij");
-        assert!(page.items.iter().all(|item| item.text_truncated));
-        assert!(page.items.iter().all(|item| item.is_error));
+        assert!(page.items.is_empty());
     }
 
     #[test]

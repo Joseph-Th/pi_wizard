@@ -1,7 +1,9 @@
 import { createEffect, createSignal, For, onMount, Show } from "solid-js";
 
 import { invokeDesktop, pickDirectory } from "../../lib/desktop";
+import { pathLeaf } from "../../lib/path";
 import type { ExtensionDiscoveryPolicy, StartRunResult } from "../../types/launch";
+import type { DesktopProjectRecord } from "../../types/projects";
 import { ModelPicker } from "../models/ModelPicker";
 import type { ContextFilesPolicy, ModelSelection, ProjectTrustPolicy, ThinkingLevel } from "../models/types";
 import { SessionCatalogBrowser } from "../sessions/SessionCatalogBrowser";
@@ -62,6 +64,8 @@ function suggestedWorktreeIdentity(
 export function ProjectLauncher(props: {
   piReady: boolean;
   preferredProjectPath: string;
+  projects: DesktopProjectRecord[];
+  onProjectsChanged: () => Promise<unknown>;
   onStarted: (result: StartRunResult) => Promise<unknown>;
   onOpenRun: (runId: string) => void;
   isExecutionRootActive: (path: string) => boolean;
@@ -97,6 +101,16 @@ export function ProjectLauncher(props: {
   const [reconcilingRecovery, setReconcilingRecovery] = createSignal<string>();
   const [startingRecovery, setStartingRecovery] = createSignal<string>();
   const [cleaningRecovery, setCleaningRecovery] = createSignal<string>();
+  const [presetBusyId, setPresetBusyId] = createSignal<string>();
+  const [presetError, setPresetError] = createSignal<string>();
+
+  const availableProjects = () => props.projects.filter((project) => project.status === "present");
+  const selectedPresetPath = () =>
+    availableProjects().some((project) => project.canonicalRoot === projectPath())
+      ? projectPath()
+      : projectPath().trim()
+        ? "__selected_folder__"
+        : "";
 
   const localCheckoutActive = () =>
     executionMode() === "local" &&
@@ -106,6 +120,15 @@ export function ProjectLauncher(props: {
   const resetLaunchOptions = () => {
     setLaunchModelKey("");
     setLaunchThinking("");
+  };
+
+  const selectProjectPath = (path: string) => {
+    setProjectPath(path);
+    setWorktreeBase(undefined);
+    setWorktreeError(undefined);
+    resetLaunchOptions();
+    resetResourcePreflight();
+    setError(undefined);
   };
 
   const resetResourcePreflight = () => {
@@ -156,10 +179,7 @@ export function ProjectLauncher(props: {
   createEffect(() => {
     const preferred = props.preferredProjectPath.trim();
     if (!preferred || preferred === projectPath()) return;
-    setProjectPath(preferred);
-    setWorktreeBase(undefined);
-    setWorktreeError(undefined);
-    resetLaunchOptions();
+    selectProjectPath(preferred);
   });
 
   const loadRecoveries = async () => {
@@ -362,13 +382,49 @@ export function ProjectLauncher(props: {
     try {
       const selected = await pickDirectory(projectPath());
       if (!selected) return;
-      setProjectPath(selected);
-      setWorktreeBase(undefined);
-      setWorktreeError(undefined);
-      resetLaunchOptions();
-      resetResourcePreflight();
+      selectProjectPath(selected);
     } catch (browseError) {
       setError(`Could not choose project folder: ${String(browseError)}`);
+    }
+  };
+
+  const relocatePreset = async (project: DesktopProjectRecord) => {
+    if (presetBusyId()) return;
+    try {
+      const selected = (await pickDirectory(project.canonicalRoot))?.trim();
+      if (!selected || selected === project.canonicalRoot) return;
+      setPresetBusyId(project.id);
+      setPresetError(undefined);
+      await invokeDesktop<DesktopProjectRecord>("runtime_relocate_project", {
+        request: { id: project.id, newRoot: selected },
+      });
+      if (projectPath() === project.canonicalRoot) selectProjectPath(selected);
+      await props.onProjectsChanged();
+    } catch (relocateError) {
+      setPresetError(String(relocateError));
+    } finally {
+      setPresetBusyId(undefined);
+    }
+  };
+
+  const removePreset = async (project: DesktopProjectRecord) => {
+    if (presetBusyId()) return;
+    if (
+      !window.confirm(
+        `Forget ${project.canonicalRoot}? This only removes the saved Pi Wizard shortcut; it never deletes the folder or repository.`,
+      )
+    )
+      return;
+    setPresetBusyId(project.id);
+    setPresetError(undefined);
+    try {
+      await invokeDesktop<void>("runtime_remove_project", { request: { id: project.id } });
+      if (projectPath() === project.canonicalRoot) selectProjectPath("");
+      await props.onProjectsChanged();
+    } catch (removeError) {
+      setPresetError(String(removeError));
+    } finally {
+      setPresetBusyId(undefined);
     }
   };
 
@@ -381,26 +437,78 @@ export function ProjectLauncher(props: {
           void start();
         }}
       >
-        <label class="path-field">
-          <span>Project path</span>
-          <div class="path-picker-row">
-            <input
-              value={projectPath()}
+        <label class="path-field project-preset-field">
+          <span>Project</span>
+          <div class="path-picker-row project-preset-row">
+            <select
+              value={selectedPresetPath()}
               disabled={starting()}
-              placeholder="Absolute path to an existing project"
-              onInput={(event) => {
-                setProjectPath(event.currentTarget.value);
-                setWorktreeBase(undefined);
-                setWorktreeError(undefined);
-                resetLaunchOptions();
-                resetResourcePreflight();
+              onChange={(event) => {
+                const next = event.currentTarget.value;
+                if (next && next !== "__selected_folder__") selectProjectPath(next);
               }}
-            />
+            >
+              <option value="">
+                {availableProjects().length > 0 ? "Choose a saved project" : "No saved projects yet"}
+              </option>
+              <Show when={selectedPresetPath() === "__selected_folder__"}>
+                <option value="__selected_folder__">{pathLeaf(projectPath())} · selected folder</option>
+              </Show>
+              <For each={availableProjects()}>
+                {(project) => (
+                  <option value={project.canonicalRoot}>{pathLeaf(project.canonicalRoot)}</option>
+                )}
+              </For>
+            </select>
             <button type="button" disabled={starting()} onClick={() => void browseProject()}>
-              Browse
+              Browse…
             </button>
           </div>
+          <small class="project-preset-path" title={projectPath()}>
+            {projectPath() || "Browse once; used folders are saved here for future runs."}
+          </small>
         </label>
+        <Show when={props.projects.length > 0}>
+          <details class="project-preset-manager">
+            <summary>Manage saved projects</summary>
+            <p class="launch-note">
+              Saved projects are directory shortcuts. Relocate fixes a moved folder; Forget removes only the shortcut.
+            </p>
+            <div class="project-preset-list">
+              <For each={props.projects}>
+                {(project) => (
+                  <div class={`project-preset-item project-${project.status}`}>
+                    <div title={project.canonicalRoot}>
+                      <strong>{pathLeaf(project.canonicalRoot)}</strong>
+                      <span>
+                        {project.status === "present"
+                          ? project.canonicalRoot
+                          : `${project.status} · ${project.canonicalRoot}`}
+                      </span>
+                    </div>
+                    <div>
+                      <button
+                        type="button"
+                        disabled={Boolean(presetBusyId())}
+                        onClick={() => void relocatePreset(project)}
+                      >
+                        Relocate
+                      </button>
+                      <button
+                        type="button"
+                        disabled={Boolean(presetBusyId())}
+                        onClick={() => void removePreset(project)}
+                      >
+                        Forget
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </For>
+            </div>
+            <Show when={presetError()}>{(message) => <p class="error">Saved projects: {message()}</p>}</Show>
+          </details>
+        </Show>
         <label>
           <span>Execution root</span>
           <select

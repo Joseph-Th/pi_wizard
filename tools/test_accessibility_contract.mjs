@@ -12,7 +12,6 @@ const models = [
 ].join("\n");
 const projects = [
   readFileSync(resolve(root, "src", "features", "projects", "ProjectLauncher.tsx"), "utf8"),
-  readFileSync(resolve(root, "src", "features", "projects", "ProjectManager.tsx"), "utf8"),
 ].join("\n");
 const sessions = [
   readFileSync(resolve(root, "src", "features", "sessions", "SessionCatalogBrowser.tsx"), "utf8"),
@@ -169,10 +168,16 @@ requireContract(
   "only the selected run should mount the detailed session surface",
 );
 requireContract(
-  ui.includes('"runtime_list_projects"') &&
+  app.includes('"runtime_list_projects"') &&
+    app.includes("void refreshProjects();") &&
     ui.includes('"runtime_relocate_project"') &&
-    ui.includes('"runtime_remove_project"'),
-  "project list, relocation, and registration removal must be reachable from the renderer",
+    ui.includes('"runtime_remove_project"') &&
+    projects.includes("projects: DesktopProjectRecord[]") &&
+    projects.includes("Choose a saved project") &&
+    projects.includes("Browse once; used folders are saved here for future runs") &&
+    projects.includes("Manage saved projects") &&
+    !app.includes("<ProjectManager"),
+  "durable project registrations must act as quick directory presets inside New Run, with relocation/removal available on demand rather than occupying the sidebar",
 );
 requireContract(
   ui.includes("initialTask: initialTask().trim() || null"),
@@ -275,18 +280,31 @@ requireContract(
   "dashboard cards must show backend-owned elapsed time and reuse already-known change summaries without polling Git",
 );
 requireContract(
-  ui.includes("const RUNTIME_HYDRATION_SCHEMA_VERSION = 9") &&
+  ui.includes("const RUNTIME_HYDRATION_SCHEMA_VERSION = 10") &&
     ui.includes("snapshot.schemaVersion !== RUNTIME_HYDRATION_SCHEMA_VERSION") &&
     ui.includes("Unsupported runtime hydration schema"),
   "renderer hydration must reject an unsupported backend schema instead of applying structurally incompatible state",
 );
 requireContract(
-  ui.includes("collapseCompletedOutput") &&
-    ui.includes('class={`${itemClass} history-collapsible`}') &&
-    ui.includes("VERBOSE_THINKING_BYTES = 480") &&
-    ui.includes("collapseThinking") &&
-    ui.includes("show reasoning"),
-  "completed successful tool output and verbose completed thinking must collapse by default while failed or active output remains visible",
+  ui.includes("props.live?.reasoning") &&
+    ui.includes('class="live-block live-thinking live-reasoning"') &&
+    ui.includes('class="history-reasoning" open') &&
+    ui.includes("item.reasoning") &&
+    ui.includes("item.reasoningTruncated") &&
+    ui.includes("live-activity-status") &&
+    ui.includes("Reading project files") &&
+    ui.includes("Searching the codebase") &&
+    ui.includes("Editing files") &&
+    ui.includes("Checking repository state") &&
+    ui.includes("toolActivityLabel(tool.toolName)") &&
+    !ui.includes("Running tool:") &&
+    !ui.includes("Running shell command") &&
+    ui.includes('if (item.kind === "tool" || item.kind === "bash") return null') &&
+    !ui.includes("show output") &&
+    !ui.includes("Tool request") &&
+    !ui.includes("VERBOSE_THINKING_BYTES") &&
+    !ui.includes("collapseThinking"),
+  "Pi reasoning must remain prominent and continuous while completed tool protocol disappears from the conversation and only one human-readable live activity status explains active work",
 );
 requireContract(
   ui.includes('type InspectorKind = "details" | "changes" | "tree"') &&

@@ -12,7 +12,7 @@ use super::{
     RunRpcController, RuntimeStore, SessionSyncState,
 };
 
-pub const RUNTIME_HYDRATION_SCHEMA_VERSION: u32 = 9;
+pub const RUNTIME_HYDRATION_SCHEMA_VERSION: u32 = 10;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

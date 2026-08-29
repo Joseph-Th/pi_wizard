@@ -57,7 +57,7 @@ export function RecentSessionsView(props: {
         fallback={
           <div class="empty-state">
             <strong>No available project folders</strong>
-            <span>Register a project from New Run, or relocate a detached project from the sidebar.</span>
+            <span>Choose or browse a folder from New Run. Used folders are saved there as quick project presets.</span>
           </div>
         }
       >

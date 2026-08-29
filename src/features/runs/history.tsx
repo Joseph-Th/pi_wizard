@@ -11,7 +11,6 @@ import type {
 } from "../automation/types";
 import { ModelPicker } from "../models/ModelPicker";
 import type { ModelSelection } from "../models/types";
-import { ProjectManager } from "../projects/ProjectManager";
 import { ProjectLauncher } from "../projects/ProjectLauncher";
 import { SessionCatalogBrowser } from "../sessions/SessionCatalogBrowser";
 import { RecentSessionsView } from "../sessions/RecentSessionsView";
@@ -239,20 +238,12 @@ export function HistoryTimeline(props: {
                 <div class="history-page">
                   <For each={loaded.page.items}>
                     {(item) => {
-                      const collapseCompletedOutput =
-                        (item.kind === "tool" || item.kind === "bash") &&
-                        !item.isError &&
-                        item.text.length > 0;
+                      if (item.kind === "tool" || item.kind === "bash") return null;
                       const itemClass = `history-item history-${item.kind}${item.isError ? " history-error" : ""}`;
                       const itemHeader = (
                         <>
                           <strong>{historyLabel(item)}</strong>
                           <div>
-                            <Show when={collapseCompletedOutput}>
-                              <span>
-                                Completed{item.textTruncated ? " · bounded output" : " · show output"}
-                              </span>
-                            </Show>
                             <Show when={historyTimestamp(item.timestamp)}>
                               {(timestamp) => <span>{timestamp()}</span>}
                             </Show>
@@ -268,17 +259,25 @@ export function HistoryTimeline(props: {
                           </div>
                         </>
                       );
-                      return collapseCompletedOutput ? (
-                        <details class={`${itemClass} history-collapsible`} data-timeline-row="true">
-                          <summary>{itemHeader}</summary>
-                          <pre>{item.text}</pre>
-                          <Show when={item.textTruncated}>
-                            <span class="truncation-note">History preview truncated</span>
-                          </Show>
-                        </details>
-                      ) : (
+                      return (
                         <article class={itemClass} data-timeline-row="true">
                           <header>{itemHeader}</header>
+                          <Show when={item.kind === "assistant" ? item.reasoning : null}>
+                            {(reasoning) => (
+                              <details class="history-reasoning" open>
+                                <summary>
+                                  <strong>Reasoning</strong>
+                                  <span>
+                                    Pi thinking{item.reasoningTruncated ? " · bounded" : ""}
+                                  </span>
+                                </summary>
+                                <pre>{reasoning()}</pre>
+                                <Show when={item.reasoningTruncated}>
+                                  <span class="truncation-note">Reasoning preview truncated</span>
+                                </Show>
+                              </details>
+                            )}
+                          </Show>
                           <Show when={item.text}>
                             <pre>{item.text}</pre>
                           </Show>

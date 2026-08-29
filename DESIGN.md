@@ -49,7 +49,7 @@ Finite user-started automation is in scope as one independent feature. A saved c
 The user sees four durable concepts:
 
 **Project**  
-A registered directory. It may contain many historical and live Pi sessions.
+A saved launch preset bound to one canonical directory. Choosing it routes new runs and session browsing to that exact folder without retyping the path. It may contain many historical and live Pi sessions.
 
 **Session**  
 A Pi conversation/history. Pi owns its content and branching semantics.
@@ -68,7 +68,7 @@ Keeping Session and Run separate prevents a common GUI failure: treating whateve
 
 The desktop window has three structural regions, but only two are normally visible:
 
-1. **Sidebar**: projects, active sessions, recent sessions, and a compact Needs Attention entry.
+1. **Sidebar**: active runs, recent sessions, primary workflows, and a compact Needs Attention entry.
 2. **Main surface**: either the active session timeline or the multi-agent dashboard.
 3. **Inspector drawer**: changes, session tree, or run details. It is closed by default and only one inspector is mounted at a time.
 
@@ -96,7 +96,6 @@ The sidebar prioritizes live state over historical volume:
   - Needs attention
   - Queued
 - Recent
-- Projects
 
 Historical sessions are paged/searchable rather than all materialized into a long reactive tree.
 
@@ -136,10 +135,9 @@ The timeline groups activity into semantic turns rather than exposing raw protoc
 
 - user messages are always visible;
 - assistant text streams in place;
-- reasoning/thinking follows Pi settings and is collapsed by default when verbose;
-- tool executions are compact cards;
-- successful completed tool cards collapse to a one-line summary by default;
-- active, failed, or explicitly expanded tools show a bounded output preview;
+- reasoning/thinking follows Pi settings, streams prominently, accumulates across Pi's thinking/tool/thinking message boundaries for the active turn, and remains visible after the completed message is persisted;
+- tool protocol is not transcript content: completed tool calls, shell commands, and their output do not appear in session history;
+- while Pi is actively using a tool, the live surface may show one quiet human-readable activity line only when it explains the current wait (for example reading files, searching code, editing files, or running a command); raw tool output stays out of the conversation;
 - compaction/retry/session events are lightweight notices rather than full message blocks; compaction abort/failure/overflow-retry and provider/summarization retry state remain visible when they affect recovery, and a quiet Working stream may show a one-shot advisory without being relabeled failed or idle.
 
 Only a virtualized window of turn groups is mounted. Older content loads in bounded pages as the user navigates upward.
@@ -182,7 +180,7 @@ If the same dialog component remains mounted while the backend advances to anoth
 
 The New Session sheet asks only for decisions that materially affect the run:
 
-1. Project.
+1. Project, selected from saved directory presets or chosen once with Browse.
 2. Execution root:
    - **Local checkout**
    - **New Git worktree** when the project is a Git repository.
@@ -193,7 +191,7 @@ Advanced options are collapsed. Project trust is handled before launching RPC wh
 
 The normal trust selection is **Use Pi trust settings**, preserving Pi's saved canonical-directory decision and global fallback. One-run **Approve** and **Ignore protected resources** overrides remain available. The sheet explicitly notes that `AGENTS.md`/`CLAUDE.md` context instructions still load when protected resources are ignored; disabling context instructions is a separate advanced choice.
 
-Project rows are backed by a stable app project ID and canonical path. If a folder is renamed/moved/deleted outside Pi Wizard, the row becomes **Detached** with **Relocate** / **Remove** actions. It never silently opens another checkout or sends new sessions to a global/default project merely because names/remotes look similar.
+Using or probing a new folder registers its canonical directory as a saved project preset, so later New Run launches can select it directly from the project dropdown. Preset management is secondary UI inside New Run rather than permanent sidebar navigation. If a folder is renamed/moved/deleted outside Pi Wizard, the saved preset becomes detached with **Relocate** / **Forget** actions. It never silently opens another checkout or sends new sessions to a global/default project merely because names/remotes look similar.
 
 For autonomous parallel work, **New Git worktree** is the recommended Git-isolation default. It prevents agents from editing the same checkout, but the UI explicitly states that it does not restrict filesystem, network, shell, credentials, or host process access.
 
