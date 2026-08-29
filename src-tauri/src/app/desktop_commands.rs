@@ -9,6 +9,21 @@ pub(super) struct PiEnvironmentProbeReport {
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub(super) struct ProbeProjectModelsRequest {
+    project_path: PathBuf,
+    project_trust: ProjectTrustPolicy,
+    #[serde(default)]
+    context_files: ContextFilesPolicy,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct ProjectModelCatalog {
+    models: Vec<ModelSummary>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(super) struct StartProjectRequest {
     project_path: PathBuf,
     project_trust: ProjectTrustPolicy,
@@ -174,7 +189,6 @@ pub(super) struct ProbeProjectLaunchOptionsRequest {
 pub(super) struct ProjectLaunchOptions {
     current_model: Option<ModelSummary>,
     current_thinking_level: ThinkingLevel,
-    models: Vec<ModelSummary>,
     thinking_levels: Vec<ThinkingLevel>,
     clear_queue_supported: bool,
 }
@@ -259,6 +273,79 @@ pub(super) async fn probe_rpc_response(
     .map_err(|_| format!("Pi launch-options probe timed out waiting for {request_id}"))?
 }
 
+async fn probe_project_models(
+    environment: &ResolvedLaunchEnvironment,
+    project: &ProjectBinding,
+    project_trust: ProjectTrustPolicy,
+    context_files: ContextFilesPolicy,
+    limits: RuntimeLimits,
+) -> Result<ProjectModelCatalog, String> {
+    let selection = LaunchSelection::validate(
+        context_files,
+        ExtensionDiscoveryPolicy::Disabled,
+        None,
+        None,
+        None,
+    )?;
+    let mut spec = PiLaunchSpec::new(
+        environment.pi_executable().to_path_buf(),
+        project.canonical_root(),
+        project_trust,
+    );
+    selection.apply(&mut spec);
+    spec.session = SessionLaunch::Ephemeral;
+    let resolved = spec.resolve().map_err(|error| error.to_string())?;
+    let mut process =
+        spawn_pi_process(&resolved, environment, limits).map_err(|error| error.to_string())?;
+    let rpc_deadline = Duration::from_millis(limits.startup_rpc_deadline_ms);
+    let result = probe_rpc_response(&mut process, RpcCommand::GetAvailableModels, rpc_deadline)
+        .await
+        .and_then(|response| {
+            response
+                .available_models(limits)
+                .map(|models| ProjectModelCatalog { models })
+                .map_err(|error| error.to_string())
+        });
+    let termination = process
+        .control
+        .terminate(Duration::from_millis(limits.stop_termination_deadline_ms))
+        .await;
+    match (result, termination) {
+        (Ok(catalog), Ok(TerminationOutcome::Exited { .. })) => Ok(catalog),
+        (Ok(_), Ok(TerminationOutcome::Unconfirmed { .. })) => Err(
+            "Pi model probe completed but its temporary process could not be confirmed terminated"
+                .to_owned(),
+        ),
+        (Ok(_), Err(error)) => Err(format!(
+            "Pi model probe completed but cleanup failed: {error}"
+        )),
+        (Err(error), Ok(TerminationOutcome::Exited { .. })) => Err(error),
+        (Err(error), Ok(TerminationOutcome::Unconfirmed { .. })) => Err(format!(
+            "{error}; temporary Pi model probe termination could not be confirmed"
+        )),
+        (Err(error), Err(cleanup)) => {
+            Err(format!("{error}; model probe cleanup failed: {cleanup}"))
+        }
+    }
+}
+
+#[tauri::command]
+pub(super) async fn runtime_probe_project_models(
+    runtime: tauri::State<'_, DesktopRuntime>,
+    request: ProbeProjectModelsRequest,
+) -> Result<ProjectModelCatalog, String> {
+    let profile = runtime.launch_profile().await?;
+    let project = runtime.project_binding(request.project_path).await?;
+    probe_project_models(
+        &profile.environment,
+        &project,
+        request.project_trust,
+        request.context_files,
+        runtime.limits,
+    )
+    .await
+}
+
 #[tauri::command]
 pub(super) async fn runtime_probe_project_launch_options(
     runtime: tauri::State<'_, DesktopRuntime>,
@@ -290,8 +377,6 @@ pub(super) async fn runtime_probe_project_launch_options(
     let rpc_deadline = Duration::from_millis(runtime.limits.startup_rpc_deadline_ms);
     let result = async {
         let state = probe_rpc_response(&mut process, RpcCommand::GetState, rpc_deadline).await?;
-        let models =
-            probe_rpc_response(&mut process, RpcCommand::GetAvailableModels, rpc_deadline).await?;
         let thinking = probe_rpc_response(
             &mut process,
             RpcCommand::GetAvailableThinkingLevels,
@@ -323,9 +408,6 @@ pub(super) async fn runtime_probe_project_launch_options(
         Ok(ProjectLaunchOptions {
             current_model: state.model,
             current_thinking_level: state.thinking_level,
-            models: models
-                .available_models(runtime.limits)
-                .map_err(|error| error.to_string())?,
             thinking_levels: thinking
                 .available_thinking_levels(runtime.limits)
                 .map_err(|error| error.to_string())?,
@@ -1626,6 +1708,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::*;
+    use crate::services::test_support::WorkflowFakePiFixture;
     use pi_wizard_core::runtime::RUNTIME_HYDRATION_SCHEMA_VERSION;
     use serde_json::json;
 
@@ -2214,7 +2297,6 @@ mod tests {
             serde_json::to_value(ProjectLaunchOptions {
                 current_model: None,
                 current_thinking_level: ThinkingLevel::Medium,
-                models: Vec::new(),
                 thinking_levels: vec![ThinkingLevel::Off, ThinkingLevel::Medium],
                 clear_queue_supported: false,
             })
@@ -2222,11 +2304,34 @@ mod tests {
             json!({
                 "currentModel": null,
                 "currentThinkingLevel": "medium",
-                "models": [],
                 "thinkingLevels": ["off", "medium"],
                 "clearQueueSupported": false
             })
         );
+    }
+
+    #[tokio::test]
+    async fn project_model_probe_returns_multiple_pi_models_independently() {
+        let fixture = WorkflowFakePiFixture::new("model-probe-integration");
+        let environment = fixture.environment();
+        let project = ProjectBinding::register(&fixture.root).expect("register fixture project");
+        let limits = RuntimeLimits {
+            startup_rpc_deadline_ms: 2_000,
+            ..RuntimeLimits::default()
+        };
+        let catalog = probe_project_models(
+            &environment,
+            &project,
+            ProjectTrustPolicy::Inherit,
+            ContextFilesPolicy::Inherit,
+            limits,
+        )
+        .await
+        .expect("probe Pi models without launch-options dependencies");
+        assert_eq!(catalog.models.len(), 3);
+        assert_eq!(catalog.models[0].id, "fake-model");
+        assert_eq!(catalog.models[1].id, "alternate-model");
+        assert_eq!(catalog.models[2].provider, "other-provider");
     }
 
     #[test]

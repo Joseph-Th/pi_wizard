@@ -89,10 +89,14 @@ requireContract(
     ui.includes('if (view() === "automation") void refreshAutomation();') &&
     ui.includes("promptPreview") &&
     ui.includes("promptTruncated") &&
-    ui.includes("const refreshRuntimeState = async () =>") &&
+    ui.includes("const refreshRuntimeState = async (startup = false) =>") &&
     ui.includes("const [snapshot] = await Promise.all([") &&
-    ui.includes("refreshHydration(),") &&
-    ui.includes("refreshCapacity(),") &&
+    ui.includes("refreshHydration(startup),") &&
+    ui.includes("refreshCapacity(startup),") &&
+    ui.includes("const installRuntimeListeners = async (startup = false) =>") &&
+    ui.includes("retryStartupOperation(() => listen<T>(event, handler))") &&
+    ui.includes("void connectBackend(true)") &&
+    ui.includes('onClick={() => void connectBackend()}') &&
     ui.includes("Git-isolated workers") &&
     !automation.includes("supervisor") &&
     ui.includes('view() === "supervision"') &&
@@ -105,6 +109,7 @@ requireContract(
   "finite Automation and independent Supervision must be separate first-class keyboard-accessible navigation surfaces driven by backend invalidation events rather than polling",
 );
 requireContract(
+  models.includes('"runtime_probe_project_models"') &&
   models.includes('"runtime_probe_project_launch_options"') &&
     models.includes('"runtime_model_catalog"') &&
     models.includes('"runtime_save_custom_model"') &&
@@ -113,8 +118,11 @@ requireContract(
     automation.includes("<ModelPicker") &&
     supervision.includes("<ModelPicker") &&
     automation.includes("provider: model()?.provider ?? null") &&
-    supervision.includes("provider: model()?.provider ?? null"),
-  "New Run, Automation, and Supervision must share Pi-discovered plus durable custom model selection instead of hard-coding Pi default",
+    supervision.includes("provider: model()?.provider ?? null") &&
+    models.includes("for (const model of discovery()?.models ?? [])") &&
+    models.includes("models.length} model") &&
+    models.includes("Pi model discovery:"),
+  "New Run, Automation, and Supervision must load Pi's model catalog independently from secondary launch-option probes and merge durable custom identities instead of collapsing to Pi default",
 );
 requireContract(
   ui.includes('when={view() === "run"}') && ui.includes('when={selectedRun()}'),

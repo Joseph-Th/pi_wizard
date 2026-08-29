@@ -1,7 +1,8 @@
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsString;
+use std::fs;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -62,6 +63,71 @@ const RUNTIME_DIRTY_EVENT: &str = "runtime://dirty";
 const RUNTIME_REHYDRATE_EVENT: &str = "runtime://rehydrate";
 const AUTOMATION_CHANGED_EVENT: &str = "automation://changed";
 const SUPERVISION_CHANGED_EVENT: &str = "supervision://changed";
+const PORTABLE_STATE_DIRECTORY: &str = "pi-wizard-data";
+const PORTABLE_STATE_MIGRATION_DIRECTORY: &str = "pi-wizard-data.migrating";
+
+fn portable_state_root(executable: &Path) -> Result<PathBuf, io::Error> {
+    executable
+        .parent()
+        .map(|parent| parent.join(PORTABLE_STATE_DIRECTORY))
+        .ok_or_else(|| io::Error::other("Pi Wizard executable has no parent directory"))
+}
+
+fn copy_state_tree(source: &Path, destination: &Path) -> Result<(), io::Error> {
+    fs::create_dir_all(destination)?;
+    for entry in fs::read_dir(source)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        if file_type.is_dir() {
+            copy_state_tree(&source_path, &destination_path)?;
+        } else if file_type.is_file() {
+            fs::copy(&source_path, &destination_path)?;
+        } else {
+            return Err(io::Error::other(format!(
+                "portable state migration refuses non-file entry {}",
+                source_path.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn prepare_portable_state_root(
+    executable: &Path,
+    legacy_state_root: Option<&Path>,
+) -> Result<PathBuf, io::Error> {
+    let state_root = portable_state_root(executable)?;
+    if state_root.exists() {
+        fs::create_dir_all(&state_root)?;
+        return Ok(state_root);
+    }
+
+    let Some(legacy_state_root) = legacy_state_root.filter(|path| path.is_dir()) else {
+        fs::create_dir_all(&state_root)?;
+        return Ok(state_root);
+    };
+
+    if fs::rename(legacy_state_root, &state_root).is_ok() {
+        return Ok(state_root);
+    }
+
+    let parent = state_root
+        .parent()
+        .ok_or_else(|| io::Error::other("portable state root has no parent directory"))?;
+    let migration_root = parent.join(PORTABLE_STATE_MIGRATION_DIRECTORY);
+    if migration_root.exists() {
+        fs::remove_dir_all(&migration_root)?;
+    }
+    if let Err(error) = copy_state_tree(legacy_state_root, &migration_root) {
+        let _ = fs::remove_dir_all(&migration_root);
+        return Err(error);
+    }
+    fs::rename(&migration_root, &state_root)?;
+    let _ = fs::remove_dir_all(legacy_state_root);
+    Ok(state_root)
+}
 
 pub(crate) struct DesktopRuntime {
     pub(crate) manager: RuntimeManagerHandle,
@@ -651,11 +717,13 @@ pub fn run() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
-            let state_root = app
+            let legacy_state_root = app
                 .path()
                 .app_data_dir()
                 .map_err(|error| io::Error::other(error.to_string()))?
                 .join("runtime-state");
+            let executable = std::env::current_exe()?;
+            let state_root = prepare_portable_state_root(&executable, Some(&legacy_state_root))?;
             let runtime =
                 DesktopRuntime::new_with_state_root(Some(state_root)).map_err(io::Error::other)?;
             let manager = runtime.manager.clone();
@@ -706,6 +774,7 @@ pub fn run() {
             desktop_commands::runtime_relocate_project,
             desktop_commands::runtime_remove_project,
             desktop_commands::runtime_probe_project_resources,
+            desktop_commands::runtime_probe_project_models,
             desktop_commands::runtime_probe_project_launch_options,
             desktop_commands::runtime_start_project,
             desktop_commands::runtime_probe_project_worktree,
@@ -756,4 +825,64 @@ pub fn run() {
             app_handle.exit(code.unwrap_or(0));
         });
     });
+}
+
+#[cfg(test)]
+mod portable_state_tests {
+    use super::*;
+
+    #[test]
+    fn portable_state_root_is_sibling_of_the_executable() {
+        let executable = PathBuf::from(r"C:\apps\pi-wizard\pi-wizard-desktop.exe");
+        assert_eq!(
+            portable_state_root(&executable).expect("portable state root"),
+            PathBuf::from(r"C:\apps\pi-wizard\pi-wizard-data")
+        );
+    }
+
+    #[test]
+    fn portable_state_migration_preserves_nested_legacy_state_and_never_overwrites_existing_root() {
+        let root = std::env::temp_dir().join(format!(
+            "pi-wizard-portable-state-migration-{}",
+            RunId::new()
+        ));
+        let executable_dir = root.join("app");
+        let executable = executable_dir.join("pi-wizard-desktop.exe");
+        let legacy = root.join("legacy-runtime-state");
+        fs::create_dir_all(legacy.join("drafts")).expect("legacy drafts");
+        fs::create_dir_all(&executable_dir).expect("executable directory");
+        fs::write(legacy.join("automation-chains.json"), b"chains").expect("legacy chains");
+        fs::write(legacy.join("model-profiles.json"), b"models").expect("legacy models");
+        fs::write(legacy.join("drafts").join("one.json"), b"draft").expect("legacy draft");
+
+        let portable = prepare_portable_state_root(&executable, Some(&legacy))
+            .expect("migrate legacy portable state");
+        assert_eq!(portable, executable_dir.join(PORTABLE_STATE_DIRECTORY));
+        assert_eq!(
+            fs::read(portable.join("automation-chains.json")).expect("migrated chains"),
+            b"chains"
+        );
+        assert_eq!(
+            fs::read(portable.join("model-profiles.json")).expect("migrated models"),
+            b"models"
+        );
+        assert_eq!(
+            fs::read(portable.join("drafts").join("one.json")).expect("migrated draft"),
+            b"draft"
+        );
+
+        fs::write(portable.join("preferences.json"), b"portable-wins")
+            .expect("portable preference");
+        fs::create_dir_all(&legacy).expect("second legacy root");
+        fs::write(legacy.join("preferences.json"), b"legacy-loses")
+            .expect("second legacy preference");
+        let reopened =
+            prepare_portable_state_root(&executable, Some(&legacy)).expect("reuse portable root");
+        assert_eq!(reopened, portable);
+        assert_eq!(
+            fs::read(reopened.join("preferences.json")).expect("portable preference remains"),
+            b"portable-wins"
+        );
+        fs::remove_dir_all(root).expect("portable migration fixture cleanup");
+    }
 }

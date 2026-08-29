@@ -178,7 +178,11 @@ function handle(request) {
       break;
     case "get_available_models":
       respond(request, {
-        models: [{provider: "fake", id: "fake-model", name: "Fake Model", input: ["text"]}],
+        models: [
+          {provider: "fake", id: "fake-model", name: "Fake Model", input: ["text"]},
+          {provider: "fake", id: "alternate-model", name: "Alternate Model", input: ["text", "image"]},
+          {provider: "other-provider", id: "other-model", name: "Other Model", input: ["text"]},
+        ],
       });
       break;
     case "get_available_thinking_levels":

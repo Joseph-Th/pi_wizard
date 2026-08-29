@@ -250,13 +250,16 @@ def main() -> None:
     completed = bounded_run(argv, input_bytes=payload, timeout=RPC_TIMEOUT_SECONDS)
     responses = parse_responses(completed.stdout)
     state = require_response(responses, "state", "get_state")
-    require_response(responses, "models", "get_available_models")
+    models_data = require_response(responses, "models", "get_available_models")
     require_response(responses, "thinking", "get_available_thinking_levels")
     require_response(responses, "auto-retry-off", "set_auto_retry")
     clear_queue_supported = optional_command_supported(responses, "clear-queue", "clear_queue")
 
     if state.get("sessionFile") is not None:
         raise SystemExit("live Pi smoke unexpectedly created or attached a session file")
+    models = models_data.get("models")
+    if not isinstance(models, list) or not models:
+        raise SystemExit("Pi get_available_models returned no selectable models")
     if args.provider is not None:
         model = state.get("model")
         if not isinstance(model, dict):
@@ -271,6 +274,7 @@ def main() -> None:
         )
 
     print(f"live Pi RPC smoke passed: {version_text}")
+    print(f"available Pi models: {len(models)}")
     print(
         "verified: ephemeral session, offline startup, context/extensions disabled, "
         "state/models/thinking RPC, native auto-retry control"

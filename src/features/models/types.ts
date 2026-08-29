@@ -20,9 +20,12 @@ export interface ModelSummary {
 export interface ProjectLaunchOptions {
   currentModel: ModelSummary | null;
   currentThinkingLevel: ThinkingLevel;
-  models: ModelSummary[];
   thinkingLevels: ThinkingLevel[];
   clearQueueSupported: boolean;
+}
+
+export interface ProjectModelCatalog {
+  models: ModelSummary[];
 }
 
 export interface CustomModelProfile {

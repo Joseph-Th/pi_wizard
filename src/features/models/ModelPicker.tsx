@@ -10,6 +10,7 @@ import {
   type ModelSelection,
   type ModelSummary,
   type ProjectLaunchOptions,
+  type ProjectModelCatalog,
   type ProjectTrustPolicy,
   type ThinkingLevel,
 } from "./types";
@@ -37,14 +38,19 @@ function identity(provider: string, model: string): string {
 }
 
 export function ModelPicker(props: ModelPickerProps) {
+  const [discovery, setDiscovery] = createSignal<ProjectModelCatalog>();
   const [options, setOptions] = createSignal<ProjectLaunchOptions>();
   const [catalog, setCatalog] = createSignal<ModelCatalogSnapshot>();
-  const [loading, setLoading] = createSignal(false);
+  const [modelsLoading, setModelsLoading] = createSignal(false);
+  const [selectionLoading, setSelectionLoading] = createSignal(false);
   const [catalogBusy, setCatalogBusy] = createSignal(false);
   const [error, setError] = createSignal<string>();
+  const [modelError, setModelError] = createSignal<string>();
+  const [selectionError, setSelectionError] = createSignal<string>();
   const [providerDraft, setProviderDraft] = createSignal("");
   const [modelDraft, setModelDraft] = createSignal("");
   const [nameDraft, setNameDraft] = createSignal("");
+  let modelSequence = 0;
   let probeSequence = 0;
   let autoLoadKey = "";
 
@@ -59,15 +65,46 @@ export function ModelPicker(props: ModelPickerProps) {
     }
   };
 
-  const probe = async (selection: ModelSelection | undefined) => {
+  const loadModels = async () => {
+    const path = props.projectPath.trim();
+    if (!path || !props.piReady) {
+      setDiscovery(undefined);
+      return undefined;
+    }
+    const sequence = ++modelSequence;
+    setModelsLoading(true);
+    setModelError(undefined);
+    try {
+      const snapshot = await invokeDesktop<ProjectModelCatalog>("runtime_probe_project_models", {
+        request: {
+          projectPath: path,
+          projectTrust: props.projectTrust ?? "inherit",
+          contextFiles: props.contextFiles ?? "inherit",
+        },
+      });
+      if (sequence === modelSequence && props.projectPath.trim() === path) {
+        setDiscovery(snapshot);
+      }
+      return snapshot;
+    } catch (caught) {
+      if (sequence === modelSequence && props.projectPath.trim() === path) {
+        setModelError(String(caught));
+      }
+      return undefined;
+    } finally {
+      if (sequence === modelSequence) setModelsLoading(false);
+    }
+  };
+
+  const probeSelection = async (selection: ModelSelection | undefined) => {
     const path = props.projectPath.trim();
     if (!path || !props.piReady) {
       setOptions(undefined);
       return undefined;
     }
     const sequence = ++probeSequence;
-    setLoading(true);
-    setError(undefined);
+    setSelectionLoading(true);
+    setSelectionError(undefined);
     try {
       const snapshot = await invokeDesktop<ProjectLaunchOptions>(
         "runtime_probe_project_launch_options",
@@ -87,11 +124,11 @@ export function ModelPicker(props: ModelPickerProps) {
       return snapshot;
     } catch (caught) {
       if (sequence === probeSequence && props.projectPath.trim() === path) {
-        setError(String(caught));
+        setSelectionError(String(caught));
       }
       return undefined;
     } finally {
-      if (sequence === probeSequence) setLoading(false);
+      if (sequence === probeSequence) setSelectionLoading(false);
     }
   };
 
@@ -105,15 +142,21 @@ export function ModelPicker(props: ModelPickerProps) {
     ].join("|");
     if (key === autoLoadKey) return;
     autoLoadKey = key;
+    setDiscovery(undefined);
     setOptions(undefined);
     setError(undefined);
+    setModelError(undefined);
+    setSelectionError(undefined);
     void loadCatalog();
-    if (props.piReady && path) void probe(undefined);
+    if (props.piReady && path) {
+      void loadModels();
+      void probeSelection(undefined);
+    }
   });
 
   const models = (): PickerModel[] => {
     const merged = new Map<string, PickerModel>();
-    for (const model of options()?.models ?? []) {
+    for (const model of discovery()?.models ?? []) {
       merged.set(identity(model.provider, model.id), { ...model, custom: false });
     }
     for (const profile of catalog()?.models ?? []) {
@@ -168,7 +211,7 @@ export function ModelPicker(props: ModelPickerProps) {
       setProviderDraft("");
       setModelDraft("");
       setNameDraft("");
-      void probe(next);
+      void probeSelection(next);
     } catch (caught) {
       setError(String(caught));
     } finally {
@@ -187,7 +230,7 @@ export function ModelPicker(props: ModelPickerProps) {
       if (props.model?.provider === profile.provider && props.model.id === profile.model) {
         props.onModelChange(undefined);
         props.onThinkingChange("");
-        void probe(undefined);
+        void probeSelection(undefined);
       }
       await loadCatalog();
     } catch (caught) {
@@ -208,10 +251,18 @@ export function ModelPicker(props: ModelPickerProps) {
         </div>
         <button
           type="button"
-          disabled={Boolean(props.disabled) || loading() || !props.piReady || !props.projectPath.trim()}
-          onClick={() => void Promise.all([loadCatalog(), probe(props.model)])}
+          disabled={
+            Boolean(props.disabled) ||
+            modelsLoading() ||
+            selectionLoading() ||
+            !props.piReady ||
+            !props.projectPath.trim()
+          }
+          onClick={() =>
+            void Promise.all([loadCatalog(), loadModels(), probeSelection(props.model)])
+          }
         >
-          {loading() ? "Reading Pi models" : "Refresh models"}
+          {modelsLoading() ? "Reading Pi models" : selectionLoading() ? "Checking model" : "Refresh models"}
         </button>
       </div>
 
@@ -220,12 +271,12 @@ export function ModelPicker(props: ModelPickerProps) {
           <span>Model</span>
           <select
             value={selectedKey()}
-            disabled={Boolean(props.disabled) || loading()}
+            disabled={Boolean(props.disabled) || modelsLoading()}
             onChange={(event) => {
               const next = decodeModelSelection(event.currentTarget.value);
               props.onModelChange(next);
               props.onThinkingChange("");
-              void probe(next);
+              void probeSelection(next);
             }}
           >
             <option value="">
@@ -247,7 +298,7 @@ export function ModelPicker(props: ModelPickerProps) {
           <span>Thinking</span>
           <select
             value={props.thinking}
-            disabled={Boolean(props.disabled) || loading()}
+            disabled={Boolean(props.disabled) || selectionLoading()}
             onChange={(event) =>
               props.onThinkingChange(event.currentTarget.value as ThinkingLevel | "")
             }
@@ -264,6 +315,14 @@ export function ModelPicker(props: ModelPickerProps) {
         </label>
       </div>
 
+      <Show when={discovery()}>
+        {(snapshot) => (
+          <p class="model-picker-note">
+            {snapshot().models.length} model{snapshot().models.length === 1 ? "" : "s"} available from Pi.
+          </p>
+        )}
+      </Show>
+
       <Show when={catalog()?.recoveryNotice}>
         {(notice) => <p class="error">Saved model catalog was reset: {notice()}</p>}
       </Show>
@@ -273,6 +332,8 @@ export function ModelPicker(props: ModelPickerProps) {
           and terminates the exact owned Pi process when a reusable abort is not possible.
         </p>
       </Show>
+      <Show when={modelError()}>{(message) => <p class="error">Pi model discovery: {message()}</p>}</Show>
+      <Show when={selectionError()}>{(message) => <p class="error">Model options: {message()}</p>}</Show>
       <Show when={error()}>{(message) => <p class="error">Models: {message()}</p>}</Show>
 
       <details class="model-catalog-editor">
