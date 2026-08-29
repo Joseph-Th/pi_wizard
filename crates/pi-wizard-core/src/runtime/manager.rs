@@ -420,7 +420,7 @@ impl RuntimeManagerHandle {
         &self,
         run_id: RunId,
         expected_session_id: String,
-        cursor: String,
+        cursor: Option<String>,
         leaf_id: Option<String>,
     ) -> Result<(), RuntimeManagerError> {
         let (reply, response) = oneshot::channel();
@@ -883,7 +883,7 @@ enum RuntimeManagerCommand {
     BootstrapSessionSync {
         run_id: RunId,
         expected_session_id: String,
-        cursor: String,
+        cursor: Option<String>,
         leaf_id: Option<String>,
         reply: oneshot::Sender<Result<(), String>>,
     },
@@ -2457,7 +2457,7 @@ impl RuntimeManagerTask {
         &mut self,
         run_id: RunId,
         expected_session_id: &str,
-        cursor: String,
+        cursor: Option<String>,
         leaf_id: Option<String>,
     ) -> Result<(), String> {
         let current_session_id = self
@@ -2480,7 +2480,7 @@ impl RuntimeManagerTask {
                 return Ok(());
             }
             controller
-                .seed_session_sync(Some(cursor.clone()), leaf_id)
+                .seed_session_sync(cursor.clone(), leaf_id)
                 .map_err(|error| error.to_string())?;
             controller.session_sync_state().revision()
         };
@@ -2497,9 +2497,7 @@ impl RuntimeManagerTask {
         // a replacement command cannot cross between seed and request.
         self.send_request(
             run_id,
-            RpcRequest::new(RpcCommand::GetEntries {
-                since: Some(cursor),
-            }),
+            RpcRequest::new(RpcCommand::GetEntries { since: cursor }),
         )?;
         Ok(())
     }
@@ -2508,21 +2506,15 @@ impl RuntimeManagerTask {
         if self.shutdown.is_some() || self.stops.contains_key(&run_id) {
             return;
         }
-        let cursor = self.controllers.get(&run_id).and_then(|controller| {
+        let since = self.controllers.get(&run_id).and_then(|controller| {
             let sync = controller.session_sync_state();
             (sync.initialized() && !sync.resync_required())
                 .then(|| sync.cursor().map(str::to_owned))
-                .flatten()
         });
-        let Some(cursor) = cursor else {
+        let Some(since) = since else {
             return;
         };
-        let _ = self.send_request(
-            run_id,
-            RpcRequest::new(RpcCommand::GetEntries {
-                since: Some(cursor),
-            }),
-        );
+        let _ = self.send_request(run_id, RpcRequest::new(RpcCommand::GetEntries { since }));
     }
 
     fn queue_extension_response(
@@ -4036,7 +4028,7 @@ mod tests {
             .bootstrap_session_sync(
                 run_id,
                 "fake-session".to_owned(),
-                "seed".to_owned(),
+                Some("seed".to_owned()),
                 Some("seed".to_owned()),
             )
             .await
@@ -4059,7 +4051,7 @@ mod tests {
             .bootstrap_session_sync(
                 run_id,
                 "fake-session".to_owned(),
-                "stale-offline-cursor".to_owned(),
+                Some("stale-offline-cursor".to_owned()),
                 Some("stale-offline-leaf".to_owned()),
             )
             .await
@@ -4133,6 +4125,71 @@ mod tests {
         );
         assert!(settled.1 > before_revision);
         assert_eq!(settled.2.as_deref(), Some("entry-1"));
+        manager.shutdown().await.expect("shutdown");
+    }
+
+    #[tokio::test]
+    async fn empty_session_sync_bootstrap_catches_first_settled_turn() {
+        let fixture = ManagerFixture::new("empty-session-sync");
+        let manager = spawn_runtime_manager(RuntimeLimits::default()).expect("manager");
+        let run_id = manager
+            .start_run(fixture.start_spec())
+            .await
+            .expect("start run");
+        synchronize(&manager, run_id, "empty-sync-startup").await;
+
+        manager
+            .bootstrap_session_sync(run_id, "fake-session".to_owned(), None, None)
+            .await
+            .expect("seed empty live session sync");
+        synchronize(&manager, run_id, "empty-sync-bootstrap").await;
+        let before = manager.hydrate().await.expect("empty seeded hydration");
+        let before_sync = &before.runs[0].rpc.as_ref().expect("rpc").session_sync;
+        assert!(before_sync.initialized());
+        assert_eq!(before_sync.cursor(), None);
+        let before_revision = before_sync.revision();
+
+        let mut state_changes = manager.subscribe_state_changes();
+        manager
+            .request(
+                run_id,
+                RpcRequest::new(RpcCommand::Prompt {
+                    message: "first persisted turn".to_owned(),
+                    images: Vec::new(),
+                    streaming_behavior: None,
+                }),
+            )
+            .await
+            .expect("first prompt accepted");
+
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let snapshot = manager.hydrate().await.expect("first-turn hydration");
+                let run = snapshot
+                    .runs
+                    .iter()
+                    .find(|run| run.run.id() == run_id)
+                    .expect("run");
+                let sync = &run.rpc.as_ref().expect("rpc").session_sync;
+                if run.run.activity_state() == ActivityState::Idle
+                    && sync.revision() > before_revision
+                    && sync.cursor() == Some("entry-1")
+                {
+                    break;
+                }
+                match state_changes.recv().await {
+                    Ok(()) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(broadcast::error::RecvError::Closed) => {
+                        panic!(
+                            "runtime state stream closed before first session entry synchronized"
+                        )
+                    }
+                }
+            }
+        })
+        .await
+        .expect("first empty-session sync deadline");
+
         manager.shutdown().await.expect("shutdown");
     }
 
@@ -6771,12 +6828,12 @@ function handle(request) {
       break;
     case "get_entries": {
       const since = request.since == null ? null : String(request.since);
-      if (entryGeneration > 0 && since === "seed") {
+      if (entryGeneration > 0 && (since === "seed" || since === null)) {
         respond(request, {
           entries: [{
             type: "message",
             id: `entry-${entryGeneration}`,
-            parentId: "seed",
+            parentId: since,
             timestamp: "2026-08-29T00:00:00Z",
             message: {role: "assistant", content: [{type: "text", text: "Hello world"}]},
           }],

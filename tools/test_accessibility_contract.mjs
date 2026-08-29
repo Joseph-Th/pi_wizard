@@ -369,6 +369,9 @@ requireContract(
     ui.includes("sessionSync: SessionSyncState") &&
     ui.includes("currentSyncRevision > loadedSyncRevision") &&
     desktopHost.includes("let latest_read = request.cursor.is_none();") &&
+    desktopHost.includes("SessionHistoryReadSource::AwaitingFirstEntry") &&
+    desktopHost.includes("message_count == Some(0)") &&
+    desktopHost.includes("observed_persisted_cursor") &&
     desktopHost.includes("bootstrap_session_sync(") &&
     desktopHost.includes("page.append_cursor.clone()") &&
     ui.includes('<pre class="history-prompt-text">{item.text}</pre>') &&
@@ -387,7 +390,7 @@ requireContract(
     !ui.includes("Running shell command") &&
     !ui.includes("VERBOSE_THINKING_BYTES") &&
     !ui.includes("collapseThinking"),
-  "the top conversation must preserve prompts verbatim and render only final answers as sanitized rich text, seed Pi get_entries synchronization from a validated latest history page, and follow session-sync revisions so final output cannot disappear at settlement while the lower activity pane drops transient content",
+  "the top conversation must preserve prompts verbatim and render only final answers as sanitized rich text, treat Pi's advertised-but-not-yet-created zero-message session file as a valid empty latest page, seed Pi get_entries synchronization even from that null cursor, and follow session-sync revisions so final output cannot disappear at settlement while the lower activity pane drops transient content",
 );
 requireContract(
   ui.includes('type InspectorKind = "details" | "changes" | "tree"') &&

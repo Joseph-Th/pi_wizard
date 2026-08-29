@@ -1044,6 +1044,62 @@ pub(super) struct ReadSessionHistoryRequest {
     cursor: Option<SessionHistoryCursor>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum SessionHistoryReadSource {
+    Persisted(PathBuf),
+    AwaitingFirstEntry,
+}
+
+fn resolve_session_history_read_source(
+    session_path: &Path,
+    message_count: Option<usize>,
+    latest_read: bool,
+    observed_persisted_cursor: bool,
+) -> Result<SessionHistoryReadSource, String> {
+    match session_path.canonicalize() {
+        Ok(path) => Ok(SessionHistoryReadSource::Persisted(path)),
+        Err(error)
+            if error.kind() == io::ErrorKind::NotFound
+                && latest_read
+                && message_count == Some(0)
+                && !observed_persisted_cursor =>
+        {
+            // Pi may advertise the future JSONL path for an app-created
+            // persistent session before the first entry creates the file.
+            // This is a valid empty-session state, not missing user data.
+            Ok(SessionHistoryReadSource::AwaitingFirstEntry)
+        }
+        Err(error) => Err(format!("could not resolve Pi session file: {error}")),
+    }
+}
+
+fn session_history_binding_matches(
+    source: &SessionHistoryReadSource,
+    advertised_path: &Path,
+    current_path: &Path,
+) -> bool {
+    match source {
+        SessionHistoryReadSource::Persisted(expected) => current_path
+            .canonicalize()
+            .ok()
+            .as_ref()
+            .is_some_and(|current| current == expected),
+        SessionHistoryReadSource::AwaitingFirstEntry => current_path == advertised_path,
+    }
+}
+
+fn empty_session_history_page(session_id: &str) -> SessionHistoryPage {
+    SessionHistoryPage {
+        session_id: session_id.to_owned(),
+        append_cursor: None,
+        leaf_id: None,
+        items: Vec::new(),
+        next_cursor: None,
+        scanned_bytes: 0,
+        encoded_bytes: 0,
+    }
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(
     rename_all = "camelCase",
@@ -1746,27 +1802,40 @@ pub(super) async fn runtime_read_session_history(
         .session_id
         .clone()
         .ok_or_else(|| "Pi has not exposed a session id for this run".to_owned())?;
-    let canonical_session_path = session_path
-        .canonicalize()
-        .map_err(|error| format!("could not resolve Pi session file: {error}"))?;
-    let project_root = run.run.execution_root().clone();
     let latest_read = request.cursor.is_none();
+    let observed_persisted_cursor = run
+        .rpc
+        .as_ref()
+        .and_then(|rpc| rpc.session_sync.cursor())
+        .is_some();
+    let source = resolve_session_history_read_source(
+        &session_path,
+        session.message_count,
+        latest_read,
+        observed_persisted_cursor,
+    )?;
+    let project_root = run.run.execution_root().clone();
     let cursor = request.cursor;
     let limits = runtime.limits;
-    let read_path = canonical_session_path.clone();
-    let read_session_id = session_id.clone();
-    let page = tauri::async_runtime::spawn_blocking(move || {
-        read_session_history_page(
-            &read_path,
-            &project_root,
-            &read_session_id,
-            cursor.as_ref(),
-            limits,
-        )
-        .map_err(|error| error.to_string())
-    })
-    .await
-    .map_err(|error| error.to_string())??;
+    let page = match &source {
+        SessionHistoryReadSource::Persisted(canonical_session_path) => {
+            let read_path = canonical_session_path.clone();
+            let read_session_id = session_id.clone();
+            tauri::async_runtime::spawn_blocking(move || {
+                read_session_history_page(
+                    &read_path,
+                    &project_root,
+                    &read_session_id,
+                    cursor.as_ref(),
+                    limits,
+                )
+                .map_err(|error| error.to_string())
+            })
+            .await
+            .map_err(|error| error.to_string())??
+        }
+        SessionHistoryReadSource::AwaitingFirstEntry => empty_session_history_page(&session_id),
+    };
 
     // Disk work runs outside the manager actor. Re-check the exact session
     // binding after it completes so a concurrent clone/fork/switch cannot make
@@ -1783,12 +1852,9 @@ pub(super) async fn runtime_read_session_history(
         .is_some_and(|run| {
             let current_session = run.run.session_state();
             current_session.session_id.as_deref() == Some(session_id.as_str())
-                && current_session
-                    .session_file
-                    .as_ref()
-                    .and_then(|path| path.canonicalize().ok())
-                    .as_ref()
-                    == Some(&canonical_session_path)
+                && current_session.session_file.as_ref().is_some_and(|path| {
+                    session_history_binding_matches(&source, &session_path, path)
+                })
         });
     if !still_current {
         return Err(
@@ -1802,18 +1868,19 @@ pub(super) async fn runtime_read_session_history(
     // queue one `get_entries(since)` catch-up to close the append race between
     // the file snapshot and this seed. Older history pages never rewind the
     // live cursor.
-    if latest_read && let Some(append_cursor) = page.append_cursor.clone() {
+    if latest_read {
         runtime
             .manager
             .bootstrap_session_sync(
                 request.run_id,
                 session_id,
-                append_cursor,
+                page.append_cursor.clone(),
                 page.leaf_id.clone(),
             )
             .await
             .map_err(|error| error.to_string())?;
     }
+
     Ok(page)
 }
 
@@ -1966,6 +2033,36 @@ mod tests {
     use crate::services::test_support::WorkflowFakePiFixture;
     use pi_wizard_core::runtime::RUNTIME_HYDRATION_SCHEMA_VERSION;
     use serde_json::json;
+
+    #[test]
+    fn brand_new_pi_session_may_advertise_history_path_before_file_exists() {
+        let root =
+            std::env::temp_dir().join(format!("pi-wizard-empty-session-history-{}", RunId::new()));
+        let missing = root.join("future-session.jsonl");
+
+        assert_eq!(
+            resolve_session_history_read_source(&missing, Some(0), true, false)
+                .expect("newest empty session is valid before first entry"),
+            SessionHistoryReadSource::AwaitingFirstEntry
+        );
+        assert!(
+            resolve_session_history_read_source(&missing, Some(1), true, false)
+                .expect_err("missing persisted history must remain an error")
+                .contains("could not resolve Pi session file")
+        );
+        assert!(
+            resolve_session_history_read_source(&missing, Some(0), false, false)
+                .expect_err("older paging cannot succeed without a file")
+                .contains("could not resolve Pi session file")
+        );
+        assert!(
+            resolve_session_history_read_source(&missing, Some(0), true, true)
+                .expect_err(
+                    "a stale zero message count cannot hide previously synchronized history"
+                )
+                .contains("could not resolve Pi session file")
+        );
+    }
 
     #[test]
     fn git_review_job_registry_supersedes_and_aborts_previous_run_job() {

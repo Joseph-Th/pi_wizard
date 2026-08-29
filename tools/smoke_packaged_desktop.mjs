@@ -69,19 +69,6 @@ const finalAnswer =
   fence + "js\nconst answer = 7;\n" + fence +
   "\n\n<script>window.__PI_WIZARD_SMOKE_SCRIPTED__=true</script>";
 
-if (persistedSession) {
-  fs.writeFileSync(
-    sessionFile,
-    JSON.stringify({
-      type: "session",
-      version: 3,
-      id: sessionId,
-      timestamp: "2026-08-29T00:00:00.000Z",
-      cwd: process.cwd()
-    }) + "\n"
-  );
-}
-
 let buffer = "";
 function emit(value) {
   process.stdout.write(JSON.stringify(value) + "\n");
@@ -104,7 +91,21 @@ function reject(request, error) {
     error
   });
 }
+function ensureSessionFile() {
+  if (!sessionFile || fs.existsSync(sessionFile)) return;
+  fs.writeFileSync(
+    sessionFile,
+    JSON.stringify({
+      type: "session",
+      version: 3,
+      id: sessionId,
+      timestamp: "2026-08-29T00:00:00.000Z",
+      cwd: process.cwd()
+    }) + "\n"
+  );
+}
 function appendEntry(entry) {
+  ensureSessionFile();
   entries.push(entry);
   leafId = entry.id;
   if (sessionFile) fs.appendFileSync(sessionFile, JSON.stringify(entry) + "\n");
@@ -486,11 +487,11 @@ async function smokeIsolatedTranscriptHandoff() {
           provider: null,
           model: null,
           thinking: null,
-          initialTask
+          initialTask: null
         }
       });
-      if (!started?.runId || !started.initialTaskSubmitted || started.initialTaskError) {
-        return { error: "packaged run did not accept initial task", started };
+      if (!started?.runId || started.initialTaskSubmitted || started.initialTaskError) {
+        return { error: "packaged empty run did not start cleanly", started };
       }
 
       const dashboard = [...document.querySelectorAll("button")].find(
@@ -519,6 +520,43 @@ async function smokeIsolatedTranscriptHandoff() {
       }
       if (!document.querySelector(".active-run-surface")) {
         return { error: "packaged run surface did not mount", started };
+      }
+
+      const emptyHistory = await invoke("runtime_read_session_history", {
+        request: { runId: started.runId, cursor: null }
+      });
+      const beforeHydration = await invoke("runtime_hydrate", {});
+      const beforeRun = beforeHydration?.runs?.find(
+        (candidate) => candidate.run?.id === started.runId
+      );
+      const emptySnapshot = {
+        items: emptyHistory?.items?.length ?? null,
+        sessionId: emptyHistory?.sessionId ?? null,
+        advertisedSessionFile: beforeRun?.run?.session?.sessionFile ?? null,
+        messageCount: beforeRun?.run?.session?.messageCount ?? null,
+        sessionSyncInitialized: beforeRun?.rpc?.sessionSync?.initialized ?? false,
+        sessionSyncCursor: beforeRun?.rpc?.sessionSync?.cursor ?? null,
+        visibleHistoryError: document.body.innerText.includes("Session history failed:")
+      };
+      if (
+        emptySnapshot.items !== 0 ||
+        !emptySnapshot.advertisedSessionFile ||
+        emptySnapshot.messageCount !== 0 ||
+        !emptySnapshot.sessionSyncInitialized ||
+        emptySnapshot.sessionSyncCursor !== null ||
+        emptySnapshot.visibleHistoryError
+      ) {
+        return { error: "brand-new advertised session path was not treated as empty history", started, emptySnapshot };
+      }
+
+      await invoke("runtime_edit_draft", {
+        request: { runId: started.runId, text: initialTask }
+      });
+      const submitted = await invoke("runtime_submit_draft", {
+        request: { runId: started.runId, action: "send" }
+      });
+      if (!submitted?.accepted) {
+        return { error: "packaged first prompt was not accepted", started, emptySnapshot, submitted };
       }
 
       let sawLiveAnswer = false;
@@ -684,6 +722,7 @@ async function smokeIsolatedTranscriptHandoff() {
       }
       return {
         started,
+        emptySnapshot,
         sawLiveAnswer,
         sawLiveReasoning,
         sawActiveStatus,
@@ -694,6 +733,16 @@ async function smokeIsolatedTranscriptHandoff() {
     })()`, 20_000);
 
     requireContract(!result.error, result.error ?? "packaged transcript handoff failed");
+    requireContract(
+      result.started.initialTaskSubmitted === false &&
+        result.emptySnapshot?.items === 0 &&
+        Boolean(result.emptySnapshot?.advertisedSessionFile) &&
+        result.emptySnapshot?.messageCount === 0 &&
+        result.emptySnapshot?.sessionSyncInitialized === true &&
+        result.emptySnapshot?.sessionSyncCursor === null &&
+        result.emptySnapshot?.visibleHistoryError === false,
+      `brand-new Pi session path did not remain a healthy empty conversation before first entry: ${JSON.stringify(result)}`,
+    );
     requireContract(result.sawLiveAnswer === true, `streaming answer never appeared in Live activity: ${JSON.stringify(result)}`);
     requireContract(result.sawLiveReasoning === true, `streaming reasoning never appeared in Live activity: ${JSON.stringify(result)}`);
     requireContract(result.sawActiveStatus === true, `active model status never appeared in Live activity: ${JSON.stringify(result)}`);
