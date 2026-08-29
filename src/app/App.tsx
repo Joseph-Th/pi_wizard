@@ -436,9 +436,8 @@ export function App(props: { startup: AppStartupSnapshot }) {
     setClosingRunId(run.run.id);
     setRunActionError(undefined);
     try {
-      // Close is destructive to the renderer-owned unsynced editor value, so
-      // unlike Stop it fails closed if the local draft cannot first reach the
-      // backend. The backend then independently waits for durable persistence.
+      // Close may discard renderer-only draft text. Require backend sync before
+      // the backend performs its separate durable-persistence gate.
       await composerState(run).flush();
       const result = await invokeDesktop<RuntimeCloseResult>("runtime_close", {
         request: { runId: run.run.id },

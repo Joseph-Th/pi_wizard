@@ -896,8 +896,8 @@ impl Default for RuntimeLimits {
             // budget rather than creating a false desktop-readiness failure.
             version_probe_deadline_ms: 5_000,
             startup_rpc_deadline_ms: 5_000,
-            // Advisory only. This never retries, probes, cancels, or mutates a
-            // run. The first later Pi event clears the quiet-stream marker.
+            // Advisory only: this never retries, probes, cancels, or mutates a
+            // run. Any subsequent Pi event clears the quiet-stream marker.
             stream_stall_advisory_ms: 120_000,
             draft_save_debounce_ms: 400,
             draft_flush_deadline_ms: 1_500,

@@ -52,6 +52,16 @@ export interface ModelSelection {
   id: string;
 }
 
+export interface ModelPreference {
+  provider: string;
+  model: string;
+}
+
+export interface ModelPreferencesSnapshot {
+  newRunModel: ModelPreference | null;
+  favoriteModels: ModelPreference[];
+}
+
 export function encodeModelSelection(selection: ModelSelection): string {
   return JSON.stringify([selection.provider, selection.id]);
 }

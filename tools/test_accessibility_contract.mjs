@@ -151,6 +151,9 @@ requireContract(
     models.includes('diagnostics.scope === "global"') &&
     models.includes('"runtime_probe_project_launch_options"') &&
     models.includes('"runtime_model_catalog"') &&
+    models.includes('"runtime_model_preferences"') &&
+    models.includes('"runtime_set_new_run_model_preference"') &&
+    models.includes('"runtime_set_model_favorite"') &&
     models.includes('"runtime_save_custom_model"') &&
     models.includes('"runtime_delete_custom_model"') &&
     projects.includes("<ModelPicker") &&
@@ -159,9 +162,19 @@ requireContract(
     automation.includes("provider: model()?.provider ?? null") &&
     supervision.includes("provider: model()?.provider ?? null") &&
     models.includes("for (const model of discovery()?.models ?? [])") &&
+    models.includes('optgroup label="Favorites"') &&
+    models.includes("modelSelectElement.value = key") &&
+    models.includes('class="model-picker-model-control"') &&
+    styles.includes(".model-picker-model-control") &&
+    !styles.includes(".model-select-row") &&
+    models.includes('aria-pressed={props.model ? selectedIsFavorite() : false}') &&
+    models.includes('"★ Favorited" : "☆ Favorite"') &&
+    projects.includes("rememberNewRunSelection") &&
+    projects.includes("Remembers your last model") &&
+    !projects.includes('setLaunchModelKey("");\n    setLaunchThinking("");') &&
     models.includes("models.length} model") &&
     models.includes("Pi model discovery:"),
-  "New Run, Automation, and Supervision must load Pi's model catalog globally before project selection, refresh it in project context when available, expose probe diagnostics, and never disable discovery because the separate Pi version probe is unavailable",
+  "New Run, Automation, and Supervision must load Pi's model catalog globally, share durable favorites-first ordering, and keep New Run's selected model durable without coupling discovery to the Pi version probe",
 );
 requireContract(
   ui.includes('when={view() === "run"}') && ui.includes('when={selectedRun()}'),
@@ -185,12 +198,13 @@ requireContract(
 );
 requireContract(
   ui.includes('"runtime_probe_project_launch_options"') &&
-    ui.includes("New-run model and thinking") &&
+    ui.includes("Model and thinking") &&
     ui.includes("provider: launchModel?.provider ?? null") &&
     ui.includes("thinking: launchThinking() || null") &&
     ui.includes("clearQueueSupported: boolean") &&
-    ui.includes("does not expose RPC queue clearing") &&
-    ui.includes("terminates the exact owned Pi process"),
+    ui.includes("Stop compatibility:") &&
+    ui.includes("may terminate the") &&
+    ui.includes("owned Pi process instead of reusing it"),
   "new-run model/thinking discovery must also surface the current Pi build's reusable Stop capability before the initial task is submitted",
 );
 requireContract(

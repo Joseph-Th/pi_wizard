@@ -8,15 +8,21 @@
 }
 
 .model-picker-heading {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: start;
-  justify-content: space-between;
   gap: 0.75rem;
 }
 
 .model-picker-heading > div {
   display: grid;
   gap: 0.2rem;
+}
+
+.model-picker-heading > button {
+  align-self: start;
+  padding-inline: 0.65rem;
+  white-space: nowrap;
 }
 
 .model-picker-heading span,
@@ -28,7 +34,12 @@
   line-height: 1.45;
 }
 
-.model-picker-grid,
+.model-picker-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 0.65rem;
+}
+
 .model-catalog-form {
   display: grid;
   grid-template-columns: minmax(0, 2fr) minmax(10rem, 1fr);
@@ -36,6 +47,7 @@
 }
 
 .model-picker-grid label,
+.model-picker-field,
 .model-catalog-form label {
   display: grid;
   gap: 0.3rem;
@@ -43,6 +55,7 @@
 }
 
 .model-picker-grid label > span,
+.model-picker-field > span,
 .model-catalog-form label > span {
   color: GrayText;
   font-size: 0.75rem;
@@ -52,6 +65,20 @@
 .model-catalog-form input {
   width: 100%;
   min-width: 0;
+}
+
+.model-picker-model-control {
+  display: grid;
+  gap: 0.35rem;
+  min-width: 0;
+}
+
+.model-favorite-toggle {
+  justify-self: start;
+  min-width: 0;
+  padding: 0.3rem 0.55rem;
+  font-size: 0.75rem;
+  white-space: nowrap;
 }
 
 .model-picker-note,
@@ -99,13 +126,7 @@
 }
 
 @media (max-width: 760px) {
-  .model-picker-grid,
   .model-catalog-form {
     grid-template-columns: 1fr;
-  }
-
-  .model-picker-heading {
-    align-items: stretch;
-    flex-direction: column;
   }
 }

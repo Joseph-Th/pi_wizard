@@ -1018,7 +1018,7 @@ mod tests {
             .position(|window| window == emoji)
             .expect("emoji appears in Git diff");
         let limits = RuntimeLimits {
-            // Deliberately retain only the first byte of the four-byte emoji
+            // Deliberately retain only one byte of the four-byte emoji
             // in the raw capture. The page owner must back up to the preceding
             // UTF-8 boundary and re-read the whole scalar on the next page.
             max_git_diff_page_bytes: emoji_offset + 1,

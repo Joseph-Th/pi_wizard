@@ -112,8 +112,8 @@ export function createComposerState(runId: string, initialText: string) {
           retryBlocked = false;
           setSyncError(undefined);
         } catch (error) {
-          // Keep the visible value intact and stop. A later edit or explicit
-          // submit retries the newest value rather than replaying stale text.
+          // Keep the visible value intact. The next edit or explicit submit
+          // retries the newest value instead of replaying stale text.
           retryBlocked = true;
           setSyncError(String(error));
           return;
@@ -339,7 +339,7 @@ export function ComposerCard(props: {
     const reviewedRevision = reviewChangeRevision();
     if (reviewedRevision === undefined || reviewedRevision === currentRevision) return;
 
-    // A known Pi tool/Bash completion invalidates detail derived from the old
+    // A Pi tool/Bash completion invalidates detail derived from the captured
     // working-tree observation. Keep the cheap summary visibly stale, but do
     // not launch Git until the user explicitly opens/refreshes Changes.
     reviewDiffRequestSequence += 1;
@@ -514,9 +514,9 @@ export function ComposerCard(props: {
 
   const refreshReview = async () => {
     const sequence = ++reviewRequestSequence;
-    // A summary refresh invalidates any in-flight file detail derived from the
-    // older repository observation. The backend begins the replacement as a
-    // new owned review job and aborts the superseded Git subprocess.
+    // A summary refresh invalidates in-flight detail from the captured
+    // repository observation. The backend owns replacement and cancellation of
+    // the superseded Git review job.
     reviewDiffRequestSequence += 1;
     setReviewBusy(true);
     setReviewError(undefined);

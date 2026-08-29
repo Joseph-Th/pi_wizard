@@ -1,16 +1,23 @@
 import { spawn, spawnSync } from "node:child_process";
 import { createServer } from "node:net";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 
 const root = resolve(fileURLToPath(new URL("..", import.meta.url)));
-const executable = resolve(root, "target", "release", "pi-wizard-desktop.exe");
+const configuredExecutable = process.env.PI_WIZARD_SMOKE_EXECUTABLE?.trim();
+const executable = configuredExecutable
+  ? resolve(configuredExecutable)
+  : resolve(root, "target", "release", "pi-wizard-desktop.exe");
 
 function requireContract(condition, detail) {
   if (!condition) throw new Error(`packaged desktop smoke failed: ${detail}`);
+}
+
+function removeTree(path) {
+  rmSync(path, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
 }
 
 function createFakeNpmPi() {
@@ -68,6 +75,7 @@ process.stdin.on("data", (chunk) => {
     const request = JSON.parse(line);
     if (request.type === "get_available_models") {
       respond(request, { models: [
+        { provider: "opencode-go", id: "muse-spark-1.2-contributor", name: "Muse Spark 1.2 Contributor", input: ["text", "image"] },
         { provider: "fake", id: "alpha", name: "Alpha", input: ["text"] },
         { provider: "fake", id: "vision", name: "Vision", input: ["text", "image"] },
         { provider: "other", id: "beta", name: "Beta", input: ["text"] }
@@ -99,6 +107,180 @@ process.stdin.on("data", (chunk) => {
 `,
   );
   return npmRoot;
+}
+
+async function launchDesktop(executablePath, fakeNpmPi) {
+  const port = await freeLoopbackPort();
+  const webviewData = mkdtempSync(resolve(tmpdir(), "pi-wizard-packaged-webview-"));
+  const existingBrowserArgs = process.env.WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS?.trim();
+  const browserArgs = `--remote-debugging-port=${port} --remote-allow-origins=*`;
+  const childEnvironment = { ...process.env };
+  const pathKey = Object.keys(childEnvironment).find((key) => key.toUpperCase() === "PATH") ?? "PATH";
+  childEnvironment[pathKey] = `${fakeNpmPi};${childEnvironment[pathKey] ?? ""}`;
+  childEnvironment.PATHEXT = ".COM;.EXE;.BAT;.CMD";
+  const child = spawn(executablePath, [], {
+    env: {
+      ...childEnvironment,
+      WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: existingBrowserArgs
+        ? `${existingBrowserArgs} ${browserArgs}`
+        : browserArgs,
+      WEBVIEW2_USER_DATA_FOLDER: webviewData,
+    },
+    stdio: "ignore",
+    windowsHide: true,
+  });
+  try {
+    const page = await waitForCdp(port, child);
+    const client = new CdpClient(page.webSocketDebuggerUrl);
+    await client.open();
+    await delay(1_000);
+    return { child, client, webviewData };
+  } catch (error) {
+    await stopChild(child);
+    removeTree(webviewData);
+    throw error;
+  }
+}
+
+async function smokeIsolatedModelPreferences() {
+  const appRoot = mkdtempSync(resolve(tmpdir(), "pi-wizard-packaged-preferences-"));
+  const isolatedExecutable = resolve(appRoot, "pi-wizard-desktop.exe");
+  const fakeNpmPi = createFakeNpmPi();
+  copyFileSync(executable, isolatedExecutable);
+  // An existing empty portable root prevents legacy-state migration from
+  // contaminating this disposable fresh-preference fixture.
+  mkdirSync(resolve(appRoot, "pi-wizard-data"), { recursive: true });
+
+  const runOnce = async (expectedSelection, mutate) => {
+    const { child, client, webviewData } = await launchDesktop(isolatedExecutable, fakeNpmPi);
+    try {
+      const result = await client.evaluate(String.raw`(async () => {
+        const invoke = window.__TAURI_INTERNALS__.invoke;
+        const newRun = [...document.querySelectorAll("button")].find(
+          (candidate) => candidate.textContent.trim() === "New run"
+        );
+        if (!newRun) return { error: "New run navigation missing" };
+        newRun.click();
+        const deadline = Date.now() + 8_000;
+        let modelSelect;
+        while (Date.now() < deadline) {
+          modelSelect = [...document.querySelectorAll("select")].find((candidate) =>
+            [...candidate.options].some((option) => option.textContent.includes("Muse Spark 1.2 Contributor"))
+          );
+          if (modelSelect && document.body.innerText.includes("4 models available from Pi without project context")) break;
+          await new Promise((resolveDelay) => window.setTimeout(resolveDelay, 100));
+        }
+        if (!modelSelect) return { error: "model select did not load" };
+        const picker = modelSelect.closest(".model-picker");
+        const modelField = modelSelect.closest(".model-picker-field");
+        const favorite = picker?.querySelector(".model-favorite-toggle");
+        const selectRect = modelSelect.getBoundingClientRect();
+        const fieldRect = modelField?.getBoundingClientRect();
+        const favoriteRect = favorite?.getBoundingClientRect();
+        const favoriteOverlapsSelect = Boolean(
+          favoriteRect &&
+          selectRect.left < favoriteRect.right &&
+          selectRect.right > favoriteRect.left &&
+          selectRect.top < favoriteRect.bottom &&
+          selectRect.bottom > favoriteRect.top
+        );
+        const modelControlUsable = Boolean(
+          fieldRect &&
+          selectRect.width >= 160 &&
+          selectRect.width >= fieldRect.width * 0.9 &&
+          !favoriteOverlapsSelect
+        );
+        const initialSelection = modelSelect.value;
+        if (${JSON.stringify(mutate)}) {
+          const next = JSON.stringify(["fake", "vision"]);
+          modelSelect.value = next;
+          modelSelect.dispatchEvent(new Event("change", { bubbles: true }));
+          if (!favorite) return { error: "favorite control missing", initialSelection };
+          const favoriteDeadline = Date.now() + 5_000;
+          while (favorite.disabled && Date.now() < favoriteDeadline) {
+            await new Promise((resolveDelay) => window.setTimeout(resolveDelay, 50));
+          }
+          favorite.click();
+          const persistDeadline = Date.now() + 5_000;
+          let persisted;
+          while (Date.now() < persistDeadline) {
+            persisted = await invoke("runtime_model_preferences", {});
+            const remembered =
+              persisted?.newRunModel?.provider === "fake" &&
+              persisted?.newRunModel?.model === "vision";
+            const favorited = persisted?.favoriteModels?.some(
+              (model) => model.provider === "fake" && model.model === "vision"
+            );
+            if (remembered && favorited) break;
+            await new Promise((resolveDelay) => window.setTimeout(resolveDelay, 50));
+          }
+          const favoriteGroup = modelSelect.querySelector('optgroup[label="Favorites"]');
+          const favoriteFirst = favoriteGroup?.querySelector("option")?.value ?? null;
+          return {
+            initialSelection,
+            modelControlUsable,
+            selectWidth: selectRect.width,
+            fieldWidth: fieldRect?.width ?? null,
+            favoriteOverlapsSelect,
+            selectedAfterChange: modelSelect.value,
+            favoritePressed: favorite.getAttribute("aria-pressed"),
+            favoriteFirst,
+            firstGroupLabel: modelSelect.querySelector("optgroup")?.label ?? null,
+            persisted
+          };
+        }
+        const favoriteGroup = modelSelect.querySelector('optgroup[label="Favorites"]');
+        return {
+          initialSelection,
+          modelControlUsable,
+          selectWidth: selectRect.width,
+          fieldWidth: fieldRect?.width ?? null,
+          favoriteOverlapsSelect,
+          favoriteFirst: favoriteGroup?.querySelector("option")?.value ?? null,
+          firstGroupLabel: modelSelect.querySelector("optgroup")?.label ?? null,
+          preferences: await invoke("runtime_model_preferences", {})
+        };
+      })()`);
+      requireContract(!result.error, result.error ?? "isolated model preference smoke failed");
+      requireContract(
+        result.initialSelection === expectedSelection,
+        `unexpected New Run model selection: ${JSON.stringify(result)}`,
+      );
+    requireContract(
+      result.modelControlUsable === true,
+      `New Run model selector is squeezed or overlapped: ${JSON.stringify(result)}`,
+    );
+      return result;
+    } finally {
+      client.close();
+      await stopChild(child);
+      removeTree(webviewData);
+    }
+  };
+
+  try {
+    const museKey = JSON.stringify(["opencode-go", "muse-spark-1.2-contributor"]);
+    const visionKey = JSON.stringify(["fake", "vision"]);
+    const first = await runOnce(museKey, true);
+    requireContract(
+      first.selectedAfterChange === visionKey,
+      `New Run model did not change to the selected model: ${JSON.stringify(first)}`,
+    );
+    requireContract(first.favoritePressed === "true", "favorite control did not become pressed");
+    requireContract(first.firstGroupLabel === "Favorites", "Favorites group is not first in the selector");
+    requireContract(first.favoriteFirst === visionKey, "favorited model was not grouped first");
+    const second = await runOnce(visionKey, false);
+    requireContract(second.firstGroupLabel === "Favorites", "Favorites group order did not survive desktop restart");
+    requireContract(second.favoriteFirst === visionKey, "favorite ordering did not survive desktop restart");
+    requireContract(
+      second.preferences?.newRunModel?.provider === "fake" &&
+        second.preferences?.newRunModel?.model === "vision",
+      "last New Run model did not survive desktop restart",
+    );
+  } finally {
+    removeTree(fakeNpmPi);
+    removeTree(appRoot);
+  }
 }
 
 async function freeLoopbackPort() {
@@ -214,31 +396,14 @@ async function main() {
   requireContract(existsSync(executable), `release executable is missing: ${executable}`);
 
   const fakeNpmPi = createFakeNpmPi();
-  const port = await freeLoopbackPort();
-  const existingBrowserArgs = process.env.WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS?.trim();
-  const browserArgs = `--remote-debugging-port=${port} --remote-allow-origins=*`;
-  const childEnvironment = { ...process.env };
-  const pathKey = Object.keys(childEnvironment).find((key) => key.toUpperCase() === "PATH") ?? "PATH";
-  childEnvironment[pathKey] = `${fakeNpmPi};${childEnvironment[pathKey] ?? ""}`;
-  childEnvironment.PATHEXT = ".COM;.EXE;.BAT;.CMD";
-  const child = spawn(executable, [], {
-    env: {
-      ...childEnvironment,
-      WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: existingBrowserArgs
-        ? `${existingBrowserArgs} ${browserArgs}`
-        : browserArgs,
-    },
-    stdio: "ignore",
-    windowsHide: true,
-  });
+  const {
+    child,
+    client: launchedClient,
+    webviewData,
+  } = await launchDesktop(executable, fakeNpmPi);
 
-  let client;
+  let client = launchedClient;
   try {
-    const page = await waitForCdp(port, child);
-    client = new CdpClient(page.webSocketDebuggerUrl);
-    await client.open();
-    await delay(1_000);
-
     const ipc = await client.evaluate(String.raw`(async () => {
       const invoke = window.__TAURI_INTERNALS__.invoke;
       const results = {};
@@ -268,7 +433,7 @@ async function main() {
           }
         });
         results["runtime_probe_project_models"] =
-          catalog?.models?.length === 3 &&
+          catalog?.models?.length === 4 &&
           catalog?.diagnostics?.scope === "global" &&
           catalog?.diagnostics?.directNpmNode === true &&
           String(catalog?.diagnostics?.invocationExecutable ?? "").toLowerCase().endsWith("node.exe")
@@ -320,11 +485,11 @@ async function main() {
       let refresh;
       while (Date.now() < deadline) {
         refresh = [...document.querySelectorAll("button")].find((candidate) =>
-          candidate.textContent.includes("Refresh models") ||
-          candidate.textContent.includes("Reading Pi models")
+          candidate.closest(".model-picker-heading") &&
+          ["Refresh", "Loading…", "Checking…"].includes(candidate.textContent.trim())
         );
         const text = document.body.innerText;
-        if (refresh && text.includes("3 models available from Pi without project context")) break;
+        if (refresh && text.includes("4 models available from Pi without project context")) break;
         await new Promise((resolveDelay) => window.setTimeout(resolveDelay, 100));
       }
       const text = document.body.innerText;
@@ -333,6 +498,26 @@ async function main() {
       );
       const refreshDisabledBeforeProjectSelection = refresh?.disabled ?? null;
       const selectableModelsBeforeProjectSelection = modelSelect?.options.length ?? 0;
+      const modelField = modelSelect?.closest(".model-picker-field");
+      const favorite = modelSelect?.closest(".model-picker")?.querySelector(".model-favorite-toggle");
+      const selectRect = modelSelect?.getBoundingClientRect();
+      const fieldRect = modelField?.getBoundingClientRect();
+      const favoriteRect = favorite?.getBoundingClientRect();
+      const favoriteOverlapsSelect = Boolean(
+        selectRect &&
+        favoriteRect &&
+        selectRect.left < favoriteRect.right &&
+        selectRect.right > favoriteRect.left &&
+        selectRect.top < favoriteRect.bottom &&
+        selectRect.bottom > favoriteRect.top
+      );
+      const modelControlUsable = Boolean(
+        selectRect &&
+        fieldRect &&
+        selectRect.width >= 160 &&
+        selectRect.width >= fieldRect.width * 0.9 &&
+        !favoriteOverlapsSelect
+      );
       const projectSelect = document.querySelector(".project-preset-row select");
       const presentProjects = projects.filter((project) => project.status === "present");
       const projectOptionValues = projectSelect
@@ -348,9 +533,13 @@ async function main() {
       return {
         refreshFound: Boolean(refresh),
         refreshDisabled: refreshDisabledBeforeProjectSelection,
-        globalModelsVisible: text.includes("3 models available from Pi without project context"),
+        globalModelsVisible: text.includes("4 models available from Pi without project context"),
         diagnosticsVisible: text.includes("Model diagnostics"),
         selectableModels: selectableModelsBeforeProjectSelection,
+        modelControlUsable,
+        selectWidth: selectRect?.width ?? null,
+        fieldWidth: fieldRect?.width ?? null,
+        favoriteOverlapsSelect,
         oldProjectManager: Boolean(oldProjectManager),
         projectsNavButton,
         projectPresetSelect: Boolean(projectSelect),
@@ -372,7 +561,11 @@ async function main() {
     requireContract(modelPicker.refreshDisabled === false, "Refresh models button is disabled without a project");
     requireContract(modelPicker.globalModelsVisible === true, "global Pi models did not load before project selection");
     requireContract(modelPicker.diagnosticsVisible === true, "model probe diagnostics are missing");
-    requireContract(modelPicker.selectableModels >= 4, "Pi model choices are not selectable in the packaged renderer");
+    requireContract(modelPicker.selectableModels >= 5, "Pi model choices are not selectable in the packaged renderer");
+    requireContract(
+      modelPicker.modelControlUsable === true,
+      `model selector is squeezed or overlapped in packaged New Run: ${JSON.stringify(modelPicker)}`,
+    );
     requireContract(modelPicker.oldProjectManager === false, "obsolete Projects sidebar manager is still mounted");
     requireContract(modelPicker.projectsNavButton === false, "obsolete Projects sidebar navigation is still visible");
     requireContract(modelPicker.projectPresetSelect === true, "New Run project preset dropdown is missing");
@@ -427,13 +620,16 @@ async function main() {
       `packaged navigation failed: ${JSON.stringify(Object.fromEntries(failedNavigation))}`,
     );
 
-    console.log("packaged desktop WebView smoke passed");
-    console.log("verified: custom IPC, event listen/unlisten ACL, global model discovery, project preset routing without sidebar manager, main navigation, no visible ACL/CSP/runtime-update failure");
   } finally {
     client?.close();
     await stopChild(child);
-    rmSync(fakeNpmPi, { recursive: true, force: true });
+    removeTree(webviewData);
+    removeTree(fakeNpmPi);
   }
+
+  await smokeIsolatedModelPreferences();
+  console.log("packaged desktop WebView smoke passed");
+  console.log("verified: custom IPC, event listen/unlisten ACL, global model discovery, first-run Muse default, remembered New Run model, favorites-first persistence, project preset routing without sidebar manager, main navigation, no visible ACL/CSP/runtime-update failure");
 }
 
 await main();

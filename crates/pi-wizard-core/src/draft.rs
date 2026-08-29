@@ -674,8 +674,8 @@ impl SessionDraftStore {
     ) -> Result<DraftRestoreOutcome, DraftStoreError> {
         let owner = DraftOwner::Session(session_id.to_owned());
         let Some(record) = self.records.get_mut(&owner) else {
-            // A bounded cache may evict an unowned saved record while an older
-            // load completion is still queued. Never let stale I/O recreate an
+            // A bounded cache may evict an unowned saved record while its load
+            // completion is still queued. Never let stale I/O recreate an
             // unowned record outside the cache ceiling.
             return Ok(DraftRestoreOutcome::LocalStateWins);
         };

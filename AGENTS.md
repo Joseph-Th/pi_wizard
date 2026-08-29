@@ -2,82 +2,119 @@
 
 **BCA policy:** advisory
 
-Follow the workspace `../AGENTS.md` and portfolio `../STANDARDS.md` first. Pi Wizard currently applies the Universal and Stateful Application profiles. If the application later exposes an agent-facing control API, explicitly add the Agent Tool profile rather than assuming it now.
+Follow workspace `../AGENTS.md` and portfolio `../STANDARDS.md` first. Pi Wizard applies the Universal and Stateful Application profiles.
 
-## Project scope
+## Scope
 
-Pi Wizard is a **personal Windows desktop application**. The goal is simple: make the app itself reliable and useful for its owner.
+Pi Wizard is a personal **Windows desktop** control surface for the Pi coding harness.
 
-- Do not propose, implement, track, or report macOS, Linux, web deployment, browser delivery, app-store distribution, signing/notarization, public-release certification, multi-platform packaging, or similar work as a project gap.
-- Do not spend engineering time on hypothetical portability or distribution concerns unless the user explicitly reopens that scope.
-- Prefer fixing concrete Windows desktop behavior, Pi integration, Git/worktree behavior, persistence, recovery, performance, and daily-use UX over adding abstractions for imagined future platforms.
-- Deferred/optional ideas are not unfinished work. Do not surface them as blockers or next steps unless the user asks for them.
+Optimize for Windows desktop reliability, Pi integration, Git/worktree correctness, durable state, recovery, performance, and daily-use UX. Do not treat macOS/Linux delivery, browser/web deployment, app-store distribution, signing, public release certification, remote clients, or general IDE features as project gaps unless the user explicitly expands scope.
 
-## Read order
+## Cold-start route
 
-For a cold start, read:
+1. Inspect Git state and preserve unrelated work.
+2. Read `README.md` for the product and repository map.
+3. Read `STATUS.md` for current implemented capability and known limitations.
+4. Read only the authority needed for the task:
+   - product/UI behavior: `DESIGN.md`
+   - runtime, persistence, process, Git, and performance contracts: `ARCHITECTURE.md`
+   - verification obligations: `TESTING.md`
+   - future scope: `ROADMAP.md`
+   - external evidence for a design decision: `RESEARCH.md`
+5. Identify the owning source subsystem and the narrowest existing test before editing.
 
-1. `README.md`
-2. `STATUS.md`
-3. `DESIGN.md` for product or UI work
-4. `ARCHITECTURE.md` for runtime, persistence, Git, process, or performance work
-5. `TESTING.md` before implementation changes
-6. `ROADMAP.md` only for sequencing or future-scope questions
+`RESEARCH.md` is evidence, not current product authority. Version control owns implementation history.
 
-Use `RESEARCH.md` when a decision needs its external evidence or competitor context.
+## Repository map
+
+| Area | Owns |
+| --- | --- |
+| `crates/pi-wizard-core/` | Pi protocol, runtime state, process-independent orchestration rules, persistence primitives, session/history/catalog logic, worktree and Git-review contracts |
+| `src-tauri/src/app/` | desktop composition, startup, portable-state wiring, environment/profile ownership |
+| `src-tauri/src/commands/` | typed Tauri command adapters |
+| `src-tauri/src/services/` | desktop orchestration services such as Automation and Supervision |
+| `src-tauri/src/platform/` | Windows-specific process/lifecycle integration |
+| `src/app/` | application shell and top-level renderer state composition |
+| `src/features/` | user-facing workflow surfaces and bounded projections |
+| `src/lib/`, `src/types/`, `src/styles/` | shared renderer utilities, wire types, and styling |
+| `tools/` | repository verification, release checks, and deterministic smoke fixtures |
 
 ## Non-negotiable invariants
 
-- Do not fork or reimplement Pi's agent loop when an upstream RPC operation/event owns the behavior.
-- Do not make the renderer authoritative for process state, request ownership, trust decisions, worktree identity, or pending interactions.
-- Keep `crates/pi-wizard-core` free of Tauri and renderer-framework types; desktop/framework code adapts the core rather than owning its semantics.
-- Treat process lifecycle and agent activity as separate state axes. In particular, Pi `agent_settled` is not process termination.
-- Treat Pi `message_update`/stream updates as transient hot state. Never trigger durable app-owned writes or fsyncs directly from token/tool progress events.
-- Use Pi `get_entries(since)` as the preferred live-session append cursor; do not routinely hydrate full messages when a stable incremental entry cursor answers the question.
-- User-facing Stop clears/preserves queued messages before aborting. A process whose termination cannot be confirmed becomes quarantined; it must never be reported as idle/stopped or accept further RPC writes.
-- Composer drafts are session-scoped backend-owned user data with generation-safe persistence. Renderer/component lifetime is not draft lifetime.
-- Registered projects have stable app IDs bound to canonical paths. A missing/moved path becomes detached and requires explicit relocation; never silently fall back to another project, a global project, a matching display name, or a matching Git remote.
-- App-owned registries/indexes/preferences are recoverable derived state. Corruption in one derived-state domain must be quarantined or rebuilt without hiding/deleting Pi session JSONL or blocking safe startup.
-- Desktop environment discovery is a backend responsibility. Resolve a usable Pi/Git/toolchain environment explicitly and boundedly; do not assume a GUI-launched process has the same PATH as the user's terminal, and never persist/log secret environment values merely to debug discovery.
-- Validate image attachments again at the backend RPC boundary regardless of picker/drag/drop checks.
-- Do not write a second authoritative transcript store. Pi session JSONL remains authoritative.
-- Do not eagerly load or mount complete large transcripts, full tool logs, or large diffs.
-- Do not compute large diffs synchronously in the renderer.
-- Do not add periodic Git/session/filesystem polling merely to keep passive UI fresh. Prefer event-driven invalidation and explicit refresh.
-- A live session's canonical working directory is immutable for that process. UI navigation cannot silently retarget it.
-- Worktree creation binds an explicit base commit and branch/path as a recoverable transaction. Never infer a default branch, pool/reassign live worktrees, or run Git mutations from UI navigation state instead of the run's canonical root.
-- Never call a worktree a sandbox. Never call Pi project trust a permission sandbox.
-- Pi project-resource trust and context-file loading are separate. `--no-approve` does not disable `AGENTS.md`/`CLAUDE.md`; only an explicit context-files policy may do that.
-- Long-running or unattended work must show the actual execution boundary: host, Git-isolated worktree, or a future real container/VM sandbox.
-- Do not kill processes by executable name or wildcard. Lifecycle actions target a process identity owned by the runtime manager.
-- Keep production desktop architecture serverless from the user's perspective: no bundled Next.js/local HTTP application server for the core UI.
-- Keep optional IDE-like surfaces out of the initial product unless evidence shows they are necessary for the core orchestration job.
-- GitHub Actions are prohibited by workspace policy. Verification is repository-local.
+### Authority
 
-## Change routing
+- Pi owns agent execution semantics, model/provider capability, commands, extensions, and authoritative session JSONL.
+- Pi Wizard owns subprocess orchestration, bounded projections, app-owned preferences/registries/drafts, Git worktrees, and review UX.
+- The renderer is never authoritative for process lifecycle, request identity, project/worktree identity, trust decisions, durable drafts, or pending extension interactions.
+- `crates/pi-wizard-core` remains independent of Tauri and renderer-framework types.
 
-| Change | Primary owner |
-| --- | --- |
-| Pi command/event interpretation | Pi RPC adapter in backend |
-| Child lifecycle and backpressure | Runtime/process manager |
-| Session catalog/read model | Session catalog/index owner |
-| Worktree creation/removal | Worktree service |
-| Diff generation/chunking | Git review service |
-| GUI state projection | Backend runtime store + typed IPC contract |
-| Timeline rendering | Virtualized frontend timeline |
-| Commands/models/thinking choices | Runtime-derived Pi capabilities |
-| Product interaction policy | `DESIGN.md` |
-| Performance budgets | `ARCHITECTURE.md` plus repository `full` scale/startup fixtures on Windows |
+### Runtime and process lifecycle
 
-## Design-before-code gate
+- Process lifecycle and agent activity are separate state axes; Pi `agent_settled` does not mean the process exited.
+- A live run has one immutable canonical execution root. Navigation cannot retarget it.
+- Stop preserves recoverable queued user text before aborting. Unconfirmed termination becomes `Quarantined`; such a run cannot accept further RPC writes or be shown as safely stopped.
+- Process termination targets the exact owned process identity/tree. Never kill by executable name or wildcard.
+- Windows production runs must not retain unresolved command-shell wrappers or open console windows.
 
-Application code should not be introduced until a proposed implementation is consistent with these locked baseline decisions:
+### Sessions and user data
 
-1. Tauri/Rust host and static frontend.
-2. Pi RPC subprocess integration as the default runtime boundary.
-3. Pi JSONL remains authoritative persistence.
-4. Bounded/virtualized history and diff rendering is part of the first implementation, not later optimization.
-5. Active sessions are independent from navigation state.
-6. Git isolation and security isolation are represented separately.
+- Pi JSONL is the only authoritative transcript store.
+- Live synchronization prefers stable incremental Pi entry cursors; cold history remains bounded and file-backed.
+- Drafts are session-scoped backend-owned user data with generation-safe persistence. Renderer lifetime is not draft lifetime.
+- App-owned registries, preferences, catalogs, and recovery journals are bounded, schema-versioned, and recoverable. Corruption in one app-owned domain must not hide or modify Pi JSONL or unrelated state.
+- Durable app state lives under the portable `pi-wizard-data` root. Generated build output is disposable; user state is not.
 
-If implementation evidence invalidates one of these decisions, update `RESEARCH.md`, then the owning design/architecture authority before changing the implementation direction.
+### Projects, Git, and trust
+
+- A registered project is a stable app ID bound to one canonical directory. Missing/moved paths become detached and require explicit relocation.
+- Worktree creation binds an explicit base commit, branch, and path as a recoverable transaction. Do not infer a default branch or reuse/pool live worktrees.
+- Git worktrees provide checkout isolation, not security isolation.
+- Pi project-resource trust and context-file loading are independent policies. `--no-approve` does not disable `AGENTS.md`/`CLAUDE.md`.
+
+### Bounds and passive work
+
+- Streaming token/tool updates are transient hot state and must not trigger durable writes.
+- Do not eagerly load complete large transcripts, tool logs, or diffs.
+- Large Git review work stays outside the renderer and is loaded on demand.
+- Passive UI must not introduce periodic Git/session/filesystem polling. Prefer semantic invalidation and explicit refresh.
+- Image and other bounded payloads are revalidated at the backend boundary even when the renderer already validated them.
+
+## Change routing and companion work
+
+| Change | Primary owner | Required companion checks |
+| --- | --- | --- |
+| Pi RPC command/event semantics | core RPC/controller | protocol fixtures, wire tests, compatibility behavior |
+| Runtime lifecycle/backpressure | core runtime manager/process owner | lifecycle tests, Stop/shutdown tests, hydration projection |
+| Durable app-owned schema | owning persistence module | schema bump/migration, bounds, corruption fixture, docs |
+| Project identity | project registry | canonical-path tests, relocation/detached behavior |
+| Worktree lifecycle | worktree service/registry | real Git fixture, recovery/cleanup invariants |
+| Session catalog/history | session read-model owners | large-history bounds, cursor/stale behavior |
+| Git review | Git review service | binary/large diff/cursor/cancellation fixtures |
+| Desktop IPC surface | Tauri command adapter + renderer caller | command registration/surface contract, typed wire shape |
+| Model/thinking behavior | Pi capability discovery + model preference owner | fake-Pi catalog, preference persistence, packaged selector smoke |
+| Product interaction policy | `DESIGN.md` + feature surface | accessibility contract and relevant renderer behavior |
+| Packaging/process behavior | Tauri/platform owners | `full` verification and packaged WebView/PE checks |
+
+## Documentation and comments
+
+Current documentation and production comments follow portfolio standards Sections 3.4, 3.8, and 29:
+
+- describe current behavior in present tense;
+- put the contract before rationale or evidence;
+- keep one documentary owner for mutable facts and link to it elsewhere;
+- remove implementation diaries, incident narratives, superseded designs, and milestone history from current docs;
+- comments explain non-obvious ownership, ordering, invariants, external constraints, or why a simpler-looking approach is invalid;
+- comments do not restate syntax, narrate bug history, preserve obsolete approaches, or embed one-off measurements/debugging stories;
+- compatibility comments state the current external constraint and the condition under which the special handling applies.
+
+When implementation evidence changes a current contract, update the owning document in the same change. Use version control for history.
+
+## Verification
+
+Repository-local verification is authoritative; GitHub Actions are prohibited by workspace policy.
+
+- `python tools/verify.py quick` — ordinary core/renderer changes.
+- `python tools/verify.py standard` — routine cross-surface or desktop-host changes.
+- `python tools/verify.py full` — persistence/schema, packaging, process, large-history/diff, startup, or release-boundary changes.
+
+See `TESTING.md` for exact lane contents and focused fixtures.

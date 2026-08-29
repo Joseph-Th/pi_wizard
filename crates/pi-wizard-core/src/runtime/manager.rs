@@ -1245,8 +1245,8 @@ impl RuntimeManagerTask {
         match command {
             RuntimeManagerCommand::Hydrate { reply } => {
                 let snapshot = self.hydration_snapshot();
-                // A renderer can subscribe after a previous dirty wake-up was
-                // emitted. Hydration therefore re-announces pending delivery,
+                // A renderer can subscribe after a dirty wake-up was emitted.
+                // Hydration therefore re-announces pending delivery,
                 // but never consumes it. This also keeps transient events that
                 // are intentionally absent from the hydration snapshot.
                 let resignal: Vec<_> = self
@@ -2649,8 +2649,8 @@ impl RuntimeManagerTask {
                 .map_err(|error| error.to_string())?;
         }
         if completed.outcome == RpcResponseOutcome::Accepted && response.command == "get_state" {
-            // `get_state` can be the first authoritative observation after a
-            // missed event interval. If it discovers Working, arm the same
+            // `get_state` can supply authoritative Working state after a missed
+            // event interval. Arm the same
             // one-shot quiet-stream advisory used by live events. If it
             // discovers a non-working state, clear any stale local advisory.
             self.refresh_stream_stall_watch(run_id, Instant::now());
@@ -5799,8 +5799,8 @@ mod tests {
         assert_eq!(replacement.response.outcome(), RpcResponseOutcome::Accepted);
 
         // The manager queues its internal get_state before completing the
-        // replacement waiter. A later writer command therefore completes only
-        // after the fake Pi has emitted the reconciled state response.
+        // replacement waiter. A following writer command completes only
+        // after the fake Pi emits the reconciled state response.
         manager
             .request(
                 run_id,

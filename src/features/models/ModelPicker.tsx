@@ -7,6 +7,8 @@ import {
   type ContextFilesPolicy,
   type CustomModelProfile,
   type ModelCatalogSnapshot,
+  type ModelPreference,
+  type ModelPreferencesSnapshot,
   type ModelSelection,
   type ModelSummary,
   type ProjectLaunchOptions,
@@ -24,12 +26,14 @@ interface ModelPickerProps {
   thinking: ThinkingLevel | "";
   onModelChange: (selection: ModelSelection | undefined) => void;
   onThinkingChange: (level: ThinkingLevel | "") => void;
+  rememberNewRunSelection?: boolean;
   label?: string;
   description?: string;
 }
 
 interface PickerModel extends ModelSummary {
   custom: boolean;
+  favorite: boolean;
 }
 
 function identity(provider: string, model: string): string {
@@ -40,18 +44,28 @@ export function ModelPicker(props: ModelPickerProps) {
   const [discovery, setDiscovery] = createSignal<ProjectModelCatalog>();
   const [options, setOptions] = createSignal<ProjectLaunchOptions>();
   const [catalog, setCatalog] = createSignal<ModelCatalogSnapshot>();
+  const [preferences, setPreferences] = createSignal<ModelPreferencesSnapshot>();
   const [modelsLoading, setModelsLoading] = createSignal(false);
+  const [modelsLoaded, setModelsLoaded] = createSignal(false);
+  const [catalogLoaded, setCatalogLoaded] = createSignal(false);
   const [selectionLoading, setSelectionLoading] = createSignal(false);
   const [catalogBusy, setCatalogBusy] = createSignal(false);
+  const [favoriteBusy, setFavoriteBusy] = createSignal(false);
   const [error, setError] = createSignal<string>();
   const [modelError, setModelError] = createSignal<string>();
   const [selectionError, setSelectionError] = createSignal<string>();
+  const [preferenceError, setPreferenceError] = createSignal<string>();
   const [providerDraft, setProviderDraft] = createSignal("");
   const [modelDraft, setModelDraft] = createSignal("");
   const [nameDraft, setNameDraft] = createSignal("");
   let modelSequence = 0;
   let probeSequence = 0;
   let autoLoadKey = "";
+  let preferencesLoadStarted = false;
+  let preferredSelectionApplied = false;
+  let userSelectedModel = false;
+  let preferenceWrite: Promise<void> = Promise.resolve();
+  let modelSelectElement: HTMLSelectElement | undefined;
 
   const loadCatalog = async () => {
     try {
@@ -61,6 +75,37 @@ export function ModelPicker(props: ModelPickerProps) {
     } catch (caught) {
       setError(String(caught));
       return undefined;
+    } finally {
+      setCatalogLoaded(true);
+    }
+  };
+
+  // Native select state can reset when a selected option moves between
+  // optgroups. Reassert the controlled value after regrouping so presentation
+  // matches the durable selection.
+  createEffect(() => {
+    const key = selectedKey();
+    const groupRevision = [
+      ...favoriteModels().map((model) => identity(model.provider, model.id)),
+      "|",
+      ...otherModels().map((model) => identity(model.provider, model.id)),
+    ].join("\u0001");
+    void groupRevision;
+    queueMicrotask(() => {
+      if (modelSelectElement && modelSelectElement.value !== key) {
+        modelSelectElement.value = key;
+      }
+    });
+  });
+
+  const loadPreferences = async () => {
+    try {
+      const snapshot = await invokeDesktop<ModelPreferencesSnapshot>("runtime_model_preferences");
+      setPreferences(snapshot);
+      return snapshot;
+    } catch (caught) {
+      setPreferenceError(String(caught));
+      return undefined;
     }
   };
 
@@ -68,6 +113,7 @@ export function ModelPicker(props: ModelPickerProps) {
     const path = props.projectPath.trim();
     const sequence = ++modelSequence;
     setModelsLoading(true);
+    setModelsLoaded(false);
     setModelError(undefined);
     try {
       const snapshot = await invokeDesktop<ProjectModelCatalog>("runtime_probe_project_models", {
@@ -87,7 +133,10 @@ export function ModelPicker(props: ModelPickerProps) {
       }
       return undefined;
     } finally {
-      if (sequence === modelSequence) setModelsLoading(false);
+      if (sequence === modelSequence) {
+        setModelsLoading(false);
+        setModelsLoaded(true);
+      }
     }
   };
 
@@ -141,6 +190,12 @@ export function ModelPicker(props: ModelPickerProps) {
     setError(undefined);
     setModelError(undefined);
     setSelectionError(undefined);
+    setPreferenceError(undefined);
+    if (!preferencesLoadStarted) {
+      preferencesLoadStarted = true;
+      void loadPreferences();
+    }
+    setCatalogLoaded(false);
     void loadCatalog();
     void loadModels();
     if (path) {
@@ -150,8 +205,12 @@ export function ModelPicker(props: ModelPickerProps) {
 
   const models = (): PickerModel[] => {
     const merged = new Map<string, PickerModel>();
+    const favorites = new Set(
+      (preferences()?.favoriteModels ?? []).map((model) => identity(model.provider, model.model)),
+    );
     for (const model of discovery()?.models ?? []) {
-      merged.set(identity(model.provider, model.id), { ...model, custom: false });
+      const key = identity(model.provider, model.id);
+      merged.set(key, { ...model, custom: false, favorite: favorites.has(key) });
     }
     for (const profile of catalog()?.models ?? []) {
       const key = identity(profile.provider, profile.model);
@@ -169,16 +228,107 @@ export function ModelPicker(props: ModelPickerProps) {
           name: profile.name,
           supportsImages: null,
           custom: true,
+          favorite: favorites.has(key),
         });
       }
     }
     return [...merged.values()].sort((left, right) => {
+      const label = (left.name ?? left.id).localeCompare(right.name ?? right.id);
       const provider = left.provider.localeCompare(right.provider);
-      return provider || left.id.localeCompare(right.id);
+      return label || provider || left.id.localeCompare(right.id);
     });
   };
 
+  const favoriteModels = () => models().filter((model) => model.favorite);
+  const otherModels = () => models().filter((model) => !model.favorite);
+
   const selectedKey = () => (props.model ? encodeModelSelection(props.model) : "");
+  const selectedIsFavorite = () => {
+    const selected = props.model;
+    if (!selected) return false;
+    return (preferences()?.favoriteModels ?? []).some(
+      (model) => model.provider === selected.provider && model.model === selected.id,
+    );
+  };
+
+  const persistNewRunSelection = (selection: ModelSelection | undefined) => {
+    if (!props.rememberNewRunSelection) return;
+    const model: ModelPreference | null = selection
+      ? { provider: selection.provider, model: selection.id }
+      : null;
+    preferenceWrite = preferenceWrite.then(async () => {
+      try {
+        const snapshot = await invokeDesktop<ModelPreferencesSnapshot>(
+          "runtime_set_new_run_model_preference",
+          { request: { model } },
+        );
+        setPreferences(snapshot);
+        setPreferenceError(undefined);
+      } catch (caught) {
+        setPreferenceError(`Could not remember New Run model: ${String(caught)}`);
+      }
+    });
+  };
+
+  const applySelection = (
+    selection: ModelSelection | undefined,
+    options: { remember: boolean; user: boolean } = { remember: true, user: true },
+  ) => {
+    if (options.user) userSelectedModel = true;
+    props.onModelChange(selection);
+    props.onThinkingChange("");
+    if (options.remember) persistNewRunSelection(selection);
+    void probeSelection(selection);
+  };
+
+  createEffect(() => {
+    if (
+      !props.rememberNewRunSelection ||
+      preferredSelectionApplied ||
+      userSelectedModel ||
+      !preferences() ||
+      !modelsLoaded() ||
+      !catalogLoaded()
+    )
+      return;
+    preferredSelectionApplied = true;
+    const preferred = preferences()!.newRunModel;
+    if (!preferred) return;
+    const available = models().some(
+      (model) => model.provider === preferred.provider && model.id === preferred.model,
+    );
+    if (!available) {
+      setPreferenceError(
+        `Saved New Run model ${preferred.provider}/${preferred.model} is not currently available; using Pi default.`,
+      );
+      return;
+    }
+    const selection = { provider: preferred.provider, id: preferred.model };
+    props.onModelChange(selection);
+    props.onThinkingChange("");
+    void probeSelection(selection);
+  });
+
+  const toggleFavorite = async () => {
+    const selected = props.model;
+    if (!selected || favoriteBusy()) return;
+    setFavoriteBusy(true);
+    setPreferenceError(undefined);
+    try {
+      const snapshot = await invokeDesktop<ModelPreferencesSnapshot>("runtime_set_model_favorite", {
+        request: {
+          provider: selected.provider,
+          model: selected.id,
+          favorite: !selectedIsFavorite(),
+        },
+      });
+      setPreferences(snapshot);
+    } catch (caught) {
+      setPreferenceError(`Could not update model favorite: ${String(caught)}`);
+    } finally {
+      setFavoriteBusy(false);
+    }
+  };
 
   const saveCustomModel = async () => {
     if (catalogBusy()) return;
@@ -200,12 +350,10 @@ export function ModelPicker(props: ModelPickerProps) {
       });
       await loadCatalog();
       const next = { provider: saved.provider, id: saved.model };
-      props.onModelChange(next);
-      props.onThinkingChange("");
+      applySelection(next);
       setProviderDraft("");
       setModelDraft("");
       setNameDraft("");
-      void probeSelection(next);
     } catch (caught) {
       setError(String(caught));
     } finally {
@@ -222,9 +370,7 @@ export function ModelPicker(props: ModelPickerProps) {
         request: { provider: profile.provider, model: profile.model },
       });
       if (props.model?.provider === profile.provider && props.model.id === profile.model) {
-        props.onModelChange(undefined);
-        props.onThinkingChange("");
-        void probeSelection(undefined);
+        applySelection(undefined);
       }
       await loadCatalog();
     } catch (caught) {
@@ -254,39 +400,67 @@ export function ModelPicker(props: ModelPickerProps) {
             void Promise.all([loadCatalog(), loadModels(), probeSelection(props.model)])
           }
         >
-          {modelsLoading() ? "Reading Pi models" : selectionLoading() ? "Checking model" : "Refresh models"}
+          {modelsLoading() ? "Loading…" : selectionLoading() ? "Checking…" : "Refresh"}
         </button>
       </div>
 
       <div class="model-picker-grid">
-        <label>
-          <span>Model</span>
-          <select
-            value={selectedKey()}
-            disabled={Boolean(props.disabled) || modelsLoading()}
-            onChange={(event) => {
-              const next = decodeModelSelection(event.currentTarget.value);
-              props.onModelChange(next);
-              props.onThinkingChange("");
-              void probeSelection(next);
-            }}
-          >
-            <option value="">
-              {options()?.currentModel
-                ? `Pi default · ${options()!.currentModel!.provider}/${options()!.currentModel!.id}`
-                : "Pi default"}
-            </option>
-            <For each={models()}>
-              {(model) => (
-                <option value={encodeModelSelection({ provider: model.provider, id: model.id })}>
-                  {model.name ? `${model.name} · ` : ""}{model.provider}/{model.id}
-                  {model.custom ? " · saved" : ""}
+        <div class="model-picker-model-control">
+          <label class="model-picker-field">
+            <span>Model</span>
+            <select
+              ref={modelSelectElement}
+              value={selectedKey()}
+              disabled={Boolean(props.disabled) || modelsLoading()}
+              onChange={(event) => applySelection(decodeModelSelection(event.currentTarget.value))}
+            >
+              <Show when={favoriteModels().length > 0}>
+                <optgroup label="Favorites">
+                  <For each={favoriteModels()}>
+                    {(model) => (
+                      <option value={encodeModelSelection({ provider: model.provider, id: model.id })}>
+                        ★ {model.name ? `${model.name} · ` : ""}{model.provider}/{model.id}
+                        {model.custom ? " · saved" : ""}
+                      </option>
+                    )}
+                  </For>
+                </optgroup>
+              </Show>
+              <optgroup label="Models">
+                <option value="">
+                  {options()?.currentModel
+                    ? `Pi default · ${options()!.currentModel!.provider}/${options()!.currentModel!.id}`
+                    : "Pi default"}
                 </option>
-              )}
-            </For>
-          </select>
-        </label>
-        <label>
+                <For each={otherModels()}>
+                  {(model) => (
+                    <option value={encodeModelSelection({ provider: model.provider, id: model.id })}>
+                      {model.name ? `${model.name} · ` : ""}{model.provider}/{model.id}
+                      {model.custom ? " · saved" : ""}
+                    </option>
+                  )}
+                </For>
+              </optgroup>
+            </select>
+          </label>
+          <button
+            type="button"
+            class="model-favorite-toggle"
+            disabled={Boolean(props.disabled) || favoriteBusy() || !props.model}
+            aria-pressed={props.model ? selectedIsFavorite() : false}
+            title={
+              props.model
+                ? selectedIsFavorite()
+                  ? "Remove selected model from favorites"
+                  : "Add selected model to favorites"
+                : "Select a model to favorite it"
+            }
+            onClick={() => void toggleFavorite()}
+          >
+            {selectedIsFavorite() ? "★ Favorited" : "☆ Favorite"}
+          </button>
+        </div>
+        <label class="model-picker-field">
           <span>Thinking</span>
           <select
             value={props.thinking}
@@ -335,13 +509,14 @@ export function ModelPicker(props: ModelPickerProps) {
         {(notice) => <p class="error">Saved model catalog was reset: {notice()}</p>}
       </Show>
       <Show when={options() && !options()!.clearQueueSupported}>
-        <p class="model-picker-note">
-          This Pi build does not expose RPC queue clearing. Stop preserves bounded queued user text
-          and terminates the exact owned Pi process when a reusable abort is not possible.
+        <p class="model-picker-note model-picker-compatibility-note">
+          Stop compatibility: this Pi build cannot clear queued RPC work, so Stop may terminate the
+          owned Pi process instead of reusing it.
         </p>
       </Show>
       <Show when={modelError()}>{(message) => <p class="error">Pi model discovery: {message()}</p>}</Show>
       <Show when={selectionError()}>{(message) => <p class="error">Model options: {message()}</p>}</Show>
+      <Show when={preferenceError()}>{(message) => <p class="error">Model preference: {message()}</p>}</Show>
       <Show when={error()}>{(message) => <p class="error">Models: {message()}</p>}</Show>
 
       <details class="model-catalog-editor">

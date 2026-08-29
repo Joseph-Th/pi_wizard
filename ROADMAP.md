@@ -1,206 +1,62 @@
 # Roadmap
 
-The roadmap is intentionally ordered by architectural risk, not feature count. Implementation should prove the runtime and performance boundaries before adding breadth.
+Pi Wizard has no standing milestone queue. Current implemented capability is owned by `STATUS.md`; this document only defines how future scope enters the project.
 
-## Phase 0: design baseline
+## Near-term direction
 
-Status: **complete**
+Default work should improve the existing Windows desktop product rather than broaden its category.
 
-- research current Pi RPC/session/security behavior;
-- research representative desktop harness UX and failure modes;
-- establish product boundary;
-- select Tauri/Rust + Solid + Pi RPC architecture;
-- define persistence, worktree, safety, and performance contracts;
-- define verification strategy.
+Priority order:
 
-No application code is part of Phase 0.
+1. **Daily-use UX** — reduce friction in New Run, model/project selection, session navigation, attention handling, and change review.
+2. **Pi compatibility** — follow supported Pi RPC/capability changes without duplicating Pi semantics or credentials.
+3. **Reliability and recovery** — preserve exact process, project, worktree, draft, and request ownership across failure/reload/restart paths.
+4. **Performance** — keep passive work near zero and keep histories, tool state, IPC, and diffs bounded as real data grows.
+5. **Verification** — turn regressions that cross process/persistence/packaging boundaries into deterministic repository-owned tests when practical.
 
-## Phase 1: runtime foundation
+## Entry criteria for new product scope
 
-Purpose: establish stable ownership, protocol, lifecycle, bounds, and verification seams before connecting them into a product flow.
+A new feature belongs in Pi Wizard when all of the following are true:
 
-Build first:
+- it materially improves orchestration of Pi coding work on the personal Windows desktop;
+- Pi does not already provide the same user job through a simpler native surface Pi Wizard can expose;
+- the feature has one clear owner and does not create a second authority for Pi sessions, credentials, runtime state, or Git identity;
+- its passive CPU/process/filesystem cost is understood;
+- large-state behavior has an explicit bound or on-demand loading policy;
+- failure/recovery behavior can be stated before implementation;
+- the repository has a credible verification route for the consequential contract.
 
-- Rust workspace with a Tauri-independent `pi-wizard-core` crate and a thin Tauri host;
-- static Solid/Vite renderer scaffold with no application-server runtime;
-- centralized resource/payload limits;
-- opaque typed identities and structured failure types;
-- strict bounded LF-only JSONL framing;
-- typed Pi outbound commands plus forward-compatible inbound classification;
-- first-class Pi steer/follow-up, stable entry cursors, and bounded image payload contracts;
-- canonical Pi launch specifications, including saved/default trust inheritance, explicit one-run trust override, separate context-file policy, and optional custom session directory;
-- stable canonical project-binding primitives with explicit relocation semantics;
-- run lifecycle/state reducer with invalid-transition rejection;
-- explicit quarantine state for unconfirmed process termination;
-- session-scoped generation-safe draft state independent of renderer lifetime;
-- bounded persistent extension status/widget/title projection separate from dialog ownership;
-- semantic response outcomes for extension-cancellable Pi session mutations;
-- byte-bounded diagnostic and streaming projection primitives;
-- packaged renderer Content Security Policy;
-- deterministic protocol/state tests that do not require credentials or a live Pi process;
-- repository-owned quick, standard, and full verification lanes.
+Features that fail these criteria remain outside scope until the user explicitly chooses a different product boundary.
 
-Exit criteria:
+## Candidate expansions
 
-- core protocol/state tests are deterministic and fast;
-- malformed, oversized, CRLF, split-frame, and Unicode-separator framing cases are covered;
-- launch arguments are deterministic; trust inheritance/overrides and context-file loading remain separate and testable;
-- a registered project cannot silently bind to another canonical directory when its stored path is missing or stale;
-- invalid lifecycle transitions cannot be represented through the public mutation API;
-- bounded buffers demonstrate fixed memory ceilings under oversized input;
-- attachment and draft ceilings are revalidated at the backend owner;
-- old asynchronous draft-save completions cannot mark newer content durable;
-- uncertain Stop cannot be represented as Idle/Stopped or accept further RPC writes;
-- the Tauri shell and static renderer both build from repository-owned commands;
-- framework-specific types do not leak into `pi-wizard-core`.
+These are possible directions, not queued work:
 
-Do not optimize for an end-to-end demo during this phase. A visible prompt-to-response flow is Phase 2 work after the ownership boundaries above are proven.
-
-## Phase 2: runtime integration and Pi-native UX
-
-Status: **complete for the personal Windows application boundary**. Runtime/history/composer/capability/attachment/session-tree/recovery surfaces, first-class on-demand bounded Recent Sessions navigation, Pi-native retry/compaction/extension recovery projection, writable-session tail protection, extension-free launch recovery, keyboard slash-command navigation, and deterministic fake-Pi compatibility coverage are operational.
-
-Add:
-
-- Pi executable discovery/version probe;
-- bounded desktop environment/PATH resolver with explicit configured-path precedence and secret-safe provenance diagnostics;
-- one supervised `pi --mode rpc` child using the Phase 1 protocol/lifecycle owners;
-- bounded backend-to-renderer event coalescing;
-- send/stream/steer/follow-up/Stop and capability discovery;
-- Stop transaction: preserve native `clear_queue` output when available; on explicit unsupported-command rejection recover only the private bounded `queue_update` user-text snapshot and terminate the exact process so no queued/custom continuation survives; abort with deadline and quarantine on uncertainty;
-- virtualized minimal timeline;
-- versioned/idempotent renderer hydration and bounded crash recovery;
-- deterministic fake Pi subprocess lifecycle fixture;
-- project registry;
-- schema-versioned atomic/recoverable project-registry persistence with safe-start behavior when derived state is malformed;
-- bounded paged Pi session discovery/resume with stale-cursor rejection, read-model normalization of explicit persisted skill wrappers, and write-capable Resume refusal for unterminated JSONL tails;
-- lazy history pages plus live `get_entries(since)` synchronization;
-- session names/tree/fork operations exposed through Pi;
-- steer vs follow-up composer actions;
-- slash-command discovery plus bounded keyboard palette navigation;
-- extension select/confirm/input bridge;
-- provider retry/summarization retry/compaction outcome/extension-error projection using current Pi event semantics;
-- native `set_auto_retry` control and `abort_retry` Stop semantics without fabricating state Pi does not expose;
-- one-shot quiet-stream advisory using the existing deadline scheduler, with no automatic prompt replay or passive polling;
-- project trust preflight/launch handling;
-- independent context-file and extension-discovery launch policies, including an extension-free recovery path when installed Pi extensions prevent startup;
-- backend-owned session draft persistence with visible failure/retry semantics;
-- bounded image attachment ingestion across picker/paste/drop/restore paths;
-- derived session catalog with incremental indexing only if measurements require persistence; the current complete 1,200-session traversal measurement does not justify another persistent index/watcher owner.
-
-Exit criteria:
-
-- no localhost production server;
-- no unbounded IPC queue;
-- streaming deltas trigger no app-owned durable catalog/draft writes;
-- child exit/restart/failure states are exact;
-- abort rejection/timeout cannot be mistaken for idle, and uncertain termination is quarantined;
-- app close cannot orphan an app-owned Pi child unintentionally;
-- large JSONL fixtures do not block startup;
-- session navigation never aborts a live run;
-- pending extension requests survive navigation and cannot cross-answer another run;
-- fire-and-forget extension status/widget/title state stays byte/entry bounded and never masquerades as pending dialogs;
-- extension-cancelled session switches/forks leave the existing local session/run binding unchanged;
-- missing/moved project paths are surfaced as detached and require explicit relocation; no automatic global/wrong-project fallback exists;
-- a minimal desktop launch PATH cannot silently produce a materially different Pi tool environment from the resolved launch profile;
-- the app can coexist with CLI-created sessions without rewriting their authority.
-- renderer reload/recovery leaves active Pi children running and rehydrates from backend state.
-
-## Phase 3: parallel orchestration
-
-Status: **complete for the first-product scope**. Several independently owned runs, an actionable deadline-prioritized global Needs Attention queue backed by exact backend request identity, explicit registered-project/model/thinking/execution/queue/lifecycle-timing state in orchestration surfaces, revision-bound last-known change counts only after explicit review, exclusive canonical execution-root ownership, local-vs-worktree startup, immutable worktree identity, durable creation recovery, conservative explicit worktree cleanup, run-bound Git review, durable configurable admission control, explicit idle-run Close, terminal-run Dismiss, attention/working/live-first run ordering, bounded terminal retention, and an eight-run full-lane scale fixture are operational. Branch integration is deliberately outside the review-only first product.
-
-Add:
-
-- several live Pi runs;
-- explicit bounded concurrency;
-- multi-agent dashboard;
-- global Needs Attention view;
-- per-run lifecycle/diagnostic state;
-- local-checkout vs Git-worktree run creation;
-- safe explicit worktree cleanup.
-
-Exit criteria:
-
-- eight bursty simulated runs remain within input-latency and IPC backlog targets;
-- each run's cwd is immutable and visible;
-- each worktree records and verifies its exact base commit/branch and is never pooled between live runs;
-- Git mutations are routed through run-owned worktree identity rather than current UI selection;
-- switching projects/views cannot retarget or stop another run;
-- partial worktree creation is transactional/recoverable and cleanup refuses unsafe deletion.
-
-## Phase 4: change review
-
-Status: **complete for the review-only first-product scope**. On-demand repository status, bounded changed-file metadata, one-file-at-a-time UTF-8-safe streamed byte-window diff paging, SHA-256 prefix-bound stale cursors, binary classification, independent page/scan ceilings, semantic hunk navigation, renderer stale-result invalidation, and backend-owned cancellation/supersession of active review jobs are operational. A cheap backend-derived "open execution folder" action is also implemented; editor/terminal integration remains optional scope expansion rather than an exit criterion.
-
-Add:
-
-- on-demand repository status;
-- changed-file list;
-- lazy per-file/hunk diff;
-- too-large/binary handling;
-- optional open-in-external-editor/terminal actions if they remain cheap.
-
-Exit criteria:
-
-- huge diffs cannot freeze the renderer;
-- passive session rows spawn no Git commands;
-- review data is invalidated correctly after agent tool mutations;
-- file/hunk payloads are bounded and cancelable.
-
-## Phase 5: hardening and packaging
-
-Status: **complete for deterministic repository-owned work in the personal Windows app**. Renderer crash-loop protection, explicit recovery UI, retryable v9 hydration, corruption/write-failure fault injection, accessibility/keyboard contracts, Windows process lifecycle behavior, bounded terminal/runtime and session-draft caches, large-history/diff/concurrency/session-catalog fixtures, one-shot quiet-working-stream and steady-idle no-periodic-work regression fixtures, cold/warm app-owned-state startup measurement, explicit pull-based bounded runtime diagnostics, migration/version policy, and optimized Windows builds are implemented. Draft-cache pressure evicts only unowned Saved records and reloads persisted sessions on revisit; unsaved draft state fails closed rather than being discarded.
-
-Add:
-
-- Windows process lifecycle validation;
-- crash/recovery UX;
-- accessibility and keyboard pass;
-- cold/warm startup benchmarks;
-- bounded-state/no-periodic-work regression fixtures plus platform-observable memory/CPU/render diagnostics;
-- migration/version compatibility policy for Pi RPC and any derived catalog.
-
-## Phase 6: finite automation and independent supervision
-
-Status: **complete for the requested lightweight workflow scope**.
-
-Add:
-
-- reusable schema-versioned prompt chains containing only a name and ordered prompts;
-- one Automation view with prompt add/remove/reorder, project, concurrency, Git isolation, and worker model controls;
-- event-driven chain execution that fills ordinary RuntimeManager slots and starts one new Pi session per prompt;
-- unique recoverable Git worktrees for parallel chain workers;
-- completion detection through Pi-native session state/stats, followed by normal Close to release worker capacity without deleting session/worktree history;
-- cancellation that prevents future launches without killing already-running user workers;
-- a separate Supervision view/coordinator implemented as one normal Pi session counted against the same live-run ceiling;
-- project-scoped supervision of eligible manual and automated runs through bounded task/status/last-result context and a strict JSON Send/Steer/Follow-up directive contract targeting exact RunIds;
-- one reusable model picker that merges Pi-discovered models with a bounded credential-free custom provider/model catalog;
-- on-demand Automation catalog hydration, execution-only invalidation/IPC, bounded prompt previews, and no-op execution update suppression;
-- bounded supervisor lifetime through an explicit per-execution cycle ceiling plus per-turn deadline;
-- supervisor failure isolation so malformed or rejected autonomous direction ends only the supervision owner and does not change worker lifecycle;
-- direct Windows Node invocation for standard npm Pi installs plus desktop-lifetime kill-on-close process containment.
-
-Exit criteria:
-
-- the configured eight-run ceiling is exercised by the full concurrency fixture;
-- automation performs no interval polling and token/tool display traffic does not wake its scheduler;
-- manual and automated sessions share the same admission and execution-root ownership rules;
-- parallel automation cannot write concurrently in one local checkout;
-- saved chains have independent count/text/aggregate-byte ceilings and corruption quarantine;
-- an LLM supervisor cannot address an unknown run, exceed prompt/directive limits, or bypass Pi-native composer semantics;
-- supervision is independently finite and stopping it never terminates observed workers; automation cancellation is rechecked before any not-yet-started worker process spawn;
-- chain cancellation cannot silently terminate user worker sessions or auto-delete their worktrees.
-
-## Later candidates, evidence required
-
-- real container/VM/policy sandbox launch profiles;
-- long-lived background daemon;
-- scheduled autonomous tasks;
+- real container/VM/policy-backed execution profiles;
 - integrated terminal;
 - file explorer/editor;
-- branch integration/commit flows;
-- remote runtimes;
-- multi-harness adapters.
+- branch integration, commit, and conflict-resolution workflows;
+- scheduled autonomous jobs;
+- long-lived background daemon;
+- remote runtimes or remote clients;
+- multi-harness adapters beyond Pi;
+- application-owned provider authentication or provider marketplace.
 
-These are not current gaps. Do not work on or report them as remaining work unless the user explicitly asks for that feature.
+Each candidate requires explicit user demand and a design update before implementation. A Git worktree must never be relabeled as a security sandbox to approximate the first item.
+
+## Compatibility-driven work
+
+Upstream Pi changes may require work without changing product scope. Treat these as maintenance when they affect supported behavior:
+
+- RPC command/event/schema changes;
+- session format or session-directory resolution changes;
+- model/thinking/input-capability discovery changes;
+- project trust/context/extension semantics;
+- Windows npm launcher layout or process behavior;
+- provider authentication discovery exposed through Pi.
+
+Compatibility work should preserve Pi as authority and add a narrow adapter or tested fallback only when the installed Pi contract requires it.
+
+## Completion rule
+
+Do not add completed work to this file. Move implemented truth to its owning current document (`STATUS.md`, `DESIGN.md`, `ARCHITECTURE.md`, or `TESTING.md`) and let version control retain chronology.

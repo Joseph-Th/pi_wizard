@@ -118,7 +118,6 @@ export function ProjectLauncher(props: {
     props.isExecutionRootActive(projectPath().trim());
 
   const resetLaunchOptions = () => {
-    setLaunchModelKey("");
     setLaunchThinking("");
   };
 
@@ -567,8 +566,9 @@ export function ProjectLauncher(props: {
             )
           }
           onThinkingChange={setLaunchThinking}
-          label="New-run model and thinking"
-          description="Pi models load globally even before a project is selected, then refresh in project context when a path is available; saved custom identities are merged into the same picker."
+          rememberNewRunSelection
+          label="Model and thinking"
+          description="Remembers your last model. Favorites stay at the top."
         />
         <label class="initial-task-field">
           <span>Initial task</span>

@@ -83,7 +83,7 @@ Reasons:
 - The desktop does not need to ship a second Node application server merely to host the SDK.
 - It keeps the semantic boundary simple: Pi owns the agent; Pi Wizard owns the process and presentation.
 
-The SDK remains a useful reference and potential future embedded adapter, but it is not the default production path.
+The SDK is a protocol/behavior reference, not a production runtime boundary. Introducing an embedded SDK adapter would require an explicit architecture change.
 
 ## 3. Pi protocol adapter
 
@@ -281,6 +281,8 @@ Supervision is explicitly finite. Runtime limits cap cycles and each model turn 
 
 Pi capability discovery remains authoritative for models Pi reports, including names and image-input capability. A separate small schema-versioned custom-model catalog stores only user-supplied provider/model identity plus an optional display label. It stores no credentials and never claims input capability. Launcher/Automation/Supervision model pickers merge discovered and custom identities by `(provider, model)`, with Pi-discovered metadata winning for duplicates. Pi remains the final launch-time validator.
 
+Model selection convenience is app-owned preference state, not Pi capability state. Preferences schema 2 adds one nullable remembered New Run provider/model identity plus a bounded set of favorite identities. A fresh or migrated schema-1 store starts New Run at `opencode-go/muse-spark-1.2-contributor`; every later explicit New Run selection replaces that preference, including null for an intentional return to Pi default. Favorites affect ordering only: available favorites are grouped first in every shared picker, while unavailable identities remain dormant until Pi/custom discovery exposes them again. Neither remembered selection nor favorites can manufacture model availability or credentials.
+
 ### Windows Pi invocation and process containment
 
 Pi Wizard does not keep a command-shell shim alive as a production Pi process. When Windows discovery resolves the standard npm `pi.cmd`/`pi.ps1` installation, the environment owner resolves the corresponding `node.exe` plus `@earendil-works/pi-coding-agent/dist/bundle/cli.js` and the process owner spawns that Node entry point directly with `CREATE_NO_WINDOW`. The logical Pi shim path remains diagnostic/discovery identity; the runtime invocation target is the direct Node child. If a configured/discovered `.cmd`, `.bat`, or `.ps1` launcher cannot be resolved to a direct executable invocation, live-runtime spawn fails explicitly before starting it rather than retaining a background shell.
@@ -291,7 +293,7 @@ Graceful shutdown still belongs to `RuntimeManager`, which closes every owned Pi
 
 Composer drafts are user-owned state, one record per session/new-session identity. They are backend-owned rather than component-local so navigation and renderer replacement cannot lose or cross-contaminate text.
 
-The live runtime manager now contains an in-memory `SessionDraftStore` that maps each run to either a temporary pre-session owner or Pi's authoritative current session ID. GUI-created new sessions receive an explicit Pi session ID before spawn, allowing their draft owner to exist immediately. Runs whose identity is learned later migrate a temporary pending-run draft only when the first authoritative session ID arrives. Subsequent session switches do not migrate text: the target session gets its own draft, and switching back restores the previous session's record.
+The live runtime manager contains an in-memory `SessionDraftStore` that maps each run to either a temporary pre-session owner or Pi's authoritative current session ID. GUI-created new sessions receive an explicit Pi session ID before spawn, allowing their draft owner to exist immediately. Runs whose identity is learned later migrate a temporary pending-run draft only when the first authoritative session ID arrives. Subsequent session switches do not migrate text: the target session gets its own draft, and switching back restores the previous session's record.
 
 Pi extension `set_editor_text` mutates this same backend draft before renderer notification. Hydration schema v9 exposes the current draft plus restore/submission state, immutable worktree identity, lifecycle timing, the monotonic change-invalidation revision, and bounded transient recovery state so reload recovery is backend-owned rather than dependent on component state.
 
@@ -335,20 +337,20 @@ Cold/offline history still comes from Pi-owned JSONL files. `get_messages` is no
 - Parse session contents incrementally and cancelably.
 - Do not index full tool outputs by default.
 - Full-text search, if introduced, should prioritize user prompts and assistant text, with explicit resource budgets.
-- Stateless continuation cursors fail stale when the candidate metadata snapshot changes, because an external file modification may change global ordering. A future persistent derived index may invalidate only affected entries, but it must still detect external Pi/CLI changes before serving a continuation as current.
+- Stateless continuation cursors fail stale when the candidate metadata snapshot changes, because an external file modification may change global ordering. Any persistent derived index must still detect external Pi/CLI changes before serving a continuation as current.
 - Migration work is versioned, bounded, cancelable, and never runs as an unbounded startup monopoly.
 
-A SQLite/FTS or watched derived index is permitted only if measurements justify its extra owner. The current 1,200-session complete-traversal Windows fixture is fast enough that persistence is not justified. Any future index remains disposable, cannot become Pi-session authority, and must preserve stale/external-change semantics; the architecture depends on the `SessionCatalog` contract rather than SQLite itself.
+A SQLite/FTS or watched derived index is permitted only when scale measurements justify the extra owner. The repository scale fixture is the current evidence gate and does not justify persistent indexing. Any index remains disposable, cannot become Pi-session authority, and must preserve stale/external-change semantics; the architecture depends on the `SessionCatalog` contract rather than SQLite itself.
 
 ### Recoverable app-owned state
 
 Pi Wizard's own registries, indexes, drafts, preferences, and hydration metadata are never allowed to become a second authority for Pi sessions or project contents. Persisted domains are schema-versioned and isolated so one malformed record/file cannot poison unrelated state.
 
-The desktop uses one portable app-owned state root named `pi-wizard-data`. A repository build whose executable is under `<repo>/target/debug` or `<repo>/target/release` resolves that root to `<repo>/pi-wizard-data`, outside disposable Cargo output; a standalone executable resolves it beside itself. Prompt chains, custom model identities, project registrations, worktree recovery records, preferences, and session drafts therefore survive repository cleans/rebuilds without depending on Windows AppData. If the current root does not exist, migration first prefers the immediately previous executable-sibling `pi-wizard-data` location and otherwise uses the older AppData `runtime-state`; an existing current root always wins so stale migration input cannot overwrite newer local state.
+The desktop uses one portable app-owned state root named `pi-wizard-data`. A repository build whose executable is under `<repo>/target/debug` or `<repo>/target/release` resolves that root to `<repo>/pi-wizard-data`, outside disposable Cargo output; a standalone executable resolves it beside itself. Prompt chains, custom model identities, project registrations, worktree recovery records, preferences, and session drafts therefore survive repository cleans/rebuilds without depending on Windows AppData. If the current root does not exist, startup migration prefers the legacy executable-sibling `pi-wizard-data` location and otherwise the legacy AppData `runtime-state`; an existing current root always wins so migration input cannot overwrite current local state.
 
-Durable writes use an atomic replace strategy appropriate to the platform. On parse/schema/integrity failure, quarantine the affected app-owned state and start from a safe empty/rebuildable projection where possible. Do not delete, rewrite, or hide intact Pi JSONL merely because a project/catalog/preferences file is corrupt. A previous failed launch must have a safe-start path that can bypass disposable indexing/project-selection state instead of repeating the same crash or CPU-heavy repair loop indefinitely.
+Durable writes use an atomic replace strategy appropriate to the platform. On parse/schema/integrity failure, quarantine the affected app-owned state and start from a safe empty/rebuildable projection where possible. Do not delete, rewrite, or hide intact Pi JSONL merely because a project/catalog/preferences file is corrupt. A failed launch must have a safe-start path that can bypass disposable indexing/project-selection state instead of repeating the same crash or CPU-heavy repair loop indefinitely.
 
-Preferences are a separate persistence domain rather than fields embedded into project/worktree/runtime snapshots. The first persisted preference is the live-run admission ceiling. It is schema-versioned, byte-bounded, atomically replaced, and validated against the configured runtime maximum before use. The preference file is committed before the manager ceiling changes, so a persistence failure cannot create a false durable UI state. Corrupt, oversized, unsupported-schema, or out-of-range preference files are quarantined without altering project/worktree/draft/session authority; startup uses the configured safe default and exposes a bounded recovery notice.
+Preferences are a separate persistence domain rather than fields embedded into project/worktree/runtime snapshots. The current schema is 2: it stores the live-run admission ceiling, nullable remembered New Run model identity, and bounded favorite-model set. The supported schema-1 decoder preserves its admission ceiling and supplies defined defaults for the schema-2 model fields; every successful write emits schema 2. Preferences are byte-bounded, atomically replaced, and validate run limits plus provider/model field/count ceilings before use. The preference file is committed before the corresponding in-memory mutation, so a persistence failure cannot create a false durable UI state. Corrupt, oversized, unsupported-schema, duplicate-favorite, or out-of-range preference files are quarantined without altering project/worktree/draft/session authority; startup uses safe defaults and exposes a bounded recovery notice.
 
 ### Compatibility and migration policy
 
@@ -398,7 +400,7 @@ The recovery journal has its own stable `WorktreeId`, entry/byte ceilings, atomi
 
 Restart reconciliation is deliberately non-mutating. A plan is considered **Not Created** only when both its requested branch and path are proven absent. A surviving path must resolve to the same Git common repository and requested branch. The captured creation base must still be an ancestor of current `HEAD`, not necessarily equal to it, because legitimate agent commits and dirty work after creation must remain recoverable. A wrong branch, rewritten ancestry, branch-only mutation, path-only mutation, or unrelated repository remains a classified partial/conflicting recovery and is never auto-deleted. After the user independently removes both Git resources, a fresh absence proof may retire only the app journal record.
 
-If creation fails after creating only task-owned resources, rollback is allowed only when their ownership and emptiness are proven. Otherwise record an orphan/recovery item rather than destructively guessing. Worktrees are not pooled or silently reassigned between live runs. Cleanup is explicit; a worktree with uncommitted or unpushed work is never silently deleted. The first cleanup surface is deliberately narrower still: a fresh recovery probe must prove the exact recorded repository/branch/path, no live run may use the worktree, the working tree must be clean, and current `HEAD` must equal the captured creation base. Only then may the service run non-forced `git worktree remove` and delete the task branch with an expected-old object ID. Any failure/partial mutation keeps the recovery journal; the journal is retired only after a fresh probe proves both branch and path absent. The first product does not need automatic branch merging.
+If creation fails after creating only task-owned resources, rollback is allowed only when their ownership and emptiness are proven. Otherwise record an orphan/recovery item rather than destructively guessing. Worktrees are not pooled or silently reassigned between live runs. Cleanup is explicit and intentionally conservative: a fresh recovery probe must prove the exact recorded repository/branch/path, no live run may use the worktree, the working tree must be clean, and current `HEAD` must equal the captured creation base. Only then may the service run non-forced `git worktree remove` and delete the task branch with an expected-old object ID. Any failure/partial mutation keeps the recovery journal; the journal is retired only after a fresh probe proves both branch and path absent. Automatic branch merging is outside the current product boundary.
 
 Every Git operation for a run resolves from that run's canonical execution root and verifies repository/worktree identity before mutation. UI-selected project state is not an acceptable substitute for the run binding.
 
@@ -445,15 +447,15 @@ The runtime models three independent dimensions:
 
 1. **Project resource trust**: whether Pi loads project-local resource code/configuration.
 2. **Git isolation**: local checkout vs separate worktree.
-3. **Execution isolation**: host process vs a future real container/VM/policy sandbox.
+3. **Execution isolation**: host process vs a real container/VM/policy sandbox.
 
-The first implementation supports host execution and optional Git isolation. A later container/VM adapter can implement true execution isolation without changing the user/session model.
+The current product supports host execution and optional Git isolation only. Any container/VM/policy-backed execution mode must be represented as a distinct enforced isolation class.
 
 The packaged renderer uses an explicit Content Security Policy. Production script/style sources are self-only and do not require `'unsafe-inline'` or script eval; Vite's loopback WebSocket and inline development-style injection are isolated to Tauri's separate `devCsp`. Remote scripts/content are not part of the core architecture. Tauri IPC is the only renderer-to-host control path, and future capabilities/commands must be granted narrowly rather than exposing generic shell/filesystem authority to the WebView.
 
 ## 11. Extension UI bridge
 
-Pi extensions can request UI operations over RPC. Support only the protocol-defined desktop-safe interaction set at first:
+Pi extensions can request UI operations over RPC. Pi Wizard supports only this protocol-defined desktop-safe interaction set:
 
 - select;
 - confirm;
@@ -476,7 +478,7 @@ Closing a window/view must not leak or silently resolve a pending request. Teard
 
 Parallel agents are useful until local model clients, language servers, build tools, or shell processes saturate the machine.
 
-The runtime exposes a configurable live-run admission limit rather than an unbounded fan-out API. A validated build/runtime limit is the hard maximum; the manager owns a mutable runtime ceiling within `1..=maximum`. Starts at or above the ceiling are rejected before child spawn. Lowering the ceiling below the current active count never terminates existing runs, and raising it cannot exceed the configured maximum. The desktop preference owner persists the selected ceiling independently with atomic replace/quarantine semantics and applies it to a newly spawned manager before normal desktop use. If queued starts are introduced later, they must be explicit first-class state rather than silently spawned or hidden in the renderer.
+The runtime exposes a configurable live-run admission limit rather than an unbounded fan-out API. A validated build/runtime limit is the hard maximum; the manager owns a mutable runtime ceiling within `1..=maximum`. Starts at or above the ceiling are rejected before child spawn. Lowering the ceiling below the current active count never terminates existing runs, and raising it cannot exceed the configured maximum. The desktop preference owner persists the selected ceiling independently with atomic replace/quarantine semantics and applies it to a newly spawned manager before normal desktop use. Queued starts, if added, must be explicit first-class state rather than silently spawned or hidden in the renderer.
 
 Expensive application-owned jobs also have separate limits:
 
@@ -509,7 +511,7 @@ Failures preserve identity and retryability. The UI must not collapse them into 
 
 These are **acceptance targets** for the personal Windows desktop application. Benchmarks refine them on the Windows machine(s) where the app is actually used.
 
-| Surface | Initial target |
+| Surface | Target |
 | --- | --- |
 | App shell first interactive paint | < 800 ms warm OS/webview, excluding Pi child startup |
 | Idle app-owned CPU with no active work | effectively 0% sustained; no periodic polling loops |
@@ -548,7 +550,7 @@ Developer diagnostics expose bounded counters instead of giant logs. The normal 
 - dropped superseded display frames;
 - renderer long-task measurements in development builds.
 
-Recent RPC throughput uses one fixed-size in-memory time window per retained run, while cumulative queue counters are saturating scalars. Process ownership and active Git/session-catalog job counts come directly from their existing owners. Mounted timeline rows are sampled by the renderer only on explicit diagnostic refresh; development long tasks use the browser's event-driven performance observer. If textual tracing is added later it must use ring buffers and size caps. Turning on diagnostics or tracing must not reproduce the CPU/disk/memory amplification they are intended to find.
+Recent RPC throughput uses one fixed-size in-memory time window per retained run, while cumulative queue counters are saturating scalars. Process ownership and active Git/session-catalog job counts come directly from their existing owners. Mounted timeline rows are sampled by the renderer only on explicit diagnostic refresh; development long tasks use the browser's event-driven performance observer. Any textual tracing must use ring buffers and size caps. Turning on diagnostics or tracing must not reproduce the CPU/disk/memory amplification they are intended to find.
 
 ## 16. Desktop launch environment
 
