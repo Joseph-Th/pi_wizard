@@ -26,6 +26,14 @@ export interface ProjectLaunchOptions {
 
 export interface ProjectModelCatalog {
   models: ModelSummary[];
+  diagnostics: {
+    scope: "global" | "project";
+    probeRoot: string;
+    pathSource: "configured" | "desktop_process" | "shell_probe";
+    logicalPi: string;
+    invocationExecutable: string;
+    directNpmNode: boolean;
+  };
 }
 
 export interface CustomModelProfile {

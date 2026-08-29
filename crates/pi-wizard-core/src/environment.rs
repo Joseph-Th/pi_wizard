@@ -389,11 +389,14 @@ fn resolve_pi_invocation(
 ) -> Result<ResolvedPiInvocation, EnvironmentResolutionError> {
     #[cfg(windows)]
     {
-        let extension = logical_pi
-            .extension()
-            .and_then(OsStr::to_str)
-            .unwrap_or_default();
-        if (extension.eq_ignore_ascii_case("cmd") || extension.eq_ignore_ascii_case("ps1"))
+        // npm installs both an extensionless POSIX shim (`pi`) and `pi.cmd` on
+        // Windows. PATH resolution can legitimately return either one. Detect
+        // the package layout instead of guessing from the shim extension so the
+        // long-lived Pi child is always direct node.exe + cli.js.
+        if logical_pi
+            .file_stem()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.eq_ignore_ascii_case("pi"))
             && let Some(parent) = logical_pi.parent()
         {
             let cli = parent
@@ -405,11 +408,11 @@ fn resolve_pi_invocation(
                 .join("cli.js");
             if cli.is_file() {
                 let adjacent_node = parent.join("node.exe");
-                let node = if adjacent_node.is_file() {
-                    canonical_usable_executable(&adjacent_node).ok()
-                } else {
-                    find_executable(environment, "node")?
-                };
+                let node = adjacent_node
+                    .is_file()
+                    .then(|| canonical_usable_executable(&adjacent_node).ok())
+                    .flatten()
+                    .or(find_executable(environment, "node")?);
                 if let Some(node) = node {
                     return Ok(ResolvedPiInvocation {
                         executable: node,
@@ -417,6 +420,10 @@ fn resolve_pi_invocation(
                         direct_npm_node: true,
                     });
                 }
+                return Err(EnvironmentResolutionError::StandardNpmPiNodeUnavailable {
+                    pi: logical_pi.to_path_buf(),
+                    cli,
+                });
             }
         }
     }
@@ -575,6 +582,10 @@ pub enum EnvironmentResolutionError {
     ConfiguredPiUnavailable { path: PathBuf, source: io::Error },
     #[error("Pi executable was not found in configured, desktop, or probed environments")]
     PiNotFoundInAnyEnvironment,
+    #[error(
+        "standard npm Pi shim {pi} was found with CLI {cli}, but node.exe was not available in the selected environment"
+    )]
+    StandardNpmPiNodeUnavailable { pi: PathBuf, cli: PathBuf },
 }
 
 #[cfg(test)]
@@ -705,8 +716,9 @@ mod tests {
                 .join("bundle"),
         )
         .expect("create npm package layout");
-        let pi = bin.join("pi.cmd");
-        File::create(&pi).expect("pi shim");
+        let pi = bin.join("pi");
+        File::create(&pi).expect("extensionless npm Pi shim");
+        File::create(bin.join("pi.cmd")).expect("Windows npm Pi shim");
         let node = bin.join("node.exe");
         File::create(&node).expect("node executable");
         let cli = bin
@@ -747,6 +759,34 @@ mod tests {
                 .starts_with(r"\\?\")
         );
         assert!(resolved.pi_invocation().is_direct_npm_node());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn standard_npm_pi_shim_without_node_requires_environment_retry() {
+        let fixture = Fixture::new("npm-node-missing");
+        let bin = fixture.root.join("npm");
+        let cli = bin
+            .join("node_modules")
+            .join("@earendil-works")
+            .join("pi-coding-agent")
+            .join("dist")
+            .join("bundle")
+            .join("cli.js");
+        fs::create_dir_all(cli.parent().expect("Pi CLI parent")).expect("package layout");
+        File::create(bin.join("pi.cmd")).expect("Pi shim");
+        File::create(&cli).expect("Pi CLI entrypoint");
+
+        let mut desktop = BTreeMap::new();
+        desktop.insert(OsString::from("PATH"), fixture.path(&["npm"]));
+        desktop.insert(OsString::from("PATHEXT"), OsString::from(".EXE;.CMD"));
+        assert!(matches!(
+            resolve_launch_environment(LaunchEnvironmentInput {
+                desktop_environment: desktop,
+                ..LaunchEnvironmentInput::default()
+            }),
+            Err(EnvironmentResolutionError::StandardNpmPiNodeUnavailable { .. })
+        ));
     }
 
     #[test]

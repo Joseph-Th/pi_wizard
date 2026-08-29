@@ -145,7 +145,12 @@ requireContract(
 );
 requireContract(
   models.includes('"runtime_probe_project_models"') &&
-  models.includes('"runtime_probe_project_launch_options"') &&
+    models.includes('projectPath: path || null') &&
+    !models.includes("!props.piReady") &&
+    !models.includes("!props.projectPath.trim()") &&
+    models.includes("Model diagnostics") &&
+    models.includes('diagnostics.scope === "global"') &&
+    models.includes('"runtime_probe_project_launch_options"') &&
     models.includes('"runtime_model_catalog"') &&
     models.includes('"runtime_save_custom_model"') &&
     models.includes('"runtime_delete_custom_model"') &&
@@ -157,7 +162,7 @@ requireContract(
     models.includes("for (const model of discovery()?.models ?? [])") &&
     models.includes("models.length} model") &&
     models.includes("Pi model discovery:"),
-  "New Run, Automation, and Supervision must load Pi's model catalog independently from secondary launch-option probes and merge durable custom identities instead of collapsing to Pi default",
+  "New Run, Automation, and Supervision must load Pi's model catalog globally before project selection, refresh it in project context when available, expose probe diagnostics, and never disable discovery because the separate Pi version probe is unavailable",
 );
 requireContract(
   ui.includes('when={view() === "run"}') && ui.includes('when={selectedRun()}'),

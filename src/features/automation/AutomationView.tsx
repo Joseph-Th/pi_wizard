@@ -283,7 +283,6 @@ export function AutomationView(props: AutomationViewProps) {
 
           <ModelPicker
             projectPath={selectedProject()?.canonicalRoot ?? ""}
-            piReady={props.piReady}
             disabled={busy()}
             model={model()}
             thinking={thinking()}

@@ -660,7 +660,11 @@ export function App(props: { startup: AppStartupSnapshot }) {
             <strong>Pi Wizard</strong>
             <span>
               <Show when={piProbe()} fallback={"Pi …"}>
-                {(report) => `Pi ${report().version.display}`}
+                {(report) =>
+                  report().version
+                    ? `Pi ${report().version!.display}`
+                    : "Pi available"
+                }
               </Show>
             </span>
           </header>
@@ -760,7 +764,20 @@ export function App(props: { startup: AppStartupSnapshot }) {
               <span>Events</span>
               <strong>{deliveredEvents()}</strong>
               <span>Pi</span>
-              <strong>{piProbe()?.version.display ?? "probing"}</strong>
+              <strong>{piProbe()?.version?.display ?? (piProbe() ? "available" : "probing")}</strong>
+              <Show when={piProbe()}>
+                {(report) => (
+                  <>
+                    <span>Pi path source</span>
+                    <strong>{report().environment.pathSource}</strong>
+                    <span>Pi invocation</span>
+                    <strong title={report().invocationExecutable}>
+                      {report().invocationExecutable}
+                      {report().directNpmNode ? " · direct npm Node" : ""}
+                    </strong>
+                  </>
+                )}
+              </Show>
             </div>
             <div class="runtime-diagnostics-actions">
               <button type="button" disabled={diagnosticsBusy()} onClick={() => void refreshDiagnostics()}>
@@ -850,6 +867,13 @@ export function App(props: { startup: AppStartupSnapshot }) {
               {(notice) => <p class="error">Saved run limit was reset: {notice()}</p>}
             </Show>
             <Show when={piProbeError()}>{(error) => <p class="error">Pi: {error()}</p>}</Show>
+            <Show when={piProbe()?.versionError}>
+              {(error) => (
+                <p class="model-picker-note">
+                  Pi version diagnostic failed, but launch/model environment is available: {error()}
+                </p>
+              )}
+            </Show>
           </details>
         </aside>
 

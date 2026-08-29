@@ -376,7 +376,6 @@ async fn runtime_session_stats(
 #[derive(Clone)]
 pub(crate) struct DesktopLaunchProfile {
     pub(crate) environment: ResolvedLaunchEnvironment,
-    pub(crate) version: PiVersion,
 }
 
 impl DesktopRuntime {
@@ -464,7 +463,10 @@ impl DesktopRuntime {
         });
         let environment = match initial {
             Ok(environment) => environment,
-            Err(EnvironmentResolutionError::PiNotFoundInAnyEnvironment) => {
+            Err(
+                EnvironmentResolutionError::PiNotFoundInAnyEnvironment
+                | EnvironmentResolutionError::StandardNpmPiNodeUnavailable { .. },
+            ) => {
                 let shell_probe_environment =
                     probe_login_shell_environment(&desktop_environment, self.limits)
                         .await
@@ -478,13 +480,10 @@ impl DesktopRuntime {
             }
             Err(error) => return Err(error.to_string()),
         };
-        let version = probe_pi_version(&environment, self.limits)
-            .await
-            .map_err(|error| error.to_string())?;
-        let profile = DesktopLaunchProfile {
-            environment,
-            version,
-        };
+        // Environment resolution is the launch-readiness boundary. `pi --version`
+        // is diagnostic metadata only and must never prevent model discovery or
+        // a real Pi launch when the resolved invocation itself is usable.
+        let profile = DesktopLaunchProfile { environment };
         *cache = Some(profile.clone());
         Ok(profile)
     }

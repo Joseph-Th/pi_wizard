@@ -1,7 +1,8 @@
 import { spawn, spawnSync } from "node:child_process";
 import { createServer } from "node:net";
-import { existsSync } from "node:fs";
-import { resolve } from "node:path";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 
@@ -10,6 +11,94 @@ const executable = resolve(root, "target", "release", "pi-wizard-desktop.exe");
 
 function requireContract(condition, detail) {
   if (!condition) throw new Error(`packaged desktop smoke failed: ${detail}`);
+}
+
+function createFakeNpmPi() {
+  const npmRoot = mkdtempSync(resolve(tmpdir(), "pi-wizard-packaged-pi-"));
+  const cli = resolve(
+    npmRoot,
+    "node_modules",
+    "@earendil-works",
+    "pi-coding-agent",
+    "dist",
+    "bundle",
+    "cli.js",
+  );
+  mkdirSync(dirname(cli), { recursive: true });
+  // npm exposes both an extensionless `pi` shim and `pi.cmd` on Windows.
+  // The extensionless file is deliberately not a Win32 executable: this
+  // packaged smoke must prove Pi Wizard resolves the package to node.exe.
+  writeFileSync(resolve(npmRoot, "pi"), "#!/bin/sh\nexit 1\n");
+  writeFileSync(resolve(npmRoot, "pi.cmd"), "@echo off\r\nexit /b 1\r\n");
+  writeFileSync(
+    cli,
+    String.raw`if (process.argv.includes("--version")) {
+  process.stdout.write("0.84.3\n");
+  process.exit(0);
+}
+
+let buffer = "";
+function respond(request, data) {
+  process.stdout.write(JSON.stringify({
+    id: request.id,
+    type: "response",
+    command: request.type,
+    success: true,
+    ...(data === undefined ? {} : { data })
+  }) + "\n");
+}
+function reject(request, error) {
+  process.stdout.write(JSON.stringify({
+    id: request.id,
+    type: "response",
+    command: request.type,
+    success: false,
+    error
+  }) + "\n");
+}
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => {
+  buffer += chunk;
+  while (true) {
+    const newline = buffer.indexOf("\n");
+    if (newline < 0) break;
+    const line = buffer.slice(0, newline).replace(/\r$/, "");
+    buffer = buffer.slice(newline + 1);
+    if (!line) continue;
+    const request = JSON.parse(line);
+    if (request.type === "get_available_models") {
+      respond(request, { models: [
+        { provider: "fake", id: "alpha", name: "Alpha", input: ["text"] },
+        { provider: "fake", id: "vision", name: "Vision", input: ["text", "image"] },
+        { provider: "other", id: "beta", name: "Beta", input: ["text"] }
+      ] });
+    } else if (request.type === "get_state") {
+      respond(request, {
+        model: null,
+        thinkingLevel: "medium",
+        isStreaming: false,
+        isCompacting: false,
+        steeringMode: "all",
+        followUpMode: "one-at-a-time",
+        sessionFile: null,
+        sessionId: "packaged-smoke",
+        sessionName: null,
+        autoCompactionEnabled: true,
+        messageCount: 0,
+        pendingMessageCount: 0
+      });
+    } else if (request.type === "get_available_thinking_levels") {
+      respond(request, { levels: ["off", "medium", "high"] });
+    } else if (request.type === "clear_queue") {
+      reject(request, "Unknown command: clear_queue");
+    } else {
+      respond(request, {});
+    }
+  }
+});
+`,
+  );
+  return npmRoot;
 }
 
 async function freeLoopbackPort() {
@@ -124,12 +213,17 @@ async function main() {
   requireContract(process.platform === "win32", "this release smoke requires Windows WebView2");
   requireContract(existsSync(executable), `release executable is missing: ${executable}`);
 
+  const fakeNpmPi = createFakeNpmPi();
   const port = await freeLoopbackPort();
   const existingBrowserArgs = process.env.WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS?.trim();
   const browserArgs = `--remote-debugging-port=${port} --remote-allow-origins=*`;
+  const childEnvironment = { ...process.env };
+  const pathKey = Object.keys(childEnvironment).find((key) => key.toUpperCase() === "PATH") ?? "PATH";
+  childEnvironment[pathKey] = `${fakeNpmPi};${childEnvironment[pathKey] ?? ""}`;
+  childEnvironment.PATHEXT = ".COM;.EXE;.BAT;.CMD";
   const child = spawn(executable, [], {
     env: {
-      ...process.env,
+      ...childEnvironment,
       WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: existingBrowserArgs
         ? `${existingBrowserArgs} ${browserArgs}`
         : browserArgs,
@@ -166,6 +260,24 @@ async function main() {
         }
       }
       try {
+        const catalog = await invoke("runtime_probe_project_models", {
+          request: {
+            projectPath: null,
+            projectTrust: "inherit",
+            contextFiles: "inherit"
+          }
+        });
+        results["runtime_probe_project_models"] =
+          catalog?.models?.length === 3 &&
+          catalog?.diagnostics?.scope === "global" &&
+          catalog?.diagnostics?.directNpmNode === true &&
+          String(catalog?.diagnostics?.invocationExecutable ?? "").toLowerCase().endsWith("node.exe")
+            ? "ok"
+            : "unexpected catalog: " + JSON.stringify(catalog);
+      } catch (error) {
+        results["runtime_probe_project_models"] = "error: " + String(error);
+      }
+      try {
         const event = "pi-wizard-packaged-acl-smoke";
         const handler = window.__TAURI_INTERNALS__.transformCallback(() => {});
         const eventId = await invoke("plugin:event|listen", {
@@ -190,6 +302,47 @@ async function main() {
       failedIpc.length === 0,
       `packaged IPC failed: ${JSON.stringify(Object.fromEntries(failedIpc))}`,
     );
+
+    const modelPicker = await client.evaluate(String.raw`(async () => {
+      const newRun = [...document.querySelectorAll("button")].find(
+        (candidate) => candidate.textContent.trim() === "New run"
+      );
+      if (!newRun) return { error: "New run navigation missing" };
+      newRun.click();
+      const deadline = Date.now() + 8_000;
+      let refresh;
+      while (Date.now() < deadline) {
+        refresh = [...document.querySelectorAll("button")].find((candidate) =>
+          candidate.textContent.includes("Refresh models") ||
+          candidate.textContent.includes("Reading Pi models")
+        );
+        const text = document.body.innerText;
+        if (refresh && text.includes("3 models available from Pi without project context")) break;
+        await new Promise((resolveDelay) => window.setTimeout(resolveDelay, 100));
+      }
+      const text = document.body.innerText;
+      const modelSelect = [...document.querySelectorAll("select")].find((candidate) =>
+        [...candidate.options].some((option) => option.textContent.includes("Alpha"))
+      );
+      return {
+        refreshFound: Boolean(refresh),
+        refreshDisabled: refresh?.disabled ?? null,
+        globalModelsVisible: text.includes("3 models available from Pi without project context"),
+        diagnosticsVisible: text.includes("Model diagnostics"),
+        selectableModels: modelSelect?.options.length ?? 0,
+        visibleError:
+          text.includes("Pi model discovery:") ||
+          text.includes("not allowed by ACL") ||
+          text.includes("Runtime update failed:")
+      };
+    })()`);
+    requireContract(!modelPicker.error, modelPicker.error ?? "model picker failed");
+    requireContract(modelPicker.refreshFound === true, "Refresh models button is missing");
+    requireContract(modelPicker.refreshDisabled === false, "Refresh models button is disabled without a project");
+    requireContract(modelPicker.globalModelsVisible === true, "global Pi models did not load before project selection");
+    requireContract(modelPicker.diagnosticsVisible === true, "model probe diagnostics are missing");
+    requireContract(modelPicker.selectableModels >= 4, "Pi model choices are not selectable in the packaged renderer");
+    requireContract(modelPicker.visibleError === false, "model picker shows a packaged discovery/runtime error");
 
     const navigation = await client.evaluate(String.raw`(async () => {
       const labels = [
@@ -233,10 +386,11 @@ async function main() {
     );
 
     console.log("packaged desktop WebView smoke passed");
-    console.log("verified: custom IPC, event listen/unlisten ACL, main navigation, no visible ACL/CSP/runtime-update failure");
+    console.log("verified: custom IPC, event listen/unlisten ACL, global model discovery with enabled refresh, main navigation, no visible ACL/CSP/runtime-update failure");
   } finally {
     client?.close();
     await stopChild(child);
+    rmSync(fakeNpmPi, { recursive: true, force: true });
   }
 }
 

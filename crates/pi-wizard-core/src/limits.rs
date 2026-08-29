@@ -890,7 +890,11 @@ impl Default for RuntimeLimits {
             // turns while still guaranteeing one cycle cannot wait forever.
             supervision_turn_deadline_ms: 15 * 60 * 1_000,
             environment_probe_deadline_ms: 2_000,
-            version_probe_deadline_ms: 2_000,
+            // Node-backed Pi installations can take more than two seconds to
+            // cold-start from an Explorer-launched GUI process. Version is
+            // diagnostic-only, so match the repository's installed-Pi smoke
+            // budget rather than creating a false desktop-readiness failure.
+            version_probe_deadline_ms: 5_000,
             startup_rpc_deadline_ms: 5_000,
             // Advisory only. This never retries, probes, cancels, or mutates a
             // run. The first later Pi event clears the quiet-stream marker.

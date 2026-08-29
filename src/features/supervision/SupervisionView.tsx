@@ -131,7 +131,6 @@ export function SupervisionView(props: SupervisionViewProps) {
 
         <ModelPicker
           projectPath={selectedProject()?.canonicalRoot ?? ""}
-          piReady={props.piReady}
           disabled={busy()}
           contextFiles="disabled"
           model={model()}

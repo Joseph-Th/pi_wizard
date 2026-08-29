@@ -4,13 +4,17 @@ use super::*;
 #[serde(rename_all = "camelCase")]
 pub(super) struct PiEnvironmentProbeReport {
     environment: LaunchEnvironmentDiagnostics,
-    version: PiVersion,
+    version: Option<PiVersion>,
+    version_error: Option<String>,
+    invocation_executable: PathBuf,
+    direct_npm_node: bool,
 }
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct ProbeProjectModelsRequest {
-    project_path: PathBuf,
+    #[serde(default)]
+    project_path: Option<PathBuf>,
     project_trust: ProjectTrustPolicy,
     #[serde(default)]
     context_files: ContextFilesPolicy,
@@ -20,6 +24,18 @@ pub(super) struct ProbeProjectModelsRequest {
 #[serde(rename_all = "camelCase")]
 pub(super) struct ProjectModelCatalog {
     models: Vec<ModelSummary>,
+    diagnostics: ProjectModelProbeDiagnostics,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct ProjectModelProbeDiagnostics {
+    scope: String,
+    probe_root: PathBuf,
+    path_source: pi_wizard_core::environment::EnvironmentSource,
+    logical_pi: PathBuf,
+    invocation_executable: PathBuf,
+    direct_npm_node: bool,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -273,9 +289,10 @@ pub(super) async fn probe_rpc_response(
     .map_err(|_| format!("Pi launch-options probe timed out waiting for {request_id}"))?
 }
 
-async fn probe_project_models(
+async fn probe_models_at_root(
     environment: &ResolvedLaunchEnvironment,
-    project: &ProjectBinding,
+    probe_root: &Path,
+    scope: &str,
     project_trust: ProjectTrustPolicy,
     context_files: ContextFilesPolicy,
     limits: RuntimeLimits,
@@ -289,7 +306,7 @@ async fn probe_project_models(
     )?;
     let mut spec = PiLaunchSpec::new(
         environment.pi_executable().to_path_buf(),
-        project.canonical_root(),
+        probe_root,
         project_trust,
     );
     selection.apply(&mut spec);
@@ -303,7 +320,20 @@ async fn probe_project_models(
         .and_then(|response| {
             response
                 .available_models(limits)
-                .map(|models| ProjectModelCatalog { models })
+                .map(|models| ProjectModelCatalog {
+                    models,
+                    diagnostics: ProjectModelProbeDiagnostics {
+                        scope: scope.to_owned(),
+                        probe_root: probe_root.to_path_buf(),
+                        path_source: environment.diagnostics().path_source,
+                        logical_pi: environment.pi_executable().to_path_buf(),
+                        invocation_executable: environment
+                            .pi_invocation()
+                            .executable()
+                            .to_path_buf(),
+                        direct_npm_node: environment.pi_invocation().is_direct_npm_node(),
+                    },
+                })
                 .map_err(|error| error.to_string())
         });
     let termination = process
@@ -335,15 +365,42 @@ pub(super) async fn runtime_probe_project_models(
     request: ProbeProjectModelsRequest,
 ) -> Result<ProjectModelCatalog, String> {
     let profile = runtime.launch_profile().await?;
-    let project = runtime.project_binding(request.project_path).await?;
-    probe_project_models(
+    let (root, scope, trust, context_files) = match request.project_path {
+        Some(path) => {
+            let project = runtime.project_binding(path).await?;
+            (
+                project.canonical_root().to_path_buf(),
+                "project",
+                request.project_trust,
+                request.context_files,
+            )
+        }
+        None => (
+            std::env::temp_dir(),
+            "global",
+            ProjectTrustPolicy::Ignore,
+            ContextFilesPolicy::Disabled,
+        ),
+    };
+    probe_models_at_root(
         &profile.environment,
-        &project,
-        request.project_trust,
-        request.context_files,
+        &root,
+        scope,
+        trust,
+        context_files,
         runtime.limits,
     )
     .await
+    .map_err(|error| {
+        let invocation = profile.environment.pi_invocation();
+        format!(
+            "Pi model probe failed at {scope} root {} using logical Pi {} via {} (direct npm Node={}): {error}",
+            root.display(),
+            profile.environment.pi_executable().display(),
+            invocation.executable().display(),
+            invocation.is_direct_npm_node(),
+        )
+    })
 }
 
 #[tauri::command]
@@ -1732,9 +1789,21 @@ pub(super) async fn probe_pi_environment(
     runtime: tauri::State<'_, DesktopRuntime>,
 ) -> Result<PiEnvironmentProbeReport, String> {
     let profile = runtime.launch_profile().await?;
+    let version_result = probe_pi_version(&profile.environment, runtime.limits).await;
+    let (version, version_error) = match version_result {
+        Ok(version) => (Some(version), None),
+        Err(error) => (None, Some(error.to_string())),
+    };
     Ok(PiEnvironmentProbeReport {
         environment: profile.environment.diagnostics().clone(),
-        version: profile.version,
+        version,
+        version_error,
+        invocation_executable: profile
+            .environment
+            .pi_invocation()
+            .executable()
+            .to_path_buf(),
+        direct_npm_node: profile.environment.pi_invocation().is_direct_npm_node(),
     })
 }
 
@@ -2359,14 +2428,14 @@ mod tests {
     async fn project_model_probe_returns_multiple_pi_models_independently() {
         let fixture = WorkflowFakePiFixture::new("model-probe-integration");
         let environment = fixture.environment();
-        let project = ProjectBinding::register(&fixture.root).expect("register fixture project");
         let limits = RuntimeLimits {
             startup_rpc_deadline_ms: 2_000,
             ..RuntimeLimits::default()
         };
-        let catalog = probe_project_models(
+        let catalog = probe_models_at_root(
             &environment,
-            &project,
+            &fixture.root,
+            "project",
             ProjectTrustPolicy::Inherit,
             ContextFilesPolicy::Inherit,
             limits,
@@ -2377,6 +2446,30 @@ mod tests {
         assert_eq!(catalog.models[0].id, "fake-model");
         assert_eq!(catalog.models[1].id, "alternate-model");
         assert_eq!(catalog.models[2].provider, "other-provider");
+        assert_eq!(catalog.diagnostics.scope, "project");
+        assert_eq!(catalog.diagnostics.probe_root, fixture.root);
+    }
+
+    #[test]
+    fn model_probe_wire_shape_allows_global_discovery_without_project_selection() {
+        let global: ProbeProjectModelsRequest = serde_json::from_value(json!({
+            "projectPath": null,
+            "projectTrust": "inherit",
+            "contextFiles": "inherit"
+        }))
+        .expect("deserialize global model probe");
+        assert!(global.project_path.is_none());
+
+        let project: ProbeProjectModelsRequest = serde_json::from_value(json!({
+            "projectPath": r"C:\projects\pi-wizard",
+            "projectTrust": "approve",
+            "contextFiles": "disabled"
+        }))
+        .expect("deserialize project model probe");
+        assert_eq!(
+            project.project_path,
+            Some(PathBuf::from(r"C:\projects\pi-wizard"))
+        );
     }
 
     #[test]

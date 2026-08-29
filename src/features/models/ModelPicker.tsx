@@ -17,7 +17,6 @@ import {
 
 interface ModelPickerProps {
   projectPath: string;
-  piReady: boolean;
   disabled?: boolean;
   projectTrust?: ProjectTrustPolicy;
   contextFiles?: ContextFilesPolicy;
@@ -67,17 +66,13 @@ export function ModelPicker(props: ModelPickerProps) {
 
   const loadModels = async () => {
     const path = props.projectPath.trim();
-    if (!path || !props.piReady) {
-      setDiscovery(undefined);
-      return undefined;
-    }
     const sequence = ++modelSequence;
     setModelsLoading(true);
     setModelError(undefined);
     try {
       const snapshot = await invokeDesktop<ProjectModelCatalog>("runtime_probe_project_models", {
         request: {
-          projectPath: path,
+          projectPath: path || null,
           projectTrust: props.projectTrust ?? "inherit",
           contextFiles: props.contextFiles ?? "inherit",
         },
@@ -98,7 +93,7 @@ export function ModelPicker(props: ModelPickerProps) {
 
   const probeSelection = async (selection: ModelSelection | undefined) => {
     const path = props.projectPath.trim();
-    if (!path || !props.piReady) {
+    if (!path) {
       setOptions(undefined);
       return undefined;
     }
@@ -135,7 +130,6 @@ export function ModelPicker(props: ModelPickerProps) {
   createEffect(() => {
     const path = props.projectPath.trim();
     const key = [
-      props.piReady ? "ready" : "not-ready",
       path,
       props.projectTrust ?? "inherit",
       props.contextFiles ?? "inherit",
@@ -148,8 +142,8 @@ export function ModelPicker(props: ModelPickerProps) {
     setModelError(undefined);
     setSelectionError(undefined);
     void loadCatalog();
-    if (props.piReady && path) {
-      void loadModels();
+    void loadModels();
+    if (path) {
       void probeSelection(undefined);
     }
   });
@@ -254,9 +248,7 @@ export function ModelPicker(props: ModelPickerProps) {
           disabled={
             Boolean(props.disabled) ||
             modelsLoading() ||
-            selectionLoading() ||
-            !props.piReady ||
-            !props.projectPath.trim()
+            selectionLoading()
           }
           onClick={() =>
             void Promise.all([loadCatalog(), loadModels(), probeSelection(props.model)])
@@ -317,9 +309,25 @@ export function ModelPicker(props: ModelPickerProps) {
 
       <Show when={discovery()}>
         {(snapshot) => (
-          <p class="model-picker-note">
-            {snapshot().models.length} model{snapshot().models.length === 1 ? "" : "s"} available from Pi.
-          </p>
+          <>
+            <p class="model-picker-note">
+              {snapshot().models.length} model{snapshot().models.length === 1 ? "" : "s"} available from Pi
+              {snapshot().diagnostics.scope === "global" ? " without project context" : " for this project"}.
+            </p>
+            <details class="model-catalog-editor">
+              <summary>Model diagnostics</summary>
+              <div class="model-picker-note">
+                <div>Scope: {snapshot().diagnostics.scope}</div>
+                <div title={snapshot().diagnostics.probeRoot}>Probe root: {snapshot().diagnostics.probeRoot}</div>
+                <div>Environment: {snapshot().diagnostics.pathSource}</div>
+                <div title={snapshot().diagnostics.logicalPi}>Logical Pi: {snapshot().diagnostics.logicalPi}</div>
+                <div title={snapshot().diagnostics.invocationExecutable}>
+                  Invocation: {snapshot().diagnostics.invocationExecutable}
+                  {snapshot().diagnostics.directNpmNode ? " · direct npm Node" : ""}
+                </div>
+              </div>
+            </details>
+          </>
         )}
       </Show>
 

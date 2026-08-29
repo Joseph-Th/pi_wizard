@@ -60,7 +60,10 @@ export interface PiProbeReport {
   };
   version: {
     display: string;
-  };
+  } | null;
+  versionError: string | null;
+  invocationExecutable: string;
+  directNpmNode: boolean;
 }
 
 export function fileToBase64(file: File): Promise<string> {

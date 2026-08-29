@@ -448,7 +448,6 @@ export function ProjectLauncher(props: {
         </div>
         <ModelPicker
           projectPath={projectPath()}
-          piReady={props.piReady}
           disabled={starting()}
           projectTrust={projectTrust()}
           contextFiles={contextFiles()}
@@ -461,7 +460,7 @@ export function ProjectLauncher(props: {
           }
           onThinkingChange={setLaunchThinking}
           label="New-run model and thinking"
-          description="Pi models load automatically for the selected project; saved custom identities are merged into the same picker."
+          description="Pi models load globally even before a project is selected, then refresh in project context when a path is available; saved custom identities are merged into the same picker."
         />
         <label class="initial-task-field">
           <span>Initial task</span>

@@ -34,7 +34,9 @@ pub async fn probe_pi_version(
         Duration::from_millis(limits.version_probe_deadline_ms),
     )
     .await
-    .map_err(|_| PiVersionProbeError::CommandFailed)?;
+    .map_err(|error| PiVersionProbeError::CommandFailed {
+        detail: error.to_string(),
+    })?;
 
     if !output.status.success() {
         return Err(PiVersionProbeError::NonZeroExit {
@@ -97,8 +99,8 @@ fn parse_component(value: Option<&str>) -> Result<u64, PiVersionProbeError> {
 
 #[derive(Debug, Error)]
 pub enum PiVersionProbeError {
-    #[error("Pi version probe command failed")]
-    CommandFailed,
+    #[error("Pi version probe command failed: {detail}")]
+    CommandFailed { detail: String },
     #[error("Pi version probe exited unsuccessfully with code {code:?}")]
     NonZeroExit { code: Option<i32> },
     #[error("Pi version probe exceeded {limit} bytes")]
