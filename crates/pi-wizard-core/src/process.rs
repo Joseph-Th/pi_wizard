@@ -207,8 +207,10 @@ pub fn spawn_pi_process(
         });
     }
 
-    let mut command = Command::new(&launch_executable);
+    let invocation = environment.pi_invocation();
+    let mut command = Command::new(invocation.executable());
     command
+        .args(invocation.prefix_args())
         .args(spec.args())
         .current_dir(spec.cwd())
         .stdin(Stdio::piped())

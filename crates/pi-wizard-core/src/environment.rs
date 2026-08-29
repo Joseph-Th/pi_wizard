@@ -235,6 +235,31 @@ pub struct LaunchEnvironmentDiagnostics {
 pub struct ResolvedLaunchEnvironment {
     variables: BTreeMap<OsString, OsString>,
     diagnostics: LaunchEnvironmentDiagnostics,
+    pi_invocation: ResolvedPiInvocation,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResolvedPiInvocation {
+    executable: PathBuf,
+    prefix_args: Vec<OsString>,
+    direct_npm_node: bool,
+}
+
+impl ResolvedPiInvocation {
+    #[must_use]
+    pub fn executable(&self) -> &Path {
+        &self.executable
+    }
+
+    #[must_use]
+    pub fn prefix_args(&self) -> &[OsString] {
+        &self.prefix_args
+    }
+
+    #[must_use]
+    pub const fn is_direct_npm_node(&self) -> bool {
+        self.direct_npm_node
+    }
 }
 
 impl ResolvedLaunchEnvironment {
@@ -251,6 +276,11 @@ impl ResolvedLaunchEnvironment {
     #[must_use]
     pub fn pi_executable(&self) -> &Path {
         &self.diagnostics.pi.path
+    }
+
+    #[must_use]
+    pub const fn pi_invocation(&self) -> &ResolvedPiInvocation {
+        &self.pi_invocation
     }
 
     #[must_use]
@@ -335,6 +365,7 @@ pub fn resolve_launch_environment(
     // was applied.
     normalize_path_key(&mut selected);
 
+    let pi_invocation = resolve_pi_invocation(&pi.path, &selected)?;
     let git = find_executable(&selected, "git")?.map(|path| ResolvedExecutable {
         path,
         source: ExecutableSource::Path,
@@ -348,6 +379,52 @@ pub fn resolve_launch_environment(
     Ok(ResolvedLaunchEnvironment {
         variables: selected,
         diagnostics,
+        pi_invocation,
+    })
+}
+
+fn resolve_pi_invocation(
+    logical_pi: &Path,
+    environment: &BTreeMap<OsString, OsString>,
+) -> Result<ResolvedPiInvocation, EnvironmentResolutionError> {
+    #[cfg(windows)]
+    {
+        let extension = logical_pi
+            .extension()
+            .and_then(OsStr::to_str)
+            .unwrap_or_default();
+        if (extension.eq_ignore_ascii_case("cmd") || extension.eq_ignore_ascii_case("ps1"))
+            && let Some(parent) = logical_pi.parent()
+        {
+            let cli = parent
+                .join("node_modules")
+                .join("@earendil-works")
+                .join("pi-coding-agent")
+                .join("dist")
+                .join("bundle")
+                .join("cli.js");
+            if cli.is_file() {
+                let adjacent_node = parent.join("node.exe");
+                let node = if adjacent_node.is_file() {
+                    canonical_usable_executable(&adjacent_node).ok()
+                } else {
+                    find_executable(environment, "node")?
+                };
+                if let Some(node) = node {
+                    return Ok(ResolvedPiInvocation {
+                        executable: node,
+                        prefix_args: vec![cli.into_os_string()],
+                        direct_npm_node: true,
+                    });
+                }
+            }
+        }
+    }
+    let _ = environment;
+    Ok(ResolvedPiInvocation {
+        executable: logical_pi.to_path_buf(),
+        prefix_args: Vec::new(),
+        direct_npm_node: false,
     })
 }
 
@@ -599,6 +676,58 @@ mod tests {
             resolved.git_executable(),
             Some(git.canonicalize().expect("git").as_path())
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn standard_npm_pi_shim_resolves_to_direct_node_cli_invocation() {
+        let fixture = Fixture::new("npm-direct");
+        let bin = fixture.root.join("npm");
+        fs::create_dir_all(
+            bin.join("node_modules")
+                .join("@earendil-works")
+                .join("pi-coding-agent")
+                .join("dist")
+                .join("bundle"),
+        )
+        .expect("create npm package layout");
+        let pi = bin.join("pi.cmd");
+        File::create(&pi).expect("pi shim");
+        let node = bin.join("node.exe");
+        File::create(&node).expect("node executable");
+        let cli = bin
+            .join("node_modules")
+            .join("@earendil-works")
+            .join("pi-coding-agent")
+            .join("dist")
+            .join("bundle")
+            .join("cli.js");
+        File::create(&cli).expect("Pi CLI entrypoint");
+
+        let mut desktop = BTreeMap::new();
+        desktop.insert(OsString::from("PATH"), fixture.path(&["npm"]));
+        desktop.insert(OsString::from("PATHEXT"), OsString::from(".EXE;.CMD"));
+        let resolved = resolve_launch_environment(LaunchEnvironmentInput {
+            desktop_environment: desktop,
+            ..LaunchEnvironmentInput::default()
+        })
+        .expect("resolve npm Pi");
+
+        assert_eq!(
+            resolved.pi_executable(),
+            pi.canonicalize().expect("logical Pi")
+        );
+        assert_eq!(
+            resolved.pi_invocation().executable(),
+            node.canonicalize().expect("direct Node")
+        );
+        assert_eq!(
+            resolved.pi_invocation().prefix_args(),
+            [cli.canonicalize()
+                .expect("canonical Pi CLI entrypoint")
+                .into_os_string()]
+        );
+        assert!(resolved.pi_invocation().is_direct_npm_node());
     }
 
     #[test]

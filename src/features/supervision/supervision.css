@@ -1,0 +1,78 @@
+.supervision-surface,
+.supervision-config,
+.supervision-history {
+  display: grid;
+  gap: 0.9rem;
+}
+
+.supervision-config,
+.supervision-session {
+  padding: 0.9rem;
+  border: 1px solid color-mix(in srgb, CanvasText 14%, transparent);
+  border-radius: 0.6rem;
+  background: color-mix(in srgb, CanvasText 2%, transparent);
+}
+
+.supervision-grid {
+  display: grid;
+  grid-template-columns: minmax(14rem, 2fr) minmax(10rem, 1fr);
+  gap: 0.65rem;
+}
+
+.supervision-grid label {
+  display: grid;
+  gap: 0.3rem;
+  min-width: 0;
+}
+
+.supervision-grid label > span,
+.supervision-note,
+.supervision-session small,
+.supervision-session header span {
+  color: GrayText;
+  font-size: 0.75rem;
+}
+
+.supervision-actions {
+  display: flex;
+  gap: 0.7rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.supervision-history > h2 {
+  margin: 0;
+}
+
+.supervision-session {
+  display: grid;
+  gap: 0.65rem;
+}
+
+.supervision-session > header {
+  display: flex;
+  justify-content: space-between;
+  align-items: start;
+  gap: 0.8rem;
+}
+
+.supervision-session > header > div {
+  display: flex;
+  gap: 0.35rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.supervision-session > header > div:first-child {
+  display: grid;
+}
+
+@media (max-width: 760px) {
+  .supervision-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .supervision-session > header {
+    flex-direction: column;
+  }
+}

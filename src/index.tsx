@@ -1,14 +1,16 @@
 import { ErrorBoundary, onCleanup, onMount } from "solid-js";
 import { render } from "solid-js/web";
 
-import { App } from "./App";
+import { App } from "./app/App";
 import {
   boundRendererErrorDetail,
   parseRendererCrashCount,
   rendererRecoveryPlan,
   STABLE_RENDERER_WINDOW_MS,
 } from "./rendererRecoveryPolicy";
-import "./styles.css";
+import "./styles/app.css";
+import "./features/models/models.css";
+import "./features/supervision/supervision.css";
 
 const RENDERER_CRASH_COUNT_KEY = "pi-wizard:renderer-crash-count";
 

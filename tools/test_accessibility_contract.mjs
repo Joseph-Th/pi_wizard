@@ -2,38 +2,62 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 const root = resolve(import.meta.dirname, "..");
-const app = readFileSync(resolve(root, "src", "App.tsx"), "utf8");
-const styles = readFileSync(resolve(root, "src", "styles.css"), "utf8");
+const app = readFileSync(resolve(root, "src", "app", "App.tsx"), "utf8");
+const automation = readFileSync(resolve(root, "src", "features", "automation", "AutomationView.tsx"), "utf8");
+const supervision = readFileSync(resolve(root, "src", "features", "supervision", "SupervisionView.tsx"), "utf8");
+const models = [
+  readFileSync(resolve(root, "src", "features", "models", "ModelPicker.tsx"), "utf8"),
+  readFileSync(resolve(root, "src", "features", "models", "types.ts"), "utf8"),
+].join("\n");
+const projects = [
+  readFileSync(resolve(root, "src", "features", "projects", "ProjectLauncher.tsx"), "utf8"),
+  readFileSync(resolve(root, "src", "features", "projects", "ProjectManager.tsx"), "utf8"),
+].join("\n");
+const sessions = [
+  readFileSync(resolve(root, "src", "features", "sessions", "SessionCatalogBrowser.tsx"), "utf8"),
+  readFileSync(resolve(root, "src", "features", "sessions", "RecentSessionsView.tsx"), "utf8"),
+].join("\n");
+const attention = [
+  readFileSync(resolve(root, "src", "features", "attention", "ExtensionDialogCard.tsx"), "utf8"),
+  readFileSync(resolve(root, "src", "features", "attention", "NeedsAttentionView.tsx"), "utf8"),
+].join("\n");
+const desktop = readFileSync(resolve(root, "src", "lib", "desktop.ts"), "utf8");
+const ui = [app, automation, supervision, models, projects, sessions, attention].join("\n");
+const styles = [
+  readFileSync(resolve(root, "src", "styles", "app.css"), "utf8"),
+  readFileSync(resolve(root, "src", "features", "models", "models.css"), "utf8"),
+  readFileSync(resolve(root, "src", "features", "supervision", "supervision.css"), "utf8"),
+].join("\n");
 
 function requireContract(condition, detail) {
   if (!condition) throw new Error(`accessibility contract failed: ${detail}`);
 }
 
-requireContract(app.includes('href="#main-content"'), "keyboard skip link is required");
-requireContract(app.includes('id="main-content"'), "skip-link destination is required");
+requireContract(ui.includes('href="#main-content"'), "keyboard skip link is required");
+requireContract(ui.includes('id="main-content"'), "skip-link destination is required");
 requireContract(
-  app.includes('aria-live="polite"') || app.includes('class="runtime-details"'),
+  ui.includes('aria-live="polite"') || ui.includes('class="runtime-details"'),
   "runtime status must remain available from the shell",
 );
 requireContract(
-  app.includes('aria-keyshortcuts="Control+Enter Meta+Enter ArrowUp ArrowDown"'),
+  ui.includes('aria-keyshortcuts="Control+Enter Meta+Enter ArrowUp ArrowDown"'),
   "composer send and command-palette keyboard shortcuts must be discoverable",
 );
 requireContract(
-  app.includes("commandSuggestionIndex") &&
-    app.includes('event.key === "ArrowDown" || event.key === "ArrowUp"') &&
-    app.includes("stageCommandSuggestion(selected)") &&
-    app.includes('class={index() === commandSuggestionIndex() ? "selected" : undefined}') &&
-    app.includes('data-command-index={index()}') &&
-    app.includes('scrollIntoView({ block: "nearest" })'),
+  ui.includes("commandSuggestionIndex") &&
+    ui.includes('event.key === "ArrowDown" || event.key === "ArrowUp"') &&
+    ui.includes("stageCommandSuggestion(selected)") &&
+    ui.includes('class={index() === commandSuggestionIndex() ? "selected" : undefined}') &&
+    ui.includes('data-command-index={index()}') &&
+    ui.includes('scrollIntoView({ block: "nearest" })'),
   "bounded Pi slash-command suggestions must support keyboard navigation, keep the active row visible, and avoid a separate command-history store",
 );
 requireContract(
-  app.includes('aria-label="Choose draft images"'),
+  ui.includes('aria-label="Choose draft images"'),
   "hidden draft image picker must have an accessible name",
 );
 requireContract(
-  app.split('aria-labelledby={`dialog-${request().id}`}').length - 1 >= 2,
+  ui.split('aria-labelledby={`dialog-${request().id}`}').length - 1 >= 2,
   "extension input and editor controls must inherit the dialog title",
 );
 requireContract(styles.includes(":focus-visible"), "visible keyboard focus style is required");
@@ -41,314 +65,331 @@ requireContract(
   styles.includes("prefers-reduced-motion: reduce"),
   "reduced-motion preference must be honored",
 );
-requireContract(app.includes('class="app-shell"'), "desktop shell must expose sidebar/main navigation");
-requireContract(app.includes('class="run-grid"'), "dashboard must render compact run cards");
+requireContract(ui.includes('class="app-shell"'), "desktop shell must expose sidebar/main navigation");
+requireContract(ui.includes('class="run-grid"'), "dashboard must render compact run cards");
 requireContract(
-  app.includes('view() === "automation"') &&
-    app.includes("function AutomationView") &&
-    app.includes('aria-label="Automation chains"') &&
-    app.includes('aria-label="Ordered prompts"') &&
-    app.includes('"runtime_save_automation_chain"') &&
-    app.includes('"runtime_start_automation"') &&
-    app.includes('"runtime_cancel_automation"') &&
-    app.includes('"runtime_automation_executions"') &&
-    app.includes('"automation://changed"') &&
-    app.includes('if (view() !== "automation") return;') &&
-    app.includes('if (payload === "catalog") void refreshAutomation();') &&
-    app.includes("else void refreshAutomationExecutions();") &&
-    app.includes('if (view() === "automation") void refreshAutomation();') &&
-    app.includes("promptPreview") &&
-    app.includes("promptTruncated") &&
-    app.includes("const refreshRuntimeState = async () =>") &&
-    app.includes("refreshHydration(),\n      refreshCapacity(),\n    ]);") &&
-    app.includes("Git-isolated workers") &&
-    app.includes("LLM supervisor · uses one live slot") &&
+  ui.includes('view() === "automation"') &&
+    ui.includes("function AutomationView") &&
+    ui.includes('aria-label="Automation chains"') &&
+    ui.includes('aria-label="Ordered prompts"') &&
+    ui.includes('"runtime_save_automation_chain"') &&
+    ui.includes('"runtime_start_automation"') &&
+    ui.includes('"runtime_cancel_automation"') &&
+    ui.includes('"runtime_automation_executions"') &&
+    ui.includes('"automation://changed"') &&
+    ui.includes('if (view() !== "automation") return;') &&
+    ui.includes('if (payload === "catalog") void refreshAutomation();') &&
+    ui.includes("else void refreshAutomationExecutions();") &&
+    ui.includes('if (view() === "automation") void refreshAutomation();') &&
+    ui.includes("promptPreview") &&
+    ui.includes("promptTruncated") &&
+    ui.includes("const refreshRuntimeState = async () =>") &&
+    ui.includes("refreshHydration(),\n      refreshCapacity(),\n    ]);") &&
+    ui.includes("Git-isolated workers") &&
+    !automation.includes("supervisor") &&
+    ui.includes('view() === "supervision"') &&
+    supervision.includes('"runtime_start_supervision"') &&
+    supervision.includes('"runtime_stop_supervision"') &&
+    app.includes('"supervision://changed"') &&
     styles.includes(".automation-layout") &&
-    styles.includes(".automation-step"),
-  "finite prompt chains and supervised multi-run orchestration must be first-class keyboard-accessible navigation with on-demand catalog hydration and execution-only event refreshes rather than polling",
+    styles.includes(".automation-step") &&
+    styles.includes(".supervision-surface"),
+  "finite Automation and independent Supervision must be separate first-class keyboard-accessible navigation surfaces driven by backend invalidation events rather than polling",
 );
 requireContract(
-  app.includes('when={view() === "run"}') && app.includes('when={selectedRun()}'),
+  models.includes('"runtime_probe_project_launch_options"') &&
+    models.includes('"runtime_model_catalog"') &&
+    models.includes('"runtime_save_custom_model"') &&
+    models.includes('"runtime_delete_custom_model"') &&
+    projects.includes("<ModelPicker") &&
+    automation.includes("<ModelPicker") &&
+    supervision.includes("<ModelPicker") &&
+    automation.includes("provider: model()?.provider ?? null") &&
+    supervision.includes("provider: model()?.provider ?? null"),
+  "New Run, Automation, and Supervision must share Pi-discovered plus durable custom model selection instead of hard-coding Pi default",
+);
+requireContract(
+  ui.includes('when={view() === "run"}') && ui.includes('when={selectedRun()}'),
   "only the selected run should mount the detailed session surface",
 );
 requireContract(
-  app.includes('"runtime_list_projects"') &&
-    app.includes('"runtime_relocate_project"') &&
-    app.includes('"runtime_remove_project"'),
+  ui.includes('"runtime_list_projects"') &&
+    ui.includes('"runtime_relocate_project"') &&
+    ui.includes('"runtime_remove_project"'),
   "project list, relocation, and registration removal must be reachable from the renderer",
 );
 requireContract(
-  app.includes("initialTask: initialTask().trim() || null"),
+  ui.includes("initialTask: initialTask().trim() || null"),
   "new runs must be able to submit their initial task during launch",
 );
 requireContract(
-  app.includes('"runtime_probe_project_launch_options"') &&
-    app.includes("New-run model and thinking") &&
-    app.includes("provider: launchModel?.provider ?? null") &&
-    app.includes("thinking: launchThinking() || null") &&
-    app.includes("clearQueueSupported: boolean") &&
-    app.includes("does not expose RPC queue clearing") &&
-    app.includes("terminates the exact Pi process"),
+  ui.includes('"runtime_probe_project_launch_options"') &&
+    ui.includes("New-run model and thinking") &&
+    ui.includes("provider: launchModel?.provider ?? null") &&
+    ui.includes("thinking: launchThinking() || null") &&
+    ui.includes("clearQueueSupported: boolean") &&
+    ui.includes("does not expose RPC queue clearing") &&
+    ui.includes("terminates the exact owned Pi process"),
   "new-run model/thinking discovery must also surface the current Pi build's reusable Stop capability before the initial task is submitted",
 );
 requireContract(
-  app.includes("type ContextFilesPolicy") &&
-    app.includes("Disable context files for this launch") &&
-    app.includes("contextFiles: contextFiles()"),
+  ui.includes("type ContextFilesPolicy") &&
+    ui.includes("Disable context files for this launch") &&
+    ui.includes("contextFiles: contextFiles()"),
   "context-file loading must be an explicit launch policy separate from project-resource trust",
 );
 requireContract(
-  app.includes('"runtime_probe_project_resources"') &&
-    app.includes("Check project resources") &&
-    app.includes("Protected Pi resources detected") &&
-    app.includes("Use Pi saved/default trust leaves the final decision to Pi") &&
-    app.includes("context files remain a separate choice"),
+  ui.includes('"runtime_probe_project_resources"') &&
+    ui.includes("Check project resources") &&
+    ui.includes("Protected Pi resources detected") &&
+    ui.includes("Use Pi saved/default trust leaves the final decision to Pi") &&
+    ui.includes("context files remain a separate choice"),
   "launch trust must offer a bounded protected-resource preflight without pretending to own Pi saved/default trust resolution",
 );
 requireContract(
-  app.includes("nextCursor: SessionCatalogCursor | null") &&
-    app.includes("nextSessionPage") &&
-    app.includes("previousSessionPage") &&
-    app.includes("Next older") &&
-    app.includes("sessionPagingNeedsRestart") &&
-    app.includes("Restart from newest"),
+  ui.includes("nextCursor: SessionCatalogCursor | null") &&
+    ui.includes("nextSessionPage") &&
+    ui.includes("previousSessionPage") &&
+    ui.includes("Next older") &&
+    ui.includes("sessionPagingNeedsRestart") &&
+    ui.includes("Restart from newest"),
   "bounded project-session search must page to older candidates instead of permanently omitting them",
 );
 requireContract(
-  app.includes("function SessionCatalogBrowser") &&
-    app.split("<SessionCatalogBrowser").length - 1 >= 2 &&
-    app.includes('view() === "sessions"') &&
-    app.includes("Recent sessions") &&
-    app.includes("Nothing is scanned while this view is") &&
-    app.includes("Resume launch options"),
+  ui.includes("function SessionCatalogBrowser") &&
+    ui.split("<SessionCatalogBrowser").length - 1 >= 2 &&
+    ui.includes('view() === "sessions"') &&
+    ui.includes("Recent sessions") &&
+    ui.includes("Nothing is scanned while this view is") &&
+    ui.includes("Resume launch options"),
   "historical sessions must have a first-class on-demand navigation surface that reuses the bounded resume browser",
 );
 requireContract(
-  app.includes('view() === "attention"') &&
-    app.includes("function NeedsAttentionView") &&
-    app.includes('class="nav-count"') &&
-    app.includes('class="attention-queue"') &&
-    app.includes("<ExtensionDialogCard") &&
-    app.includes("Answer extension requests across live Pi runs") &&
-    app.includes("remainingTimeoutMs ?? Number.POSITIVE_INFINITY"),
+  ui.includes('view() === "attention"') &&
+    ui.includes("function NeedsAttentionView") &&
+    ui.includes('class="nav-count"') &&
+    ui.includes('class="attention-queue"') &&
+    ui.includes("<ExtensionDialogCard") &&
+    ui.includes("Answer extension requests across live Pi runs") &&
+    ui.includes("remainingTimeoutMs ?? Number.POSITIVE_INFINITY"),
   "Needs Attention must be a first-class global queue whose actions keep exact backend request ownership",
 );
 requireContract(
-  app.includes("function dialogTimeoutLabel") &&
-    app.includes("remaining at last sync") &&
-    app.includes("No Pi-side timeout"),
+  ui.includes("function dialogTimeoutLabel") &&
+    ui.includes("remaining at last sync") &&
+    ui.includes("No Pi-side timeout"),
   "extension request timeout metadata must be visible without introducing a renderer countdown loop",
 );
 requireContract(
-  app.includes('"runtime_diagnostics"') &&
-    app.includes("Refresh diagnostics") &&
-    app.includes("No diagnostic polling or logging") &&
-    app.includes('data-timeline-row="true"') &&
-    app.includes("uiDroppedDisplayFrames") &&
-    app.includes("activeSessionCatalogJobs") &&
-    app.includes("PerformanceObserver") &&
-    app.includes("import.meta.env.DEV"),
+  ui.includes('"runtime_diagnostics"') &&
+    ui.includes("Refresh diagnostics") &&
+    ui.includes("No diagnostic polling or logging") &&
+    ui.includes('data-timeline-row="true"') &&
+    ui.includes("uiDroppedDisplayFrames") &&
+    ui.includes("activeSessionCatalogJobs") &&
+    ui.includes("PerformanceObserver") &&
+    ui.includes("import.meta.env.DEV"),
   "runtime diagnostics must be explicit pull-based bounded counters with mounted-row and development long-task measurements, not another polling loop",
 );
 requireContract(
-  app.includes('class="run-identity-strip"') &&
-    app.includes("runModelLabel(run())") &&
-    app.includes("runThinkingLabel(run())") &&
-    app.includes("runModelLabel(run)}") &&
-    app.includes("runThinkingLabel(run)}"),
+  ui.includes('class="run-identity-strip"') &&
+    ui.includes("runModelLabel(run())") &&
+    ui.includes("runThinkingLabel(run())") &&
+    ui.includes("runModelLabel(run)}") &&
+    ui.includes("runThinkingLabel(run)}"),
   "run and dashboard identity surfaces must keep model and thinking state visible without opening secondary controls",
 );
 requireContract(
-  app.includes("compacting: boolean") &&
-    app.includes("followUp: number") &&
-    app.includes('return "compacting"') &&
-    app.includes('return "queued"') &&
-    app.includes("runActivityLabel(run)") &&
-    app.includes("function runHasStoppableActivity") &&
-    app.includes("runHasStoppableActivity(run)"),
+  ui.includes("compacting: boolean") &&
+    ui.includes("followUp: number") &&
+    ui.includes('return "compacting"') &&
+    ui.includes('return "queued"') &&
+    ui.includes("runActivityLabel(run)") &&
+    ui.includes("function runHasStoppableActivity") &&
+    ui.includes("runHasStoppableActivity(run)"),
   "dashboard orchestration state must project bounded compaction/queue/retry state and keep Stop reachable across stoppable Pi activity",
 );
 requireContract(
-  app.includes("startedUnixMs: number") &&
-    app.includes("terminalUnixMs: number | null") &&
-    app.includes("runElapsedLabel(run, elapsedClockUnixMs())") &&
-    app.includes("elapsedClockTimer = window.setInterval") &&
-    app.includes('known().changeRevision === run.run.changeRevision ? "Last review" : "Review stale"') &&
-    app.includes("onReviewSummary={rememberChangeSummary}"),
+  ui.includes("startedUnixMs: number") &&
+    ui.includes("terminalUnixMs: number | null") &&
+    ui.includes("runElapsedLabel(run, elapsedClockUnixMs())") &&
+    ui.includes("elapsedClockTimer = window.setInterval") &&
+    ui.includes('known().changeRevision === run.run.changeRevision ? "Last review" : "Review stale"') &&
+    ui.includes("onReviewSummary={rememberChangeSummary}"),
   "dashboard cards must show backend-owned elapsed time and reuse already-known change summaries without polling Git",
 );
 requireContract(
-  app.includes("const RUNTIME_HYDRATION_SCHEMA_VERSION = 9") &&
-    app.includes("snapshot.schemaVersion !== RUNTIME_HYDRATION_SCHEMA_VERSION") &&
-    app.includes("Unsupported runtime hydration schema"),
+  ui.includes("const RUNTIME_HYDRATION_SCHEMA_VERSION = 9") &&
+    ui.includes("snapshot.schemaVersion !== RUNTIME_HYDRATION_SCHEMA_VERSION") &&
+    ui.includes("Unsupported runtime hydration schema"),
   "renderer hydration must reject an unsupported backend schema instead of applying structurally incompatible state",
 );
 requireContract(
-  app.includes("collapseCompletedOutput") &&
-    app.includes('class={`${itemClass} history-collapsible`}') &&
-    app.includes("VERBOSE_THINKING_BYTES = 480") &&
-    app.includes("collapseThinking") &&
-    app.includes("show reasoning"),
+  ui.includes("collapseCompletedOutput") &&
+    ui.includes('class={`${itemClass} history-collapsible`}') &&
+    ui.includes("VERBOSE_THINKING_BYTES = 480") &&
+    ui.includes("collapseThinking") &&
+    ui.includes("show reasoning"),
   "completed successful tool output and verbose completed thinking must collapse by default while failed or active output remains visible",
 );
 requireContract(
-  app.includes('type InspectorKind = "details" | "changes" | "tree"') &&
-    app.includes("const [activeInspector, setActiveInspector]") &&
-    app.includes('activeInspector() === "details"') &&
-    app.includes('activeInspector() === "changes"') &&
-    app.includes('activeInspector() === "tree"') &&
-    app.includes('aria-label="Run inspectors"') &&
-    app.includes('next === "changes"') &&
-    app.includes('reviewChangeRevision() !== props.run.run.changeRevision') &&
-    app.includes('void refreshReview();'),
+  ui.includes('type InspectorKind = "details" | "changes" | "tree"') &&
+    ui.includes("const [activeInspector, setActiveInspector]") &&
+    ui.includes('activeInspector() === "details"') &&
+    ui.includes('activeInspector() === "changes"') &&
+    ui.includes('activeInspector() === "tree"') &&
+    ui.includes('aria-label="Run inspectors"') &&
+    ui.includes('next === "changes"') &&
+    ui.includes('reviewChangeRevision() !== props.run.run.changeRevision') &&
+    ui.includes('void refreshReview();'),
   "run details, Changes, and Session Tree must be mutually exclusive inspectors that are closed by default and load expensive state only on demand",
 );
 requireContract(
-  app.includes("changeRevision: number") &&
-    app.includes("reviewChangeRevision() !== props.run.run.changeRevision") &&
-    app.includes("Review stale") &&
-    app.includes("open Changes to refresh") &&
-    app.includes("!reviewSummary() || reviewChangeRevision() !== props.run.run.changeRevision"),
+  ui.includes("changeRevision: number") &&
+    ui.includes("reviewChangeRevision() !== props.run.run.changeRevision") &&
+    ui.includes("Review stale") &&
+    ui.includes("open Changes to refresh") &&
+    ui.includes("!reviewSummary() || reviewChangeRevision() !== props.run.run.changeRevision"),
   "known Git review results must become visibly stale after backend tool/Bash invalidation without launching passive Git work",
 );
 requireContract(
-  app.includes('if (run.run.process === "exited") return "done"') &&
-    app.includes('if (run.run.process === "quarantined") return "termination uncertain"') &&
-    app.includes('return "ready"') &&
-    app.includes('"Git-isolated worktree" : "Local checkout"') &&
-    app.includes('if (run.run.process === "exited") return "Run finished"') &&
-    app.includes('if (run.run.process === "quarantined") return "Process termination is uncertain"'),
+  ui.includes('if (run.run.process === "exited") return "done"') &&
+    ui.includes('if (run.run.process === "quarantined") return "termination uncertain"') &&
+    ui.includes('return "ready"') &&
+    ui.includes('"Git-isolated worktree" : "Local checkout"') &&
+    ui.includes('if (run.run.process === "exited") return "Run finished"') &&
+    ui.includes('if (run.run.process === "quarantined") return "Process termination is uncertain"'),
   "run lifecycle and execution-isolation labels must use user-facing ready/done/failure/uncertainty wording and literal Git-isolation language instead of leaking backend enums or implying sandboxing",
 );
 requireContract(
-  app.includes("const depthClass = `tree-depth-${Math.min(node.depth, 24)}`") &&
-    !app.includes("style={`--tree-depth:") &&
+  ui.includes("const depthClass = `tree-depth-${Math.min(node.depth, 24)}`") &&
+    !ui.includes("style={`--tree-depth:") &&
     styles.includes(".tree-depth-24 { --tree-depth: 24; }"),
   "session-tree indentation must use bounded static classes so production CSP does not require inline styles",
 );
 requireContract(
-  app.split('aria-current={view() ===').length - 1 >= 4 &&
-    app.includes('aria-current={selectedRunId() === run.run.id && view() === "run" ? "page" : undefined}') &&
-    app.includes("projectLabelForRun(run())") &&
-    app.includes("projectLabelForRun(run)"),
+  ui.split('aria-current={view() ===').length - 1 >= 4 &&
+    ui.includes('aria-current={selectedRunId() === run.run.id && view() === "run" ? "page" : undefined}') &&
+    ui.includes("projectLabelForRun(run())") &&
+    ui.includes("projectLabelForRun(run)"),
   "main navigation and run identity must expose current-page state and registered project identity to assistive technology",
 );
 requireContract(
-  app.includes('"runtime_pick_directory"') && app.includes("Browse"),
-  "project selection must expose a native folder picker",
+  desktop.includes('"runtime_pick_directory"') && ui.includes("pickDirectory") && ui.includes("Browse"),
+  "project selection must expose a native folder picker through the shared desktop adapter",
 );
 requireContract(
-  app.includes("extensionUi: ExtensionUiSnapshot") && app.includes('class="extension-ui-panel"'),
+  ui.includes("extensionUi: ExtensionUiSnapshot") && ui.includes('class="extension-ui-panel"'),
   "retained extension status/widget/title state must be visible for the selected run",
 );
 requireContract(
-  app.includes('type ExtensionDiscoveryPolicy = "inherit" | "disabled"') &&
-    app.includes("Disable extensions for this launch") &&
-    app.includes("extensionDiscovery: extensionDiscovery()") &&
-    app.includes("--no-extensions"),
+  ui.includes('type ExtensionDiscoveryPolicy = "inherit" | "disabled"') &&
+    ui.includes("Disable extensions for this launch") &&
+    ui.includes("extensionDiscovery: extensionDiscovery()") &&
+    ui.includes("--no-extensions"),
   "new and resumed runs must expose Pi's one-run extension-discovery recovery policy independently from trust/context loading",
 );
 requireContract(
-  app.includes("function PiRuntimeNoticePanel") &&
-    app.includes("Provider retry scheduled") &&
-    app.includes("Summarization retry") &&
-    app.includes("Last extension error") &&
-    app.includes("abort_retry"),
+  ui.includes("function PiRuntimeNoticePanel") &&
+    ui.includes("Provider retry scheduled") &&
+    ui.includes("Summarization retry") &&
+    ui.includes("Last extension error") &&
+    ui.includes("abort_retry"),
   "selected runs must surface bounded Pi retry/summarization/extension errors and explain Stop semantics without inventing local retry authority",
 );
 requireContract(
-  app.includes("interface RunCompactionSnapshot") &&
-    app.includes("willRetry: boolean") &&
-    app.includes("prompt retry pending") &&
-    app.includes("does not resubmit it"),
+  ui.includes("interface RunCompactionSnapshot") &&
+    ui.includes("willRetry: boolean") &&
+    ui.includes("prompt retry pending") &&
+    ui.includes("does not resubmit it"),
   "Pi compaction reason/abort/overflow-retry outcomes must remain visible without client-side prompt replay",
 );
 requireContract(
-  app.includes("streamStalled: boolean") &&
-    app.includes("Pi stream quiet") &&
-    app.includes("not probe, retry, or resubmit anything automatically"),
+  ui.includes("streamStalled: boolean") &&
+    ui.includes("Pi stream quiet") &&
+    ui.includes("not probe, retry, or resubmit anything automatically"),
   "quiet working streams must be presented as a non-authoritative one-shot advisory rather than automatic recovery",
 );
 requireContract(
-  app.includes('"runtime_set_auto_retry"') &&
-    app.includes("Automatic retry") &&
-    app.includes("Pi RPC does not report the current retry-enabled flag in get_state"),
+  ui.includes('"runtime_set_auto_retry"') &&
+    ui.includes("Automatic retry") &&
+    ui.includes("Pi RPC does not report the current retry-enabled flag in get_state"),
   "automatic provider retry must use Pi's native command without fabricating a recoverable enabled-state mirror",
 );
 requireContract(
-  app.includes("Stop required terminating this Pi process") &&
-    app.includes("Pi session history and any recovered queued draft text remain available for Resume") &&
-    app.includes("Stop required terminating the Pi process. Its Pi session remains available from Recent Sessions."),
+  ui.includes("Stop required terminating this Pi process") &&
+    ui.includes("Pi session history and any recovered queued draft text remain available for Resume") &&
+    ui.includes("Stop required terminating the Pi process. Its Pi session remains available from Recent Sessions."),
   "hard Stop must be visibly distinguished from a reusable Pi RPC abort in both selected-run and dashboard surfaces",
 );
 requireContract(
-  app.includes('event.kind === "extensionNotification"') && app.includes('class="notification-stack"'),
+  ui.includes('event.kind === "extensionNotification"') && ui.includes('class="notification-stack"'),
   "transient extension notifications must be surfaced instead of discarded",
 );
 requireContract(
-  app.includes("function suggestedWorktreeIdentity") &&
-    app.includes("setWorktreeBranch(suggested.branch)") &&
-    app.includes("setWorktreePath(suggested.path)"),
+  ui.includes("function suggestedWorktreeIdentity") &&
+    ui.includes("setWorktreeBranch(suggested.branch)") &&
+    ui.includes("setWorktreePath(suggested.path)"),
   "worktree launch should generate usable branch/path defaults after Git inspection",
 );
 requireContract(
-  app.includes("Run started, but the initial task was not sent automatically"),
+  ui.includes("Run started, but the initial task was not sent automatically"),
   "initial-task launch failures must remain visible after the launcher closes",
 );
 requireContract(
-  app.includes("localCheckoutActive") &&
-    app.includes("This checkout is already in use by a live run") &&
-    app.includes("Use a worktree"),
+  ui.includes("localCheckoutActive") &&
+    ui.includes("This checkout is already in use by a live run") &&
+    ui.includes("Use a worktree"),
   "the launcher must block known same-checkout parallel starts and offer Git isolation",
 );
 requireContract(
-  app.includes("MAX_HISTORY_RENDER_PAGES = 4") &&
-    app.includes('class="history-window"') &&
-    app.includes("historyViewport.scrollTop += historyViewport.scrollHeight - previousHeight"),
+  ui.includes("MAX_HISTORY_RENDER_PAGES = 4") &&
+    ui.includes('class="history-window"') &&
+    ui.includes("historyViewport.scrollTop += historyViewport.scrollHeight - previousHeight"),
   "history navigation must retain a fixed multi-page window and preserve position when older pages prepend",
 );
 requireContract(
-  app.includes('"runtime_close"') &&
-    app.includes("function canCloseRun") &&
-    app.includes("Close run"),
+  ui.includes('"runtime_close"') &&
+    ui.includes("function canCloseRun") &&
+    ui.includes("Close run"),
   "idle runs must expose a backend-owned Close action instead of consuming a live slot forever",
 );
 requireContract(
-  app.includes("activeRunIdForExecutionRoot") &&
-    app.includes("props.onOpenRun(runId)") &&
-    app.includes('activeRunId()\n                      ? "Open"'),
+  ui.includes("activeRunIdForExecutionRoot") &&
+    ui.includes("props.onOpenRun(runId)") &&
+    ui.includes('activeRunId()\n                      ? "Open"'),
   "active worktree recovery rows must open their existing live run instead of presenting a disabled Open button",
 );
 requireContract(
-  app.includes('"runtime_dismiss_terminal_run"') &&
-    app.includes("function isTerminalRun") &&
-    app.includes('dismissingRunId() === run.run.id ? "Dismissing" : "Dismiss"'),
+  ui.includes('"runtime_dismiss_terminal_run"') &&
+    ui.includes("function isTerminalRun") &&
+    ui.includes('dismissingRunId() === run.run.id ? "Dismissing" : "Dismiss"'),
   "terminal runs must be explicitly dismissible without deleting their Pi session or draft",
 );
 requireContract(
-  app.includes("activeRunIdForSessionPath") &&
-    app.includes('"Open live run"') &&
-    app.includes("close it before resuming another session here"),
+  ui.includes("activeRunIdForSessionPath") &&
+    ui.includes('"Open live run"') &&
+    ui.includes("close it before resuming another session here"),
   "session Resume must navigate to existing owners instead of offering a start the backend will reject",
 );
 requireContract(
-  app.includes('"runtime_open_run_folder"') &&
-    app.includes('"Open folder"') &&
-    app.includes('openingFolderRunId() === run.run.id ? "Opening" : "Folder"'),
+  ui.includes('"runtime_open_run_folder"') &&
+    ui.includes('"Open folder"') &&
+    ui.includes('openingFolderRunId() === run.run.id ? "Opening" : "Folder"'),
   "run surfaces must expose the backend-derived checkout/worktree folder without renderer-supplied paths",
 );
 requireContract(
-  app.includes("function runDisplayPriority") &&
-    app.split("<For each={sortedRuns()}>").length - 1 >= 2 &&
-    app.includes("return right.run.id.localeCompare(left.run.id)"),
+  ui.includes("function runDisplayPriority") &&
+    ui.split("<For each={sortedRuns()}>").length - 1 >= 2 &&
+    ui.includes("return right.run.id.localeCompare(left.run.id)"),
   "sidebar and dashboard runs must prioritize attention/working/live state and newest runs over stale terminal rows",
 );
 requireContract(
-  app.includes("interface RunFailureSnapshot") &&
-    app.includes('class="run-failure-panel"') &&
-    app.includes('role="alert"') &&
-    app.includes('"Termination uncertain"') &&
-    app.includes("detailTruncated"),
+  ui.includes("interface RunFailureSnapshot") &&
+    ui.includes('class="run-failure-panel"') &&
+    ui.includes('role="alert"') &&
+    ui.includes('"Termination uncertain"') &&
+    ui.includes("detailTruncated"),
   "failed and quarantined runs must surface backend-bounded failure detail and termination uncertainty",
 );
 

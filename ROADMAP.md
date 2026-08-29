@@ -161,23 +161,25 @@ Add:
 - bounded-state/no-periodic-work regression fixtures plus platform-observable memory/CPU/render diagnostics;
 - migration/version compatibility policy for Pi RPC and any derived catalog.
 
-## Phase 6: finite automation and supervised orchestration
+## Phase 6: finite automation and independent supervision
 
 Status: **complete for the requested lightweight workflow scope**.
 
 Add:
 
 - reusable schema-versioned prompt chains containing only a name and ordered prompts;
-- one Automation view with prompt add/remove/reorder, project, concurrency, Git isolation, and supervisor controls;
+- one Automation view with prompt add/remove/reorder, project, concurrency, Git isolation, and worker model controls;
 - event-driven chain execution that fills ordinary RuntimeManager slots and starts one new Pi session per prompt;
 - unique recoverable Git worktrees for parallel chain workers;
 - completion detection through Pi-native session state/stats, followed by normal Close to release worker capacity without deleting session/worktree history;
-- cancellation that prevents future launches/directives without killing already-running user workers;
-- an optional supervisor implemented as one normal Pi session counted against the same live-run ceiling;
-- bounded worker task/status/last-result context and a strict JSON Send/Steer/Follow-up directive contract targeting exact RunIds;
+- cancellation that prevents future launches without killing already-running user workers;
+- a separate Supervision view/coordinator implemented as one normal Pi session counted against the same live-run ceiling;
+- project-scoped supervision of eligible manual and automated runs through bounded task/status/last-result context and a strict JSON Send/Steer/Follow-up directive contract targeting exact RunIds;
+- one reusable model picker that merges Pi-discovered models with a bounded credential-free custom provider/model catalog;
 - on-demand Automation catalog hydration, execution-only invalidation/IPC, bounded prompt previews, and no-op execution update suppression;
 - bounded supervisor lifetime through an explicit per-execution cycle ceiling plus per-turn deadline;
-- supervisor failure isolation so malformed or rejected autonomous direction disables supervision while the deterministic prompt chain continues.
+- supervisor failure isolation so malformed or rejected autonomous direction ends only the supervision owner and does not change worker lifecycle;
+- direct Windows Node invocation for standard npm Pi installs plus desktop-lifetime kill-on-close process containment.
 
 Exit criteria:
 
@@ -187,7 +189,7 @@ Exit criteria:
 - parallel automation cannot write concurrently in one local checkout;
 - saved chains have independent count/text/aggregate-byte ceilings and corruption quarantine;
 - an LLM supervisor cannot address an unknown run, exceed prompt/directive limits, or bypass Pi-native composer semantics;
-- supervision cannot make a finite chain unbounded, and cancellation is rechecked before any not-yet-started worker/supervisor process spawn;
+- supervision is independently finite and stopping it never terminates observed workers; automation cancellation is rechecked before any not-yet-started worker process spawn;
 - chain cancellation cannot silently terminate user worker sessions or auto-delete their worktrees.
 
 ## Later candidates, evidence required

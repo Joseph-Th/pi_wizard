@@ -32,6 +32,30 @@ The implementation keeps domain/runtime foundations in `crates/pi-wizard-core`. 
 
 This separation is intentional: protocol/state tests remain fast and deterministic, desktop framework upgrades cannot redefine core invariants, and the renderer can be replaced without moving Pi ownership rules.
 
+### Desktop source layout
+
+The source tree follows ordinary desktop application ownership boundaries instead of concentrating the product in one renderer file and one Tauri file:
+
+```text
+src/
+  app/            shell composition and renderer recovery
+  components/     reusable presentation components
+  features/       automation, supervision, models, launcher, sessions, runs
+  lib/            typed IPC and small framework-neutral helpers
+  types/          renderer IPC/view-model contracts
+  styles/         application styles
+
+src-tauri/src/
+  app/            desktop runtime composition/state
+  commands/       thin Tauri command adapters grouped by feature
+  services/       automation, supervision, models, Git/session orchestration
+  platform/       Windows-only process/container integration
+  lib.rs          Tauri builder/composition only
+  main.rs         process entry point only
+```
+
+Feature folders own feature-specific UI/service state; shared Pi/runtime semantics stay in `pi-wizard-core`. `App.tsx` and `src-tauri/src/lib.rs` must remain composition surfaces rather than growing back into product-wide implementation files.
+
 ## 2. Stack decision
 
 ### Desktop host: Tauri 2
@@ -229,21 +253,39 @@ The target is responsive perception, not protocol-event fidelity in the DOM. The
 
 Durable app-owned writes happen only at semantic boundaries such as draft debounce/flush, catalog metadata invalidation, terminal message/session transitions, or explicit settings changes. Streaming throughput from one run must not serialize unrelated sessions behind a global disk-write lock.
 
-### Finite automation and supervisor orchestration
+### Finite automation
 
 Automation definitions are a separate schema-versioned app-owned domain. They contain only bounded chain metadata and ordered prompt text; they do not copy Pi transcripts or process state. Definition writes use atomic replacement and corruption quarantine like other recoverable app state. Active execution state is backend-owned memory because native application shutdown intentionally terminates owned Pi processes; renderer reload does not cancel an execution.
 
-One automation execution is an event-driven state machine layered over the existing `RuntimeManager`. Admission always goes through the manager's live-run ceiling. A worker step starts one normal Pi session. Local-checkout chains are sequential because canonical live execution roots remain exclusive. Parallel chains create unique Git worktrees from one explicitly inspected base snapshot; generated branch/path identity contains the full compact automation-execution UUID rather than a timestamp-heavy UUIDv7 prefix. The automation owner creates only the generated sibling worktree parent directory before journaling the exact creation intent and invoking the shared Git worktree primitive. A failure proven to have made no Git mutation discards that intent; indeterminate or mutating failures retain it for recovery. Verified worker/supervisor worktrees remain journaled after completion. A worker turn becomes complete after it returns to genuinely idle with no Pi queue, compaction/retry, or pending extension dialog and either a new assistant message exists or real Pi activity was observed for that turn. The activity fallback matters when the user explicitly Stops/aborts a turn before Pi produces assistant text. The automation owner then closes that Pi process to release its live slot and advances to later prompts.
+One automation execution is an event-driven state machine layered over the existing `RuntimeManager`. Admission always goes through the manager's live-run ceiling. A worker step starts one normal Pi session using the model/thinking selection captured when the chain starts. Local-checkout chains are sequential because canonical live execution roots remain exclusive. Parallel chains create unique Git worktrees from one explicitly inspected base snapshot; generated branch/path identity contains the full compact automation-execution UUID rather than a timestamp-heavy UUIDv7 prefix. The automation owner creates only the generated sibling worktree parent directory before journaling the exact creation intent and invoking the shared Git worktree primitive. A failure proven to have made no Git mutation discards that intent; indeterminate or mutating failures retain it for recovery. Verified worker worktrees remain journaled after completion. A worker turn becomes complete after it returns to genuinely idle with no Pi queue, compaction/retry, or pending extension dialog and either a new assistant message exists or real Pi activity was observed for that turn. The activity fallback matters when the user explicitly Stops/aborts a turn before Pi produces assistant text. The automation owner then closes that Pi process to release its live slot and advances to later prompts.
 
 The runtime manager broadcasts a cheap semantic run-state wake-up in addition to the renderer's coalesced dirty wake-up. Automation consumes only semantic wake-ups, including successful live-capacity changes, so token/tool display traffic cannot drive scheduler work and renderer draining is not required for automation to progress. Launches, worktree creation, and live-limit mutations share one desktop serialization gate; admission and local execution-root ownership are rechecked under that gate. Cancellation is also rechecked before process spawn, including after a worktree creation has completed, so a cancelled not-yet-started step cannot race into a new Pi process. Any already-created worktree remains in the normal recovery journal rather than being deleted implicitly.
 
-The optional supervisor is itself a normal Pi run and therefore consumes one live-run slot. It uses a separate generated Git worktree and launches with project context files/extensions disabled so workflow supervision is not coupled to arbitrary project extension UI. Admission will not start a supervisor if doing so would consume the only slot available for the execution's first queued worker. If later manual-run pressure fills the runtime while queued worker work remains and no worker is active, the internal supervisor yields its slot and may be relaunched only after enough capacity exists again. A supervisor cycle is triggered only by worker workflow transitions. The desktop sends a bounded task/status summary plus a bounded native `get_last_assistant_text` excerpt for workers that have just become idle, waits for the supervisor's normal Pi turn to settle, then reads the supervisor's own native last-assistant-text result. The accepted response format is a narrow JSON object containing directives addressed to exact active worker RunIds. Each directive is bounded, duplicate targets in one cycle are rejected, and target state is freshly revalidated immediately before Pi's normal `prompt`, `steer`, or `follow_up` RPC command. Supervision is explicitly finite: runtime limits cap cycles per execution (32 by default, 256 hard maximum) and each model turn has a deadline (15 minutes by default). Reaching either boundary or receiving invalid autonomous output disables further supervision while the deterministic prompt chain continues. If the scheduler itself fails, already-running worker sessions remain user-owned for inspection, never-started steps become explicit failures, and the app makes a bounded best-effort termination of the internal supervisor so an invisible supervisor cannot retain a live slot.
-
-The complete scheduler is covered by deterministic desktop integration, not only helper contracts: local sequential chains launch distinct real child RPC processes and continue after an isolated prompt rejection; parallel chains use disposable real Git repositories and must reach simultaneous live workers in unique verified worktrees; and supervised chains launch a separate supervisor child/worktree whose strict JSON `send` directive is revalidated and observed as a second prompt in the exact worker session before both live slots are released.
+The complete automation scheduler is covered by deterministic desktop integration, not only helper contracts: local sequential chains launch distinct real child RPC processes and continue after an isolated prompt rejection, while parallel chains use disposable real Git repositories and must reach simultaneous live workers in unique verified worktrees.
 
 Automation renderer projection is also separated by cost. Saved chain definitions are hydrated only while the Automation view is mounted. Catalog changes invalidate the full view model, while execution changes fetch only bounded execution snapshots. Identical execution mutations emit no invalidation, and each step snapshot carries only a UTF-8-safe prompt preview (1 KiB by default) rather than repeatedly cloning full saved prompt text across IPC.
 
-Canceling a chain stops future launches and supervisor directives but deliberately leaves already-running workers alone. User Stop remains the lifecycle operation for canceling work inside a Pi run.
+Canceling a chain stops future launches but deliberately leaves already-running workers alone. User Stop remains the lifecycle operation for canceling work inside a Pi run.
+
+### Independent supervision
+
+Supervision has its own coordinator, snapshot/event surface, Tauri commands, renderer feature folder, and lifecycle. It is not stored inside `AutomationExecutionSnapshot`, is not started by `runtime_start_automation`, and does not change automation slot accounting.
+
+Starting supervision selects one registered project plus an explicit supervisor model/thinking choice and finite cycle budget. The supervisor is itself a normal Pi run and therefore consumes one live-run slot. It uses a separate generated Git worktree and launches with project context files/extensions disabled so supervision is not coupled to arbitrary project extension UI. Its eligible targets are other live runs for that ProjectId, regardless of whether they were started manually or by Automation. The supervisor never targets its own RunId.
+
+Supervision subscribes to the same semantic run-state wake-up used by Automation. It keeps bounded per-target assistant-message baselines and runs a cycle only after an eligible target has a new settled turn; token/tool display traffic never triggers supervision. The desktop sends bounded task/status plus bounded native `get_last_assistant_text` excerpts, waits for the supervisor's normal Pi turn to settle, then parses one narrow JSON object containing directives addressed to exact active worker RunIds. Each directive is bounded, duplicate targets in one cycle are rejected, and target state is freshly revalidated immediately before Pi's normal `prompt`, `steer`, or `follow_up` RPC command.
+
+Supervision is explicitly finite. Runtime limits cap cycles and each model turn has a deadline. Reaching the configured cycle budget, receiving invalid autonomous output, or explicit user Stop ends the supervision owner and performs bounded termination of its app-owned supervisor process while leaving observed worker runs untouched. An abrupt desktop exit is handled by the Windows process-containment boundary described below.
+
+### Model catalog
+
+Pi capability discovery remains authoritative for models Pi reports, including names and image-input capability. A separate small schema-versioned custom-model catalog stores only user-supplied provider/model identity plus an optional display label. It stores no credentials and never claims input capability. Launcher/Automation/Supervision model pickers merge discovered and custom identities by `(provider, model)`, with Pi-discovered metadata winning for duplicates. Pi remains the final launch-time validator.
+
+### Windows Pi invocation and process containment
+
+Pi Wizard does not keep an npm command-shell shim alive as the production Pi process. When Windows discovery resolves the standard npm `pi.cmd`/`pi.ps1` installation, the environment owner resolves the corresponding `node.exe` plus `@earendil-works/pi-coding-agent/dist/bundle/cli.js` and the process owner spawns that Node entry point directly with `CREATE_NO_WINDOW`. The logical Pi shim path remains diagnostic/discovery identity; the runtime invocation target is the direct Node child.
+
+Graceful shutdown still belongs to `RuntimeManager`, which closes every owned Pi run and reports termination uncertainty explicitly. In addition, the Windows desktop establishes one kill-on-close Job Object before child work begins and keeps that handle for the process lifetime. Descendants inherit the job, so an abrupt desktop termination closes the job and the kernel terminates remaining descendants rather than leaving orphaned Pi/Node processes. Exact-process Stop/Close behavior and bounded diagnostic finalization remain in place for ordinary lifecycle operations.
 
 ### Composer draft ownership
 

@@ -14,6 +14,7 @@ pub mod git_review;
 pub mod ids;
 pub mod launch;
 pub mod limits;
+pub mod model_catalog;
 pub mod preferences;
 mod probe;
 pub mod process;
@@ -25,11 +26,12 @@ pub mod runtime;
 pub mod session_activation;
 pub mod session_catalog;
 pub mod session_history;
+pub mod supervision;
 pub mod worktree;
 pub mod worktree_registry;
 
 pub use ids::{
     AutomationChainId, AutomationExecutionId, DraftImageId, PiSessionId, ProjectId, RequestId,
-    RunId, WorktreeId,
+    RunId, SupervisionId, WorktreeId,
 };
 pub use limits::{LimitsError, RuntimeLimits};

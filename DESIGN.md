@@ -40,9 +40,9 @@ Pi Wizard is not initially:
 
 These constraints are important. Existing agent desktops tend to accumulate editor, terminal, browser, preview, mobile, plugin, remote, and Git-management surfaces. Those can be useful, but they increase hot state, watchers, process count, renderer complexity, and failure coupling. Pi Wizard starts with the smallest surface that materially improves Pi orchestration.
 
-Finite user-started automation is now in scope. A saved chain is deliberately small: a name plus an ordered list of prompts. Starting a chain chooses the project, worker concurrency, and local/worktree execution policy. The runtime fills only available live-run slots, starts one new Pi session per prompt, and advances on backend run-state transitions rather than timers or repository polling. For concurrent work in one project, chains use unique Git worktrees; completed worker processes are closed to release capacity while their Pi session history and Git worktrees remain available for review.
+Finite user-started automation is in scope as one independent feature. A saved chain is deliberately small: a name plus an ordered list of prompts. Starting a chain chooses the project, worker concurrency, local/worktree execution policy, and worker model/thinking selection. The runtime fills only available live-run slots, starts one new Pi session per prompt, and advances on backend run-state transitions rather than timers or repository polling. For concurrent work in one project, chains use unique Git worktrees; completed worker processes are closed to release capacity while their Pi session history and Git worktrees remain available for review. Automation has no supervisor toggle and no supervisor lifecycle state.
 
-An optional **LLM supervisor** is also in scope as orchestration, not as a replacement agent engine. The supervisor is one ordinary Pi session counted against the same live-run ceiling. It receives bounded summaries of chain workers only when workflow state changes and may return a small validated set of Send/Steer/Follow-up directives addressed to exact RunIds. Unknown runs, oversized messages, malformed output, and unsupported actions are rejected rather than guessed. There is no token-level supervisor loop and no periodic “are you done?” polling.
+**Supervision** is a separate orchestration feature, not a mode of automation and not a replacement agent engine. A supervision session is one ordinary Pi session counted against the same live-run ceiling. The user starts it for a project independently from any automation chain, chooses its model/thinking level, and may stop it without cancelling worker runs. It observes bounded summaries of that project's eligible live runs only when semantic workflow state changes and may return a small validated set of Send/Steer/Follow-up directives addressed to exact RunIds. Manual sessions and automation workers are both eligible targets. Unknown runs, oversized messages, malformed output, and unsupported actions are rejected rather than guessed. There is no token-level supervisor loop and no periodic “are you done?” polling.
 
 ## 4. Mental model
 
@@ -118,9 +118,15 @@ It is not a miniature transcript grid. Detailed streams stay inside the session 
 
 ### Automation
 
-Automation is a first-class main view rather than another mode hidden inside the composer. It contains a compact saved-chain list, an ordered prompt-card editor, start controls for project/concurrency/isolation, an optional LLM supervisor toggle, and bounded current execution progress with links to live worker runs.
+Automation is a first-class main view rather than another mode hidden inside the composer. It contains a compact saved-chain list, an ordered prompt-card editor, start controls for project/concurrency/isolation/model, and bounded current execution progress with links to live worker runs.
 
-Chains are finite. Cancel stops the chain from launching or directing more work but does not kill already-running Pi sessions. Worker failures are attached to their exact step and do not silently discard later prompts. Automation never auto-deletes task worktrees.
+Chains are finite. Cancel stops the chain from launching more work but does not kill already-running Pi sessions. Worker failures are attached to their exact step and do not silently discard later prompts. Automation never auto-deletes task worktrees.
+
+### Supervision
+
+Supervision is a separate first-class main view. It selects a registered project, a supervisor model/thinking level, and a finite cycle budget, then starts one dedicated Pi supervisor session in its own Git worktree. It can supervise live runs that were started manually or by Automation. Stopping supervision terminates only the app-owned supervisor process; it never implicitly stops, closes, or cancels worker runs.
+
+Supervision status is presented separately from Automation execution status. A failed or malformed supervisor response ends/disables that supervision session without changing the ownership or lifecycle of the runs it was observing.
 
 ## 6. Session view
 
@@ -156,7 +162,7 @@ A successful ordinary Stop on a Pi build with native queue clearing does not cre
 
 The user should never have to guess whether a message will interrupt, steer, or wait. Keyboard shortcuts can mirror Pi, but the semantic action is visible in the control.
 
-Slash-command autocomplete is populated from Pi's runtime command discovery rather than a hardcoded app list. The bounded palette supports Arrow Up/Down selection plus Enter to stage the selected command, keeps the active row visible, and does not create an application-owned input-history store. Model and thinking selectors likewise come from Pi capabilities.
+Slash-command autocomplete is populated from Pi's runtime command discovery rather than a hardcoded app list. The bounded palette supports Arrow Up/Down selection plus Enter to stage the selected command, keeps the active row visible, and does not create an application-owned input-history store. Model selectors merge Pi-discovered models with a small user-managed catalog of explicit provider/model pairs. Pi remains the launch-time validator, and Pi-discovered metadata wins when it matches a saved pair. Thinking choices come from Pi capability discovery for the selected model.
 
 The composer supports Pi-native image attachments with explicit count/per-image/aggregate limits. Picker, paste, drag/drop, IPC, and restored drafts all pass through the same backend validation; an oversized attachment is rejected before it can become a large reactive/IPC payload. When Pi explicitly declares the selected model text-only, the UI disables new image ingestion and blocks submission of existing image drafts while keeping those images removable/preserved. Missing capability metadata stays compatible rather than being guessed as unsupported.
 
@@ -180,7 +186,7 @@ The New Session sheet asks only for decisions that materially affect the run:
 2. Execution root:
    - **Local checkout**
    - **New Git worktree** when the project is a Git repository.
-3. Model and thinking level, defaulting to Pi configuration.
+3. Model and thinking level, defaulting to Pi configuration but allowing Pi-discovered or user-saved provider/model pairs.
 4. Initial task.
 
 Advanced options are collapsed. Project trust is handled before launching RPC when Pi detects protected project resources and no applicable decision exists. The user can run the process with resources approved or ignored for that run. The UI explains that this controls project resource loading only. Extension discovery is a separate per-launch recovery choice: users may inherit normal Pi extension discovery or disable extensions for that child when a broken installed extension prevents startup. Disabling extensions is not described as trust, context-file, or sandbox policy.
@@ -192,6 +198,8 @@ Project rows are backed by a stable app project ID and canonical path. If a fold
 For autonomous parallel work, **New Git worktree** is the recommended Git-isolation default. It prevents agents from editing the same checkout, but the UI explicitly states that it does not restrict filesystem, network, shell, credentials, or host process access.
 
 Before creation, the sheet shows the exact source branch/base commit that will seed the worktree. The user is never shown a branch label derived from stale cached project state. Once launched, that worktree/run binding is immutable.
+
+The model control is usable without a separate hidden prerequisite. When a concrete project is selected, Pi Wizard loads Pi's available models for that project on demand and keeps an explicit refresh action. The same reusable model picker is used by New Run, Automation, and Supervision. A user may also add or remove a bounded custom provider/model entry so a valid Pi model can be selected even when the current provider does not enumerate it through `get_available_models`.
 
 ## 8. Review surface
 

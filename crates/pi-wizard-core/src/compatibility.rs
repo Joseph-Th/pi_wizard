@@ -22,9 +22,12 @@ pub async fn probe_pi_version(
     environment: &ResolvedLaunchEnvironment,
     limits: RuntimeLimits,
 ) -> Result<PiVersion, PiVersionProbeError> {
+    let invocation = environment.pi_invocation();
+    let mut args = invocation.prefix_args().to_vec();
+    args.push(OsString::from("--version"));
     let output = run_bounded_command(
-        environment.pi_executable(),
-        &[OsString::from("--version")],
+        invocation.executable(),
+        &args,
         None,
         environment.variables(),
         limits.max_version_probe_bytes,

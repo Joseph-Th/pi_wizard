@@ -908,3 +908,13 @@ Sources:
 ### Audit conclusion
 
 No current Pi/lightweight-harness evidence justifies weakening the established product boundary. Direct RPC Bash remains protocol support rather than an embedded terminal; arbitrary historical branch switching remains unavailable because current Pi RPC does not expose that mutation; automatic prompt replay is rejected because it could duplicate side effects; editor/file-explorer, branch-integration, remote, scheduler, daemon, and multi-harness work remain explicit later candidates rather than hidden gaps.
+
+## 23. Workflow separation, model catalog, and Windows process ownership audit
+
+Audit date: **2026-08-28**.
+
+A post-implementation usability review found three places where the first orchestration pass had coupled concerns too tightly. Automation had absorbed supervisor lifecycle/slot/error state even though a prompt chain and an LLM supervisor are independently useful jobs. The launcher also required a separate explicit capability-probe action before any non-default model was visible, and it had no bounded way to remember a valid provider/model pair that a provider does not enumerate. The corrected product boundary makes Automation and Supervision separate first-class features and gives New Run, Automation, and Supervision one reusable model picker backed by Pi discovery plus a credential-free custom model identity catalog.
+
+The same audit inspected the locally installed Pi npm launch shims. On this Windows machine `pi.cmd` and `pi.ps1` are thin wrappers that invoke Node with `@earendil-works/pi-coding-agent/dist/bundle/cli.js`. Keeping the `.cmd` shim as the owned long-lived child unnecessarily keeps a command-shell wrapper in the process tree and makes lifecycle ownership harder. The desktop should resolve that standard npm layout and spawn the Node CLI entry point directly with no console window while retaining the Pi shim as discovery identity.
+
+Graceful exact-tree shutdown is necessary but not sufficient for abrupt GUI termination. Windows Job Objects provide an OS lifecycle boundary: with kill-on-job-close configured before child work begins, descendants inherit the desktop job and are terminated by the kernel when the last job handle closes. Pi Wizard therefore combines direct Node invocation, the existing RuntimeManager graceful shutdown, exact-process/tree Stop fallback, and a desktop-lifetime kill-on-close Job Object rather than relying on a background shell or executable-name cleanup scan.

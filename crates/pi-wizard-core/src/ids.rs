@@ -188,6 +188,30 @@ impl fmt::Display for AutomationExecutionId {
     }
 }
 
+/// Stable identity for one independently owned supervision session.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct SupervisionId(Uuid);
+
+impl SupervisionId {
+    #[must_use]
+    pub fn new() -> Self {
+        Self(Uuid::now_v7())
+    }
+}
+
+impl Default for SupervisionId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl fmt::Display for SupervisionId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
 /// Stable identity for one image attached to a session-scoped composer draft.
 ///
 /// This survives renderer reload and draft persistence so removal is keyed by

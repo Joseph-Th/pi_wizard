@@ -37,9 +37,12 @@ const HARD_MAX_AUTOMATION_STEPS_PER_CHAIN: usize = 4096;
 const HARD_MAX_AUTOMATION_NAME_BYTES: usize = 4096;
 const HARD_MAX_AUTOMATION_PROMPT_PREVIEW_BYTES: usize = 16 * 1024;
 const HARD_MAX_AUTOMATION_STATE_BYTES: usize = 16 * 1024 * 1024;
+const HARD_MAX_CUSTOM_MODEL_PROFILES: usize = 4096;
+const HARD_MAX_CUSTOM_MODEL_FIELD_BYTES: usize = 4096;
+const HARD_MAX_CUSTOM_MODEL_STATE_BYTES: usize = 2 * 1024 * 1024;
 const HARD_MAX_SUPERVISOR_CONTEXT_BYTES: usize = 1024 * 1024;
 const HARD_MAX_SUPERVISOR_DIRECTIVES_PER_CYCLE: usize = 256;
-const HARD_MAX_SUPERVISOR_CYCLES_PER_EXECUTION: usize = 256;
+const HARD_MAX_SUPERVISION_CYCLES: usize = 256;
 
 /// Centralized resource ceilings for data Pi Wizard owns in memory.
 ///
@@ -113,10 +116,13 @@ pub struct RuntimeLimits {
     pub max_automation_name_bytes: usize,
     pub max_automation_prompt_preview_bytes: usize,
     pub max_automation_state_bytes: usize,
+    pub max_custom_model_profiles: usize,
+    pub max_custom_model_field_bytes: usize,
+    pub max_custom_model_state_bytes: usize,
     pub max_supervisor_context_bytes: usize,
     pub max_supervisor_directives_per_cycle: usize,
-    pub max_supervisor_cycles_per_execution: usize,
-    pub automation_supervisor_turn_deadline_ms: u64,
+    pub max_supervision_cycles: usize,
+    pub supervision_turn_deadline_ms: u64,
     pub environment_probe_deadline_ms: u64,
     pub version_probe_deadline_ms: u64,
     pub startup_rpc_deadline_ms: u64,
@@ -323,6 +329,15 @@ impl RuntimeLimits {
             "max_automation_state_bytes",
             self.max_automation_state_bytes,
         )?;
+        validate_nonzero("max_custom_model_profiles", self.max_custom_model_profiles)?;
+        validate_nonzero(
+            "max_custom_model_field_bytes",
+            self.max_custom_model_field_bytes,
+        )?;
+        validate_nonzero(
+            "max_custom_model_state_bytes",
+            self.max_custom_model_state_bytes,
+        )?;
         validate_nonzero(
             "max_supervisor_context_bytes",
             self.max_supervisor_context_bytes,
@@ -331,13 +346,10 @@ impl RuntimeLimits {
             "max_supervisor_directives_per_cycle",
             self.max_supervisor_directives_per_cycle,
         )?;
-        validate_nonzero(
-            "max_supervisor_cycles_per_execution",
-            self.max_supervisor_cycles_per_execution,
-        )?;
+        validate_nonzero("max_supervision_cycles", self.max_supervision_cycles)?;
         validate_nonzero_u64(
-            "automation_supervisor_turn_deadline_ms",
-            self.automation_supervisor_turn_deadline_ms,
+            "supervision_turn_deadline_ms",
+            self.supervision_turn_deadline_ms,
         )?;
         validate_nonzero_u64(
             "environment_probe_deadline_ms",
@@ -437,6 +449,21 @@ impl RuntimeLimits {
                 HARD_MAX_AUTOMATION_STATE_BYTES,
             ),
             (
+                "max_custom_model_profiles",
+                self.max_custom_model_profiles,
+                HARD_MAX_CUSTOM_MODEL_PROFILES,
+            ),
+            (
+                "max_custom_model_field_bytes",
+                self.max_custom_model_field_bytes,
+                HARD_MAX_CUSTOM_MODEL_FIELD_BYTES,
+            ),
+            (
+                "max_custom_model_state_bytes",
+                self.max_custom_model_state_bytes,
+                HARD_MAX_CUSTOM_MODEL_STATE_BYTES,
+            ),
+            (
                 "max_supervisor_context_bytes",
                 self.max_supervisor_context_bytes,
                 HARD_MAX_SUPERVISOR_CONTEXT_BYTES,
@@ -447,9 +474,9 @@ impl RuntimeLimits {
                 HARD_MAX_SUPERVISOR_DIRECTIVES_PER_CYCLE,
             ),
             (
-                "max_supervisor_cycles_per_execution",
-                self.max_supervisor_cycles_per_execution,
-                HARD_MAX_SUPERVISOR_CYCLES_PER_EXECUTION,
+                "max_supervision_cycles",
+                self.max_supervision_cycles,
+                HARD_MAX_SUPERVISION_CYCLES,
             ),
             (
                 "max_retained_terminal_runs",
@@ -853,12 +880,15 @@ impl Default for RuntimeLimits {
             max_automation_name_bytes: 256,
             max_automation_prompt_preview_bytes: 1024,
             max_automation_state_bytes: 2 * 1024 * 1024,
+            max_custom_model_profiles: 128,
+            max_custom_model_field_bytes: 256,
+            max_custom_model_state_bytes: 64 * 1024,
             max_supervisor_context_bytes: 64 * 1024,
             max_supervisor_directives_per_cycle: 16,
-            max_supervisor_cycles_per_execution: 32,
+            max_supervision_cycles: 32,
             // Supervision is ordinary Pi model work, so allow long coding-model
             // turns while still guaranteeing one cycle cannot wait forever.
-            automation_supervisor_turn_deadline_ms: 15 * 60 * 1_000,
+            supervision_turn_deadline_ms: 15 * 60 * 1_000,
             environment_probe_deadline_ms: 2_000,
             version_probe_deadline_ms: 2_000,
             startup_rpc_deadline_ms: 5_000,
