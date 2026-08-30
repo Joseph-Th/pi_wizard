@@ -36,13 +36,7 @@ export function RecentSessionsView(props: {
   return (
     <section class="recent-sessions-surface" aria-label="Recent Pi sessions">
       <header class="surface-heading">
-        <div>
-          <h1>Recent sessions</h1>
-          <p>
-            Browse Pi’s authoritative session files on demand. Nothing is scanned while this view is
-            closed.
-          </p>
-        </div>
+        <h1>Recent sessions</h1>
         <button
           type="button"
           disabled={!projectPath()}
@@ -57,7 +51,7 @@ export function RecentSessionsView(props: {
         fallback={
           <div class="empty-state">
             <strong>No available project folders</strong>
-            <span>Choose or browse a folder from New Run. Used folders are saved there as quick project presets.</span>
+            <span>Add a project from New run.</span>
           </div>
         }
       >
@@ -117,11 +111,6 @@ export function RecentSessionsView(props: {
                 </select>
               </label>
             </div>
-            <p>
-              Trust controls protected Pi project resources. Context-file and extension loading are
-              independent launch choices. Disable extensions for a one-run recovery when an
-              installed Pi extension prevents startup.
-            </p>
           </details>
         </div>
 
@@ -131,6 +120,7 @@ export function RecentSessionsView(props: {
           projectTrust={projectTrust()}
           contextFiles={contextFiles()}
           extensionDiscovery={extensionDiscovery()}
+          autoLoad
           onStarted={props.onStarted}
           onOpenRun={props.onOpenRun}
           activeRunIdForExecutionRoot={props.activeRunIdForExecutionRoot}

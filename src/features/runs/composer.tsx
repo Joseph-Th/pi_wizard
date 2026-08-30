@@ -233,7 +233,6 @@ export function LiveTimeline(props: { run: RunHydration }) {
     props.run.rpc?.streamStalled;
     projection?.reasoning.length;
     for (const block of projection?.assistantBlocks ?? []) block.text.length;
-    for (const tool of projection?.activeTools ?? []) tool.output.length;
     for (const bash of projection?.directBash ?? []) bash.output.length;
     scrollToBottomIfPinned();
   });
@@ -253,7 +252,7 @@ export function LiveTimeline(props: { run: RunHydration }) {
         <header class="live-timeline-heading">
           <div>
             <strong>Live activity</strong>
-            <span>Reasoning, tools, commands and streaming output</span>
+            <span>Current turn</span>
           </div>
           <span class={activityStatusClass()} role="status" aria-live="polite">
             {modelActivityLabel()}
@@ -271,20 +270,6 @@ export function LiveTimeline(props: { run: RunHydration }) {
             </article>
           )}
         </Show>
-        <For each={live()?.activeTools ?? []}>
-          {(tool) => (
-            <article class="live-block live-tool" data-timeline-row="true">
-              <header>
-                <strong>{toolActivityLabel(tool.toolName)}</strong>
-                <span>{tool.toolName}</span>
-              </header>
-              <Show when={tool.output}>
-                {(output) => <pre>{output()}</pre>}
-              </Show>
-              <DroppedBytes count={tool.droppedBytes} />
-            </article>
-          )}
-        </For>
         <For each={live()?.directBash ?? []}>
           {(bash) => (
             <article class="live-block live-command" data-timeline-row="true">

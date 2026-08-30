@@ -3,7 +3,7 @@ import { createEffect, createSignal, For, Show } from "solid-js";
 import { invokeDesktop } from "../../lib/desktop";
 import { pathLeaf } from "../../lib/path";
 import type { DesktopProjectRecord } from "../../types/projects";
-import type { AutomationChain, RuntimeCapacitySnapshot } from "../automation/types";
+import type { RuntimeCapacitySnapshot } from "../automation/types";
 import { ModelPicker } from "../models/ModelPicker";
 import type { ModelSelection, ThinkingLevel } from "../models/types";
 import type { SupervisionSnapshot } from "./types";
@@ -11,16 +11,13 @@ import type { SupervisionSnapshot } from "./types";
 interface SupervisionViewProps {
   snapshots: SupervisionSnapshot[];
   projects: DesktopProjectRecord[];
-  chains: AutomationChain[];
   capacity: RuntimeCapacitySnapshot | undefined;
-  piReady: boolean;
   onRefresh: () => Promise<unknown>;
   onOpenRun: (runId: string) => void;
 }
 
 export function SupervisionView(props: SupervisionViewProps) {
   const [projectIds, setProjectIds] = createSignal<string[]>([]);
-  const [playbookChainId, setPlaybookChainId] = createSignal("");
   const [model, setModel] = createSignal<ModelSelection>();
   const [thinking, setThinking] = createSignal<ThinkingLevel | "">("");
   const [busy, setBusy] = createSignal(false);
@@ -41,8 +38,10 @@ export function SupervisionView(props: SupervisionViewProps) {
     });
   });
 
-  const selectedPlaybook = () =>
-    props.chains.find((chain) => chain.id === playbookChainId());
+  const modelProject = () =>
+    props.projects.find(
+      (project) => project.status === "present" && projectIds().includes(project.id),
+    );
 
   const overlappingSupervision = () => {
     const selected = new Set(projectIds());
@@ -85,7 +84,7 @@ export function SupervisionView(props: SupervisionViewProps) {
           provider: model()?.provider ?? null,
           model: model()?.id ?? null,
           thinking: thinking() || null,
-          promptTemplates: selectedPlaybook()?.prompts ?? [],
+          promptTemplates: [],
           maxCycles: null,
         },
       });
@@ -114,14 +113,7 @@ export function SupervisionView(props: SupervisionViewProps) {
   return (
     <section class="supervision-surface" aria-label="Supervision">
       <header class="surface-heading">
-        <div>
-          <h1>Supervision</h1>
-          <p>
-            Keep live runs moving across multiple projects. The supervisor wakes when a selected
-            run becomes idle, reviews its last result, and chooses the next task or stops a run
-            that should not continue autonomously.
-          </p>
-        </div>
+        <h1>Supervision</h1>
       </header>
 
       <Show when={error()}>{(message) => <p class="app-error">Supervision: {message()}</p>}</Show>
@@ -174,38 +166,15 @@ export function SupervisionView(props: SupervisionViewProps) {
           </div>
         </div>
 
-        <label class="supervision-playbook">
-          <span>Reusable prompt playbook</span>
-          <select
-            value={playbookChainId()}
-            disabled={busy()}
-            onChange={(event) => setPlaybookChainId(event.currentTarget.value)}
-          >
-            <option value="">No saved playbook · choose tasks from project state</option>
-            <For each={props.chains}>
-              {(chain) => (
-                <option value={chain.id}>
-                  {chain.name} · {chain.prompts.length} prompt{chain.prompts.length === 1 ? "" : "s"}
-                </option>
-              )}
-            </For>
-          </select>
-          <small>
-            Saved Automation prompts are guidance, not a fixed sequence. The supervisor chooses,
-            adapts, or skips them based on each run's current result.
-          </small>
-        </label>
-
         <ModelPicker
-          projectPath=""
+          projectPath={modelProject()?.canonicalRoot ?? ""}
           disabled={busy()}
           contextFiles="disabled"
           model={model()}
           thinking={thinking()}
           onModelChange={setModel}
           onThinkingChange={setThinking}
-          label="Supervisor model and thinking"
-          description="The supervisor has context files and extensions disabled and works through bounded directives only."
+          label="Model and thinking"
         />
 
         <div class="supervision-actions">
@@ -228,11 +197,6 @@ export function SupervisionView(props: SupervisionViewProps) {
                 At least one selected project is already covered by supervision {active().id.slice(0, 8)}.
               </span>
             )}
-          </Show>
-          <Show when={!overlappingSupervision() && projectIds().length > 0}>
-            <span class="supervision-note">
-              Continuous until stopped · {projectNames(projectIds())}
-            </span>
           </Show>
         </div>
       </section>

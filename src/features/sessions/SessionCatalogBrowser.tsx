@@ -11,6 +11,7 @@ export function SessionCatalogBrowser(props: {
   projectTrust: ProjectTrustPolicy;
   contextFiles: ContextFilesPolicy;
   extensionDiscovery: ExtensionDiscoveryPolicy;
+  autoLoad?: boolean;
   onStarted: (result: StartRunResult) => Promise<unknown>;
   onOpenRun: (runId: string) => void;
   activeRunIdForExecutionRoot: (path: string) => string | undefined;
@@ -75,6 +76,18 @@ export function SessionCatalogBrowser(props: {
   };
 
   const findSessions = async () => loadSessionPage(null, []);
+
+  let autoLoadProjectPath = "";
+  createEffect(() => {
+    const path = props.projectPath.trim();
+    if (!props.autoLoad || !props.piReady || !path) {
+      autoLoadProjectPath = "";
+      return;
+    }
+    if (path === autoLoadProjectPath) return;
+    autoLoadProjectPath = path;
+    void loadSessionPage(null, []);
+  });
 
   const nextSessionPage = async () => {
     const next = sessionPage()?.nextCursor;
@@ -156,7 +169,7 @@ export function SessionCatalogBrowser(props: {
           disabled={loadingSessions() || !props.piReady || props.projectPath.trim().length === 0}
           onClick={() => void findSessions()}
         >
-          {loadingSessions() ? "Searching" : "Find sessions"}
+          {loadingSessions() ? "Loading" : sessionQuery().trim() ? "Search" : "Refresh"}
         </button>
       </div>
       <Show when={sessionPage()}>

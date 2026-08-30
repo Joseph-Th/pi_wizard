@@ -135,7 +135,7 @@ export function runActivityLabel(run: RunHydration): string {
       : `Provider retry ${retry.attempt}/${retry.maxAttempts} running`;
   }
   if (run.rpc?.streamStalled) return "No Pi RPC event for about 2 minutes";
-  const tool = run.rpc?.live.activeTools[0];
+  const tool = run.rpc?.live.activeTools.at(-1);
   if (tool) return toolActivityLabel(tool.toolName);
   if ((run.rpc?.live.directBash.length ?? 0) > 0) return "Running a command";
   if (run.run.agentWorking) return "Pi is working";

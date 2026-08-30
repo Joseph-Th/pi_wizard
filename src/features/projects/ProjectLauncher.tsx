@@ -463,16 +463,13 @@ export function ProjectLauncher(props: {
               Browse…
             </button>
           </div>
-          <small class="project-preset-path" title={projectPath()}>
-            {projectPath() || "Browse once; used folders are saved here for future runs."}
-          </small>
+          <Show when={projectPath()}>
+            <small class="project-preset-path" title={projectPath()}>{projectPath()}</small>
+          </Show>
         </label>
         <Show when={props.projects.length > 0}>
           <details class="project-preset-manager">
             <summary>Manage saved projects</summary>
-            <p class="launch-note">
-              Saved projects are directory shortcuts. Relocate fixes a moved folder; Forget removes only the shortcut.
-            </p>
             <div class="project-preset-list">
               <For each={props.projects}>
                 {(project) => (
@@ -568,7 +565,6 @@ export function ProjectLauncher(props: {
           onThinkingChange={setLaunchThinking}
           rememberNewRunSelection
           label="Model and thinking"
-          description="Remembers your last model. Favorites stay at the top."
         />
         <label class="initial-task-field">
           <span>Initial task</span>

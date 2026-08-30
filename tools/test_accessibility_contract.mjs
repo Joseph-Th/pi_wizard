@@ -132,7 +132,8 @@ requireContract(
 requireContract(
   ui.includes('view() === "automation"') &&
     ui.includes("function AutomationView") &&
-    ui.includes('aria-label="Automation chains"') &&
+    automation.includes('aria-label="Prompt chains"') &&
+    automation.includes("<h1>Prompt chains</h1>") &&
     ui.includes('aria-label="Ordered prompts"') &&
     ui.includes('"runtime_save_automation_chain"') &&
     ui.includes('"runtime_start_automation"') &&
@@ -151,22 +152,26 @@ requireContract(
     ui.includes("refreshCapacity(),") &&
     ui.includes("const installRuntimeListeners = async () =>") &&
     ui.includes("void connectBackend();") &&
-    ui.includes("Git-isolated workers") &&
+    automation.includes("concurrency: 1") &&
+    automation.includes("worktrees: false") &&
+    automation.includes("promptChainViewDraft") &&
+    !automation.includes("Git-isolated workers") &&
+    !automation.includes("<span>Workers</span>") &&
     !automation.includes("supervisor") &&
     ui.includes('view() === "supervision"') &&
     supervision.includes('"runtime_start_supervision"') &&
     supervision.includes('"runtime_stop_supervision"') &&
     supervision.includes("projectIds") &&
-    supervision.includes("promptTemplates") &&
+    supervision.includes("promptTemplates: []") &&
     supervision.includes("maxCycles: null") &&
-    supervision.includes("Reusable prompt playbook") &&
-    supervision.includes("Continuous until stopped") &&
-    app.includes("chains={automation()?.catalog.chains ?? []}") &&
+    supervision.includes("modelProject()?.canonicalRoot") &&
+    !supervision.includes("Reusable prompt playbook") &&
+    !app.includes("chains={automation()?.catalog.chains ?? []}") &&
     app.includes('"supervision://changed"') &&
     styles.includes(".automation-layout") &&
     styles.includes(".automation-step") &&
     styles.includes(".supervision-surface"),
-  "finite Automation and continuous multi-project Supervision must remain separate first-class keyboard-accessible surfaces driven by backend invalidation rather than polling",
+  "sequential Prompt chains and continuous multi-project Supervision must remain separate first-class keyboard-accessible surfaces driven by backend invalidation rather than polling",
 );
 requireContract(
   entry.includes("waitForDesktopBackend") &&
@@ -196,7 +201,6 @@ requireContract(
     !models.includes("!props.piReady") &&
     !models.includes("!props.projectPath.trim()") &&
     models.includes("Model diagnostics") &&
-    models.includes('diagnostics.scope === "global"') &&
     models.includes('"runtime_probe_project_launch_options"') &&
     models.includes('"runtime_model_catalog"') &&
     models.includes('"runtime_model_preferences"') &&
@@ -209,6 +213,7 @@ requireContract(
     supervision.includes("<ModelPicker") &&
     automation.includes("provider: model()?.provider ?? null") &&
     supervision.includes("provider: model()?.provider ?? null") &&
+    supervision.includes('label="Model and thinking"') &&
     models.includes("for (const model of discovery()?.models ?? [])") &&
     models.includes('optgroup label="Favorites"') &&
     models.includes("modelSelectElement.value = key") &&
@@ -218,11 +223,9 @@ requireContract(
     models.includes('aria-pressed={props.model ? selectedIsFavorite() : false}') &&
     models.includes('"★ Favorited" : "☆ Favorite"') &&
     projects.includes("rememberNewRunSelection") &&
-    projects.includes("Remembers your last model") &&
     !projects.includes('setLaunchModelKey("");\n    setLaunchThinking("");') &&
-    models.includes("models.length} model") &&
     models.includes("Pi model discovery:"),
-  "New Run, Automation, and Supervision must load Pi's model catalog globally, share durable favorites-first ordering, and keep New Run's selected model durable without coupling discovery to the Pi version probe",
+  "New Run, Prompt chains, and Supervision must use the shared Pi model catalog and favorites-first selector, with Supervision probing against a selected project and New Run keeping its durable preference",
 );
 requireContract(
   ui.includes('when={view() === "run"}') && ui.includes('when={selectedRun()}'),
@@ -235,7 +238,6 @@ requireContract(
     ui.includes('"runtime_remove_project"') &&
     projects.includes("projects: DesktopProjectRecord[]") &&
     projects.includes("Choose a saved project") &&
-    projects.includes("Browse once; used folders are saved here for future runs") &&
     projects.includes("Manage saved projects") &&
     !app.includes("<ProjectManager"),
   "durable project registrations must act as quick directory presets inside New Run, with relocation/removal available on demand rather than occupying the sidebar",
@@ -283,9 +285,11 @@ requireContract(
     ui.split("<SessionCatalogBrowser").length - 1 >= 2 &&
     ui.includes('view() === "sessions"') &&
     ui.includes("Recent sessions") &&
-    ui.includes("Nothing is scanned while this view is") &&
+    sessions.includes("autoLoad?: boolean") &&
+    sessions.includes("autoLoadProjectPath") &&
+    sessions.includes("autoLoad") &&
     ui.includes("Resume launch options"),
-  "historical sessions must have a first-class on-demand navigation surface that reuses the bounded resume browser",
+  "Recent Sessions must automatically load the newest bounded page while New Run reuses the same browser without enabling automatic catalog work",
 );
 requireContract(
   ui.includes('view() === "attention"') &&
@@ -351,6 +355,15 @@ requireContract(
   "dashboard orchestration state must project bounded compaction/queue/retry state and keep Stop reachable across stoppable Pi activity",
 );
 requireContract(
+  app.includes("function DashboardRunMetrics") &&
+    app.includes('invokeDesktop<SessionStats>("runtime_session_stats"') &&
+    app.includes("sessionChanged || justSettled") &&
+    app.includes("Context ${Math.min(100, Math.max(0, contextPercent)).toFixed(1)}%") &&
+    app.includes("usage.tokens.total.toLocaleString()") &&
+    app.includes("run-card-live-facts"),
+  "dashboard run cards must show lightweight event-driven Pi context/token facts without polling",
+);
+requireContract(
   ui.includes("startedUnixMs: number") &&
     ui.includes("terminalUnixMs: number | null") &&
     ui.includes("runElapsedLabel(run, elapsedClockUnixMs())") &&
@@ -368,7 +381,7 @@ requireContract(
 requireContract(
   ui.includes("const live = () => props.run.rpc?.live") &&
     ui.includes('class="live-block live-thinking live-reasoning"') &&
-    ui.includes('class="live-block live-tool"') &&
+    !composer.includes('class="live-block live-tool"') &&
     ui.includes('class="live-block live-command"') &&
     ui.includes("Model turn active · thinking / generating") &&
     ui.includes("Pi is idle and ready") &&
@@ -412,7 +425,7 @@ requireContract(
     !ui.includes("Running shell command") &&
     !ui.includes("VERBOSE_THINKING_BYTES") &&
     !ui.includes("collapseThinking"),
-  "the top conversation must preserve prompts verbatim and render only final answers as sanitized rich text, treat Pi's advertised-but-not-yet-created zero-message session file as a valid empty latest page, seed Pi get_entries synchronization even from that null cursor, and follow session-sync revisions so final output cannot disappear at settlement while the lower activity pane drops transient content",
+  "the top conversation must preserve prompts verbatim and render only final answers as sanitized rich text, keep rapid tool calls represented only by stable activity status, treat Pi's advertised-but-not-yet-created zero-message session file as a valid empty latest page, seed Pi get_entries synchronization even from that null cursor, and follow session-sync revisions so final output cannot disappear at settlement while the lower activity pane drops transient content",
 );
 requireContract(
   ui.includes('type InspectorKind = "details" | "changes" | "tree"') &&

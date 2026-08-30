@@ -10,10 +10,10 @@ Pi Wizard provides these primary workflows:
 
 - **New Run** — choose a saved project directory, execution root, model/thinking level, and optional initial task, then start one Pi RPC session.
 - **Active Runs** — see independent live sessions, their project/worktree identity, state, model, elapsed time, and current high-level activity.
-- **Recent Sessions** — find and resume Pi-owned JSONL sessions through bounded project-scoped paging.
+- **Recent Sessions** — automatically show the newest Pi-owned JSONL sessions for the selected project, with bounded paging and search.
 - **Needs Attention** — answer backend-owned Pi extension requests by exact run/request identity.
 - **Changes** — inspect bounded repository status and paged per-file diffs for a run's immutable execution root.
-- **Automation** — run finite saved prompt chains through ordinary Pi sessions under the same live-run ceiling as manual work.
+- **Prompt chains** — run an ordered saved prompt list sequentially. Each prompt gets a fresh Pi session in the selected project's local checkout, then the next prompt starts after that session settles and closes.
 - **Supervision** — keep live runs moving across any selected set of projects with one independent Pi supervisor session. Idle results trigger bounded LLM decisions that may Send the next task, Steer/Follow up active work, or Stop a run that should not continue.
 
 ## Core model
@@ -29,7 +29,7 @@ Projects are convenience presets, not containers for session state. Selecting a 
 
 ## Model selection
 
-The shared model picker is used by New Run, Automation, and Supervision.
+The shared model picker is used by New Run, Prompt chains, and Supervision.
 
 - Models come from Pi's `get_available_models` capability discovery.
 - Pi remains the authority for provider authentication and model capability metadata.
@@ -43,7 +43,7 @@ The shared model picker is used by New Run, Automation, and Supervision.
 The run surface separates durable conversation from live execution detail.
 
 - The upper **Conversation** pane shows user prompts and final assistant answers only. Prompts are preserved verbatim; final answers render sanitized Markdown with bounded syntax-highlighted code blocks.
-- The lower **Live activity** pane is always present and shows only current execution detail: model reasoning, active tool/output previews, direct command output, and the in-progress answer. Completed reasoning/answer text drops out after the turn settles so it is not duplicated above.
+- The lower **Live activity** pane is always present and shows current reasoning, direct command output, and the in-progress answer. Tool calls are summarized by the stable high-level activity status instead of rapidly appearing/disappearing tool cards.
 - A persistent live-status label distinguishes an active model turn from idle state and shows a separate advisory when Pi still reports the turn active after an unusually quiet RPC interval.
 - Both panes auto-follow only while the user remains at the bottom; scrolling upward disables forced autoscroll.
 - Large persisted history remains paged/windowed rather than resident in the renderer.

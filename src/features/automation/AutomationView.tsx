@@ -8,29 +8,53 @@ import type { DesktopProjectRecord } from "../../types/projects";
 import type {
   AutomationChain,
   DesktopAutomationSnapshot,
-  RuntimeCapacitySnapshot,
 } from "./types";
 
 interface AutomationViewProps {
   snapshot: DesktopAutomationSnapshot | undefined;
   projects: DesktopProjectRecord[];
-  capacity: RuntimeCapacitySnapshot | undefined;
-  piReady: boolean;
   onRefresh: () => Promise<unknown>;
   onOpenRun: (runId: string) => void;
 }
 
+interface PromptChainViewDraft {
+  chainId: string | undefined;
+  name: string;
+  prompts: string[];
+  projectId: string;
+  model: ModelSelection | undefined;
+  thinking: ThinkingLevel | "";
+}
+
+let promptChainViewDraft: PromptChainViewDraft = {
+  chainId: undefined,
+  name: "",
+  prompts: [""],
+  projectId: "",
+  model: undefined,
+  thinking: "",
+};
+
 export function AutomationView(props: AutomationViewProps) {
-  const [chainId, setChainId] = createSignal<string>();
-  const [name, setName] = createSignal("");
-  const [prompts, setPrompts] = createSignal<string[]>([""]);
-  const [projectId, setProjectId] = createSignal("");
-  const [concurrency, setConcurrency] = createSignal("4");
-  const [worktrees, setWorktrees] = createSignal(true);
-  const [model, setModel] = createSignal<ModelSelection>();
-  const [thinking, setThinking] = createSignal<ThinkingLevel | "">("");
+  const [chainId, setChainId] = createSignal<string | undefined>(promptChainViewDraft.chainId);
+  const [name, setName] = createSignal(promptChainViewDraft.name);
+  const [prompts, setPrompts] = createSignal<string[]>([...promptChainViewDraft.prompts]);
+  const [projectId, setProjectId] = createSignal(promptChainViewDraft.projectId);
+  const [model, setModel] = createSignal<ModelSelection | undefined>(promptChainViewDraft.model);
+  const [thinking, setThinking] = createSignal<ThinkingLevel | "">(promptChainViewDraft.thinking);
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal<string>();
+
+  createEffect(() => {
+    promptChainViewDraft = {
+      chainId: chainId(),
+      name: name(),
+      prompts: [...prompts()],
+      projectId: projectId(),
+      model: model(),
+      thinking: thinking(),
+    };
+  });
 
   createEffect(() => {
     if (!projectId()) {
@@ -122,12 +146,11 @@ export function AutomationView(props: AutomationViewProps) {
   const startChain = async () => {
     const id = chainId();
     const project = projectId();
-    const workers = Number.parseInt(concurrency(), 10);
     if (!id) {
       setError("Save the chain before starting it.");
       return;
     }
-    if (!project || !Number.isInteger(workers)) return;
+    if (!project) return;
     setBusy(true);
     setError(undefined);
     try {
@@ -135,8 +158,8 @@ export function AutomationView(props: AutomationViewProps) {
         request: {
           chainId: id,
           projectId: project,
-          concurrency: workers,
-          worktrees: worktrees(),
+          concurrency: 1,
+          worktrees: false,
           provider: model()?.provider ?? null,
           model: model()?.id ?? null,
           thinking: thinking() || null,
@@ -159,31 +182,17 @@ export function AutomationView(props: AutomationViewProps) {
     }
   };
 
-  const maxWorkers = () => Math.max(1, props.capacity?.liveRunLimit ?? 8);
-
-  createEffect(() => {
-    const maximum = maxWorkers();
-    const current = Number.parseInt(concurrency(), 10);
-    if (Number.isInteger(current) && current > maximum) setConcurrency(String(maximum));
-  });
-
   return (
-    <section class="automation-surface" aria-label="Automation chains">
+    <section class="automation-surface" aria-label="Prompt chains">
       <header class="surface-heading">
-        <div>
-          <h1>Automation</h1>
-          <p>
-            Run a finite prompt list through new Pi sessions. Automation schedules workers only;
-            supervision is configured independently.
-          </p>
-        </div>
+        <h1>Prompt chains</h1>
         <button type="button" onClick={newChain}>New chain</button>
       </header>
 
       <Show when={props.snapshot?.catalog.recoveryNotice}>
-        {(notice) => <p class="app-error">Saved automation definitions were reset: {notice()}</p>}
+        {(notice) => <p class="app-error">Saved prompt chains were reset: {notice()}</p>}
       </Show>
-      <Show when={error()}>{(message) => <p class="app-error">Automation: {message()}</p>}</Show>
+      <Show when={error()}>{(message) => <p class="app-error">Prompt chains: {message()}</p>}</Show>
 
       <div class="automation-layout">
         <aside class="automation-library" aria-label="Saved chains">
@@ -226,7 +235,7 @@ export function AutomationView(props: AutomationViewProps) {
                   <textarea
                     rows="5"
                     value={prompt}
-                    aria-label={`Automation prompt ${index() + 1}`}
+                    aria-label={`Prompt chain prompt ${index() + 1}`}
                     onInput={(event) => updatePrompt(index(), event.currentTarget.value)}
                   />
                 </article>
@@ -258,27 +267,6 @@ export function AutomationView(props: AutomationViewProps) {
                 </For>
               </select>
             </label>
-            <label>
-              <span>Workers</span>
-              <input
-                type="number"
-                min="1"
-                max={maxWorkers()}
-                value={concurrency()}
-                onInput={(event) => setConcurrency(event.currentTarget.value)}
-              />
-            </label>
-            <label class="automation-checkbox">
-              <input
-                type="checkbox"
-                checked={worktrees()}
-                onChange={(event) => {
-                  setWorktrees(event.currentTarget.checked);
-                  if (!event.currentTarget.checked) setConcurrency("1");
-                }}
-              />
-              <span>Git-isolated workers</span>
-            </label>
           </div>
 
           <ModelPicker
@@ -288,8 +276,7 @@ export function AutomationView(props: AutomationViewProps) {
             thinking={thinking()}
             onModelChange={setModel}
             onThinkingChange={setThinking}
-            label="Worker model and thinking"
-            description="Applied to each new worker session in this chain run."
+            label="Model and thinking"
           />
 
           <div class="automation-builder-actions">
@@ -297,15 +284,15 @@ export function AutomationView(props: AutomationViewProps) {
             <Show when={chainId()}>
               <button type="button" disabled={busy()} onClick={() => void deleteChain()}>Delete</button>
               <button type="button" class="primary-action" disabled={busy() || !projectId()} onClick={() => void startChain()}>
-                Start chain
+                Run chain
               </button>
             </Show>
           </div>
         </div>
       </div>
 
-      <section class="automation-executions" aria-label="Automation executions">
-        <h2>Executions</h2>
+      <section class="automation-executions" aria-label="Prompt chain runs">
+        <h2>Chain runs</h2>
         <For each={props.snapshot?.executions ?? []}>
           {(execution) => (
             <article class="automation-execution">
@@ -313,8 +300,7 @@ export function AutomationView(props: AutomationViewProps) {
                 <div>
                   <strong>{execution.chainName}</strong>
                   <span>
-                    {execution.status.replaceAll("_", " ")} · {execution.concurrency} worker{execution.concurrency === 1 ? "" : "s"}
-                    {execution.worktrees ? " · Git-isolated" : " · local sequential"}
+                    {execution.status.replaceAll("_", " ")} · {execution.steps.length} prompt{execution.steps.length === 1 ? "" : "s"}
                   </span>
                 </div>
                 <Show when={!['completed', 'completed_with_errors', 'cancelled', 'failed'].includes(execution.status)}>
@@ -345,7 +331,7 @@ export function AutomationView(props: AutomationViewProps) {
           )}
         </For>
         <Show when={(props.snapshot?.executions.length ?? 0) === 0}>
-          <p class="empty-state">No automation executions yet.</p>
+          <p class="empty-state">No prompt chains run yet.</p>
         </Show>
       </section>
     </section>

@@ -2426,6 +2426,10 @@ body {
   font-size: 0.68rem;
 }
 
+.run-card-live-facts:empty {
+  display: none;
+}
+
 .empty-state {
   display: grid;
   justify-items: start;

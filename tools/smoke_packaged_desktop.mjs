@@ -1371,8 +1371,10 @@ async function main() {
           candidate.closest(".model-picker-heading") &&
           ["Refresh", "Loading…", "Checking…"].includes(candidate.textContent.trim())
         );
-        const text = document.body.innerText;
-        if (refresh && text.includes("4 models available from Pi without project context")) break;
+        const globalModelSelect = [...document.querySelectorAll("select")].find((candidate) =>
+          [...candidate.options].some((option) => option.textContent.includes("Alpha"))
+        );
+        if (refresh && (globalModelSelect?.options.length ?? 0) >= 5) break;
         await new Promise((resolveDelay) => window.setTimeout(resolveDelay, 100));
       }
       const text = document.body.innerText;
@@ -1416,7 +1418,7 @@ async function main() {
       return {
         refreshFound: Boolean(refresh),
         refreshDisabled: refreshDisabledBeforeProjectSelection,
-        globalModelsVisible: text.includes("4 models available from Pi without project context"),
+        globalModelsVisible: selectableModelsBeforeProjectSelection >= 5,
         diagnosticsVisible: text.includes("Model diagnostics"),
         selectableModels: selectableModelsBeforeProjectSelection,
         modelControlUsable,
@@ -1552,7 +1554,7 @@ async function main() {
     const navigation = await client.evaluate(String.raw`(async () => {
       const labels = [
         "Dashboard",
-        "Automation",
+        "Prompt chains",
         "Supervision",
         "Needs attention",
         "Recent sessions",

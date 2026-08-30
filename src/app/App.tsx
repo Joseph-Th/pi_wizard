@@ -29,6 +29,7 @@ import {
   RuntimeStopResult,
   RuntimeCloseResult,
   RunHydration,
+  type SessionStats,
   GitReviewSummary,
   RuntimeHydration,
   RUNTIME_HYDRATION_SCHEMA_VERSION,
@@ -62,6 +63,68 @@ export interface AppStartupSnapshot {
   runtime: RuntimeHydration;
   capacity: RuntimeCapacitySnapshot;
   attachmentLimits: RuntimeAttachmentLimits;
+}
+
+function DashboardRunMetrics(props: { run: RunHydration }) {
+  const [stats, setStats] = createSignal<SessionStats>();
+  let requestSequence = 0;
+  let observedSessionId: string | undefined;
+  let observedWorking = false;
+
+  const refreshStats = async (sessionId: string) => {
+    const sequence = ++requestSequence;
+    try {
+      const result = await invokeDesktop<SessionStats>("runtime_session_stats", {
+        request: { runId: props.run.run.id },
+      });
+      if (sequence === requestSequence && props.run.run.session.sessionId === sessionId) {
+        setStats(result);
+      }
+    } catch {
+      // Dashboard metrics are supplemental. The selected-run usage rail exposes explicit errors.
+    }
+  };
+
+  createEffect(() => {
+    const sessionId = props.run.run.session.sessionId ?? undefined;
+    const working = props.run.run.agentWorking;
+    const sessionChanged = sessionId !== observedSessionId;
+    const justSettled = observedWorking && !working;
+    observedWorking = working;
+
+    if (sessionChanged) {
+      observedSessionId = sessionId;
+      requestSequence += 1;
+      setStats(undefined);
+    }
+    if (props.run.run.process === "ready" && sessionId && (sessionChanged || justSettled)) {
+      void refreshStats(sessionId);
+    }
+  });
+
+  onCleanup(() => {
+    requestSequence += 1;
+  });
+
+  const facts = () => {
+    const values: string[] = [];
+    const usage = stats();
+    const contextPercent = usage?.contextUsage?.percent;
+    if (contextPercent !== null && contextPercent !== undefined) {
+      values.push(`Context ${Math.min(100, Math.max(0, contextPercent)).toFixed(1)}%`);
+    }
+    if (usage) values.push(`${usage.tokens.total.toLocaleString()} tokens`);
+    const activeTools = props.run.rpc?.live.activeTools.length ?? 0;
+    if (activeTools > 0) values.push(`${activeTools} active tool${activeTools === 1 ? "" : "s"}`);
+    const queued = runQueuedCount(props.run);
+    if (queued > 0) values.push(`${queued} queued`);
+    if (values.length === 0 && props.run.run.session.messageCount !== null) {
+      values.push(`${props.run.run.session.messageCount} messages`);
+    }
+    return values.join(" · ");
+  };
+
+  return <small class="run-card-live-facts">{facts()}</small>;
 }
 
 export function App(props: { startup: AppStartupSnapshot }) {
@@ -254,10 +317,7 @@ export function App(props: { startup: AppStartupSnapshot }) {
 
   createEffect(() => {
     if (view() === "automation") void refreshAutomation();
-    if (view() === "supervision") {
-      void refreshSupervision();
-      void refreshAutomation();
-    }
+    if (view() === "supervision") void refreshSupervision();
   });
 
   const clampSidebarWidth = (width: number) => {
@@ -711,7 +771,7 @@ export function App(props: { startup: AppStartupSnapshot }) {
               aria-current={view() === "automation" ? "page" : undefined}
               onClick={() => setView("automation")}
             >
-              Automation
+              Prompt chains
             </button>
             <button
               type="button"
@@ -958,13 +1018,11 @@ export function App(props: { startup: AppStartupSnapshot }) {
 
           <Show when={view() === "automation"}>
             <Show when={automationError()}>
-              {(message) => <p class="app-error">Automation state failed: {message()}</p>}
+              {(message) => <p class="app-error">Prompt chains failed: {message()}</p>}
             </Show>
             <AutomationView
               snapshot={automation()}
               projects={projects()}
-              capacity={capacity()}
-              piReady={Boolean(piProbe())}
               onRefresh={refreshAutomation}
               onOpenRun={openRun}
             />
@@ -977,9 +1035,7 @@ export function App(props: { startup: AppStartupSnapshot }) {
             <SupervisionView
               snapshots={supervision()}
               projects={projects()}
-              chains={automation()?.catalog.chains ?? []}
               capacity={capacity()}
-              piReady={Boolean(piProbe())}
               onRefresh={refreshSupervision}
               onOpenRun={openRun}
             />
@@ -987,10 +1043,7 @@ export function App(props: { startup: AppStartupSnapshot }) {
 
           <Show when={view() === "launcher"}>
             <header class="surface-heading">
-              <div>
-                <h1>New run</h1>
-                <p>Start Pi in a local checkout or an isolated Git worktree.</p>
-              </div>
+              <h1>New run</h1>
               <button type="button" onClick={() => setView("dashboard")}>Cancel</button>
             </header>
             <ProjectLauncher
@@ -1151,10 +1204,7 @@ export function App(props: { startup: AppStartupSnapshot }) {
           <Show when={view() === "dashboard"}>
             <section class="dashboard" aria-label="Run dashboard">
               <header class="surface-heading">
-                <div>
-                  <h1>Runs</h1>
-                  <p>Open a session for details. Runs keep working when you switch views.</p>
-                </div>
+                <h1>Runs</h1>
                 <button type="button" onClick={() => setView("launcher")}>New run</button>
               </header>
 
@@ -1186,13 +1236,7 @@ export function App(props: { startup: AppStartupSnapshot }) {
                           <span class={`status-dot tone-${runStatusTone(run)}`} aria-hidden="true" />
                           <div>
                             <strong>{runActivityLabel(run)}</strong>
-                            <small>
-                              {run.run.process === "ready" && !run.run.agentWorking
-                                ? "Pi process is available"
-                                : run.run.process === "exited"
-                                  ? "Process finished"
-                                  : "Live backend state"}
-                            </small>
+                            <DashboardRunMetrics run={run} />
                           </div>
                         </div>
                         <div class="run-card-meta">

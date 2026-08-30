@@ -28,7 +28,6 @@ interface ModelPickerProps {
   onThinkingChange: (level: ThinkingLevel | "") => void;
   rememberNewRunSelection?: boolean;
   label?: string;
-  description?: string;
 }
 
 interface PickerModel extends ModelSummary {
@@ -385,9 +384,6 @@ export function ModelPicker(props: ModelPickerProps) {
       <div class="model-picker-heading">
         <div>
           <strong>{props.label ?? "Model and thinking"}</strong>
-          <Show when={props.description}>
-            {(description) => <span>{description()}</span>}
-          </Show>
         </div>
         <button
           type="button"
@@ -483,25 +479,19 @@ export function ModelPicker(props: ModelPickerProps) {
 
       <Show when={discovery()}>
         {(snapshot) => (
-          <>
-            <p class="model-picker-note">
-              {snapshot().models.length} model{snapshot().models.length === 1 ? "" : "s"} available from Pi
-              {snapshot().diagnostics.scope === "global" ? " without project context" : " for this project"}.
-            </p>
-            <details class="model-catalog-editor">
-              <summary>Model diagnostics</summary>
-              <div class="model-picker-note">
-                <div>Scope: {snapshot().diagnostics.scope}</div>
-                <div title={snapshot().diagnostics.probeRoot}>Probe root: {snapshot().diagnostics.probeRoot}</div>
-                <div>Environment: {snapshot().diagnostics.pathSource}</div>
-                <div title={snapshot().diagnostics.logicalPi}>Logical Pi: {snapshot().diagnostics.logicalPi}</div>
-                <div title={snapshot().diagnostics.invocationExecutable}>
-                  Invocation: {snapshot().diagnostics.invocationExecutable}
-                  {snapshot().diagnostics.windowsCommandWrapper ? " · Windows Pi wrapper" : ""}
-                </div>
+          <details class="model-catalog-editor">
+            <summary>Model diagnostics</summary>
+            <div class="model-picker-note">
+              <div>Scope: {snapshot().diagnostics.scope}</div>
+              <div title={snapshot().diagnostics.probeRoot}>Probe root: {snapshot().diagnostics.probeRoot}</div>
+              <div>Environment: {snapshot().diagnostics.pathSource}</div>
+              <div title={snapshot().diagnostics.logicalPi}>Logical Pi: {snapshot().diagnostics.logicalPi}</div>
+              <div title={snapshot().diagnostics.invocationExecutable}>
+                Invocation: {snapshot().diagnostics.invocationExecutable}
+                {snapshot().diagnostics.windowsCommandWrapper ? " · Windows Pi wrapper" : ""}
               </div>
-            </details>
-          </>
+            </div>
+          </details>
         )}
       </Show>
 
