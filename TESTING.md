@@ -63,7 +63,7 @@ It should deterministically exercise:
 - normal request/response;
 - first-class `steer` and `follow_up`, including bounded image payloads;
 - prompt-during-streaming behavior where Pi requires `prompt.streamingBehavior`;
-- streaming text/thinking/tool-call blocks keyed by content index, including interleaving, sparse indices, aggregate block/byte ceilings, malformed known sub-events, and forward-compatible unknown sub-events, with `message_end` as the authoritative completed message;
+- streaming text/thinking/tool-call blocks keyed by content index, including interleaving, sparse indices, aggregate block/byte ceilings, malformed known sub-events, and forward-compatible unknown sub-events, with `message_end` as the authoritative completed message; persisted assistant messages whose `stopReason` is `toolUse` must remain outside Conversation even when they contain thinking or text alongside the tool call, so only the terminal assistant answer for the user turn is presented as final output;
 - direct RPC `bash_execution_update` chunks correlated to their exact originating request ID, including bounded preview behavior when streamed output exceeds the final response;
 - current direct Bash `excludeFromContext` request shape and final exit/cancel/truncation/full-output-path metadata;
 - direct Bash admission is execution-root exclusive with model/session mutations and Close, while read-only probes/export and `abort_bash` remain allowed; the reciprocal idle-prompt regression holds ownership from successful prompt write through authoritative `agent_start` so a second prompt or Bash cannot enter that pre-event gap;

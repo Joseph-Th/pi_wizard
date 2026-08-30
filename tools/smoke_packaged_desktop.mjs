@@ -230,10 +230,10 @@ process.stdin.on("data", (chunk) => {
         sessionFile,
         sessionId,
         userMessages: 1,
-        assistantMessages: 1,
-        toolCalls: 0,
-        toolResults: 0,
-        totalMessages: 2,
+        assistantMessages: 2,
+        toolCalls: 1,
+        toolResults: 1,
+        totalMessages: 4,
         tokens: {
           input: 50000,
           output: 10000,
@@ -290,6 +290,8 @@ process.stdin.on("data", (chunk) => {
     } else if (request.type === "prompt" && persistedSession) {
       turn += 1;
       const userId = "packaged-u" + turn;
+      const toolAssistantId = "packaged-tool-a" + turn;
+      const toolResultId = "packaged-tool-r" + turn;
       const assistantId = "packaged-a" + turn;
       appendEntry({
         type: "message",
@@ -345,8 +347,37 @@ process.stdin.on("data", (chunk) => {
         });
         appendEntry({
           type: "message",
-          id: assistantId,
+          id: toolAssistantId,
           parentId: userId,
+          timestamp: "2026-08-29T00:00:01.500Z",
+          message: {
+            role: "assistant",
+            content: [
+              { type: "thinking", thinking: "inspect before answering" },
+              { type: "text", text: "Packaged intermediate tool step" },
+              { type: "toolCall", id: "packaged-call-" + turn, name: "read", arguments: { path: "seed.txt" } }
+            ],
+            model: "packaged-smoke",
+            stopReason: "toolUse"
+          }
+        });
+        appendEntry({
+          type: "message",
+          id: toolResultId,
+          parentId: toolAssistantId,
+          timestamp: "2026-08-29T00:00:01.750Z",
+          message: {
+            role: "toolResult",
+            toolCallId: "packaged-call-" + turn,
+            toolName: "read",
+            content: [{ type: "text", text: "packaged tool result" }],
+            isError: false
+          }
+        });
+        appendEntry({
+          type: "message",
+          id: assistantId,
+          parentId: toolResultId,
           timestamp: "2026-08-29T00:00:02.000Z",
           message: {
             role: "assistant",
@@ -801,8 +832,12 @@ async function smokeIsolatedTranscriptHandoff() {
       const finalDeadline = Date.now() + 7_000;
       let finalSnapshot;
       while (Date.now() < finalDeadline) {
-        const assistant = [...document.querySelectorAll(".history-assistant")].find((candidate) =>
+        const assistantRows = [...document.querySelectorAll(".history-assistant")];
+        const assistant = assistantRows.find((candidate) =>
           candidate.textContent.includes("Packaged handoff")
+        );
+        const intermediateToolStepVisible = assistantRows.some((candidate) =>
+          candidate.textContent.includes("Packaged intermediate tool step")
         );
         const markdown = assistant?.querySelector(".markdown-body");
         const prompt = document.querySelector(".history-user .history-prompt-text")?.textContent ?? null;
@@ -830,6 +865,8 @@ async function smokeIsolatedTranscriptHandoff() {
           codeHighlighted &&
           rawHtmlVisible &&
           !rawHtmlExecuted &&
+          assistantRows.length === 1 &&
+          !intermediateToolStepVisible &&
           !liveAnswerPresent &&
           !liveReasoningPresent &&
           status.includes("Pi is idle and ready") &&
@@ -847,6 +884,8 @@ async function smokeIsolatedTranscriptHandoff() {
             codeHighlighted,
             rawHtmlVisible,
             rawHtmlExecuted,
+            assistantRows: assistantRows.length,
+            intermediateToolStepVisible,
             liveAnswerPresent,
             liveReasoningPresent,
             status,

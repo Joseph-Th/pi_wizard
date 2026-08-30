@@ -723,6 +723,13 @@ fn message_item(
             })
         }
         "assistant" => {
+            // Pi emits one assistant message for each model step inside a
+            // tool-using agent turn. Those `toolUse` messages can contain
+            // thinking or text in addition to tool calls, but they are not
+            // the turn's final answer and must not become conversation rows.
+            if message.get("stopReason").and_then(Value::as_str) == Some("toolUse") {
+                return None;
+            }
             let content = message.get("content")?;
             let (mut text, mut text_truncated, reasoning, reasoning_truncated) =
                 assistant_content(content, limits.max_session_history_item_text_bytes);
@@ -1243,6 +1250,50 @@ mod tests {
         )
         .expect("history page");
         assert!(page.items.is_empty());
+    }
+
+    #[test]
+    fn tool_loop_assistant_messages_are_not_presented_as_final_answers() {
+        let fixture = Fixture::new("tool-loop-conversation");
+        fixture.write(&[
+            user("user", None, "audit the project"),
+            serde_json::json!({
+                "type":"message","id":"assistant-tool","parentId":"user",
+                "timestamp":"2026-08-27T00:00:00.500Z",
+                "message":{
+                    "role":"assistant","model":"fixture","stopReason":"toolUse",
+                    "content":[
+                        {"type":"thinking","thinking":"I need to inspect the repository."},
+                        {"type":"text","text":"I will inspect the relevant files first."},
+                        {"type":"toolCall","id":"call","name":"read","arguments":{"path":"AGENTS.md"}}
+                    ]
+                }
+            }),
+            serde_json::json!({
+                "type":"message","id":"tool","parentId":"assistant-tool",
+                "timestamp":"2026-08-27T00:00:01.000Z",
+                "message":{
+                    "role":"toolResult","toolCallId":"call","toolName":"read",
+                    "content":[{"type":"text","text":"rules"}],"isError":false
+                }
+            }),
+            assistant("assistant-final", Some("tool"), "audit complete"),
+        ]);
+
+        let page = read_session_history_page(
+            &fixture.session,
+            &fixture.project,
+            "session-1",
+            None,
+            RuntimeLimits::default(),
+        )
+        .expect("tool-loop history page");
+
+        assert_eq!(page.items.len(), 2);
+        assert_eq!(page.items[0].kind, SessionTimelineKind::User);
+        assert_eq!(page.items[0].text, "audit the project");
+        assert_eq!(page.items[1].kind, SessionTimelineKind::Assistant);
+        assert_eq!(page.items[1].text, "audit complete");
     }
 
     #[test]
