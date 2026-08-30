@@ -95,7 +95,7 @@ Pi session JSONL remains in Pi's own session storage and is never replaced by an
 
 Pi Wizard is a Windows GUI-subsystem application and must not open a console window.
 
-For standard npm Pi installs, the desktop resolves the npm launcher to Node plus Pi's CLI entry point and starts Node directly with no console window. Live runs reject unresolved script launchers rather than retaining a command-shell wrapper. Normal shutdown belongs to `RuntimeManager`; a Windows kill-on-close Job Object is the abrupt-exit backstop for inherited Pi/Node descendants.
+For standard npm Pi installs, the desktop uses Pi's public `pi.cmd` launcher through an app-owned hidden Windows command wrapper. The wrapper preserves Pi's own launcher behavior, keeps stdin/stdout as the RPC transport, does not inspect npm's internal `node_modules` layout, and opens no console window. `RuntimeManager` owns the wrapper and its descendants as one exact process tree; a Windows kill-on-close Job Object is the abrupt-exit backstop.
 
 ## Repository layout
 
@@ -150,6 +150,16 @@ python tools/smoke_live_pi.py
 ```
 
 That smoke uses an ephemeral no-session/offline Pi RPC process and does not send a model prompt.
+
+After an optimized desktop build, the packaged-app boundary can also be checked against the actually installed Pi rather than the deterministic fake fixture. In PowerShell:
+
+```text
+$env:PI_WIZARD_SMOKE_REAL_PI="1"
+$env:PI_WIZARD_REAL_PI_PROMPT="Reply with OK only."
+node tools/smoke_packaged_desktop.mjs
+```
+
+This launches a disposable copy of the release executable, requires the desktop to resolve Pi through the Windows command wrapper, starts a real persistent Pi run in a disposable project, sends one minimal prompt, and requires the run to enter active work, settle, and remain `Ready`.
 
 ## Documentation map
 

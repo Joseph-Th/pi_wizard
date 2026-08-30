@@ -13,7 +13,7 @@ use tokio::time::{Instant, timeout};
 
 use crate::RuntimeLimits;
 use crate::bounded::ByteRing;
-use crate::environment::ResolvedLaunchEnvironment;
+use crate::environment::{PiInvocationError, ResolvedLaunchEnvironment};
 use crate::launch::ResolvedPiLaunchSpec;
 use crate::rpc::{RpcReader, RpcWriter};
 
@@ -216,8 +216,6 @@ pub fn spawn_pi_process(
     }
     let mut command = Command::new(invocation.executable());
     command
-        .args(invocation.prefix_args())
-        .args(spec.args())
         .current_dir(spec.cwd())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -225,6 +223,9 @@ pub fn spawn_pi_process(
         .kill_on_drop(true)
         .env_clear()
         .envs(environment.variables());
+    invocation
+        .configure_command(command.as_std_mut(), &spec.args())
+        .map_err(ProcessError::Invocation)?;
 
     #[cfg(unix)]
     {
@@ -393,6 +394,8 @@ fn canonicalize_launch_executable(path: &Path) -> Result<PathBuf, ProcessError> 
 
 #[derive(Debug, Error)]
 pub enum ProcessError {
+    #[error("could not configure Pi invocation: {0}")]
+    Invocation(#[source] PiInvocationError),
     #[error("failed to canonicalize launch executable {path}: {source}")]
     CanonicalizeExecutable { path: PathBuf, source: io::Error },
     #[error("launch executable {launch} differs from resolved environment Pi {environment}")]
@@ -406,7 +409,7 @@ pub enum ProcessError {
     MissingProcessId,
     #[cfg(windows)]
     #[error(
-        "Pi launcher {path} requires a command shell; configure a direct executable or use the standard npm Pi installation so Pi Wizard can resolve Node directly"
+        "Pi launcher {path} requires an unsupported script host; use a .cmd/.bat Pi wrapper or a direct executable"
     )]
     ScriptLauncherRequiresShell { path: PathBuf },
     #[error("spawned Pi child is missing required {0} pipe")]
@@ -451,27 +454,19 @@ mod tests {
             fs::create_dir_all(&root).expect("create fixture");
             #[cfg(windows)]
             let fake_pi = {
-                let cli = root
-                    .join("node_modules")
-                    .join("@earendil-works")
-                    .join("pi-coding-agent")
-                    .join("dist")
-                    .join("bundle")
-                    .join("cli.js");
-                fs::create_dir_all(cli.parent().expect("fake Pi CLI parent"))
-                    .expect("create fake Pi npm layout");
+                let bin = root.join("wrapper with spaces");
+                fs::create_dir_all(&bin).expect("create wrapper directory");
+                let path = bin.join("pi.cmd");
                 fs::write(
-                    &cli,
+                    &path,
                     concat!(
-                        "process.stdin.once('data', () => {\n",
-                        "  process.stderr.write('0123456789abcdefghijklmnopqrstuvwxyz\\n');\n",
-                        "  process.stdout.write(JSON.stringify({id:'req-1',type:'response',command:'get_state',success:true,data:{model:null,thinkingLevel:'medium',isStreaming:false,isCompacting:false,steeringMode:'all',followUpMode:'one-at-a-time',sessionId:'fake-session',autoCompactionEnabled:true,messageCount:0,pendingMessageCount:0}}) + '\\n', () => process.exit(0));\n",
-                        "});\n"
+                        "@echo off\r\n",
+                        "set /p request=\r\n",
+                        ">&2 echo 0123456789abcdefghijklmnopqrstuvwxyz\r\n",
+                        "echo {\"id\":\"req-1\",\"type\":\"response\",\"command\":\"get_state\",\"success\":true,\"data\":{\"model\":null,\"thinkingLevel\":\"medium\",\"isStreaming\":false,\"isCompacting\":false,\"steeringMode\":\"all\",\"followUpMode\":\"one-at-a-time\",\"sessionId\":\"fake-session\",\"autoCompactionEnabled\":true,\"messageCount\":0,\"pendingMessageCount\":0}}\r\n"
                     ),
                 )
-                .expect("write direct fake Pi CLI");
-                let path = root.join("pi.cmd");
-                fs::write(&path, "@echo off\r\nexit /b 1\r\n").expect("write logical Pi shim");
+                .expect("write wrapped fake Pi");
                 path
             };
             #[cfg(not(windows))]
@@ -525,8 +520,8 @@ mod tests {
     }
 
     #[cfg(windows)]
-    #[test]
-    fn live_runtime_refuses_unresolved_windows_script_launcher() {
+    #[tokio::test]
+    async fn live_runtime_wraps_windows_command_launcher_instead_of_rejecting_it() {
         let root = std::env::temp_dir().join(format!(
             "pi-wizard-process-script-rejection-{}",
             RunId::new()
@@ -541,16 +536,20 @@ mod tests {
             ..LaunchEnvironmentInput::default()
         })
         .expect("resolve logical script launcher");
-        assert!(!environment.pi_invocation().is_direct_npm_node());
+        assert!(environment.pi_invocation().is_windows_command_wrapper());
+        assert!(
+            environment
+                .pi_invocation()
+                .executable()
+                .ends_with("cmd.exe")
+        );
         let launch = PiLaunchSpec::new(pi, &root, ProjectTrustPolicy::Ignore)
             .resolve()
             .expect("resolve launch spec");
-        let error = spawn_pi_process(&launch, &environment, RuntimeLimits::default())
-            .expect_err("live runtime must reject a shell-backed Pi launcher");
-        assert!(matches!(
-            error,
-            ProcessError::ScriptLauncherRequiresShell { .. }
-        ));
+        let mut process = spawn_pi_process(&launch, &environment, RuntimeLimits::default())
+            .expect("live runtime must own the Windows command wrapper");
+        let status = process.control.wait().await.expect("wait wrapped Pi");
+        assert!(status.success());
         fs::remove_dir_all(root).expect("remove script rejection fixture");
     }
 

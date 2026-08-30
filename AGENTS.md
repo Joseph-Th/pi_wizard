@@ -55,7 +55,7 @@ Optimize for Windows desktop reliability, Pi integration, Git/worktree correctne
 - The execution root has one Pi Wizard mutation owner at a time. An accepted idle Prompt owns the pre-`agent_start` handoff; active direct Bash excludes overlapping model/session mutation and Close until it completes or is cancelled. Read-only probes/export and Bash cancellation may remain available.
 - Stop preserves recoverable queued user text before aborting. Unconfirmed termination becomes `Quarantined`; such a run cannot accept further RPC writes or be shown as safely stopped.
 - Process termination targets the exact owned process identity/tree. Never kill by executable name or wildcard.
-- Windows production runs must not retain unresolved command-shell wrappers or open console windows.
+- Windows script launchers must be normalized into an app-owned hidden wrapper with exact process-tree ownership. Standard npm `pi.cmd`/`.bat` shims are invoked through the system command interpreter with `CREATE_NO_WINDOW`; package-internal Node/CLI paths are not inferred. Unsupported script hosts fail before live spawn.
 
 ### Sessions and user data
 

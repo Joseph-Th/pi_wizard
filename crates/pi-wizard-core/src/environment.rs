@@ -241,8 +241,7 @@ pub struct ResolvedLaunchEnvironment {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResolvedPiInvocation {
     executable: PathBuf,
-    prefix_args: Vec<OsString>,
-    direct_npm_node: bool,
+    windows_command_script: Option<PathBuf>,
 }
 
 impl ResolvedPiInvocation {
@@ -252,14 +251,74 @@ impl ResolvedPiInvocation {
     }
 
     #[must_use]
-    pub fn prefix_args(&self) -> &[OsString] {
-        &self.prefix_args
+    pub fn windows_command_script(&self) -> Option<&Path> {
+        self.windows_command_script.as_deref()
     }
 
     #[must_use]
-    pub const fn is_direct_npm_node(&self) -> bool {
-        self.direct_npm_node
+    pub const fn is_windows_command_wrapper(&self) -> bool {
+        self.windows_command_script.is_some()
     }
+
+    pub fn configure_command(
+        &self,
+        command: &mut std::process::Command,
+        args: &[OsString],
+    ) -> Result<(), PiInvocationError> {
+        #[cfg(windows)]
+        if let Some(script) = &self.windows_command_script {
+            use std::os::windows::process::CommandExt;
+
+            if !windows_command_argument_supported(script.as_os_str()) {
+                return Err(PiInvocationError::UnsupportedWindowsCommandValue {
+                    field: "launcher path",
+                    index: None,
+                });
+            }
+            command.args(["/d", "/v:off", "/s", "/c"]);
+            command.env("PI_WIZARD_PI_SHIM", process_argument_path(script.as_path()));
+            let mut raw = OsString::from("\"\"%PI_WIZARD_PI_SHIM%\"");
+            for (index, arg) in args.iter().enumerate() {
+                if !windows_command_argument_supported(arg) {
+                    return Err(PiInvocationError::UnsupportedWindowsCommandValue {
+                        field: "launch argument",
+                        index: Some(index),
+                    });
+                }
+                let name = format!("PI_WIZARD_PI_ARG_{index:03}");
+                command.env(&name, arg);
+                raw.push(format!(" \"%{name}%\""));
+            }
+            // `/s /c` expects the complete command after `/c` as one raw
+            // command string. Dynamic values enter through environment-variable
+            // expansion inside quotes; delayed expansion stays disabled so `!`
+            // values are not interpreted by the delegated npm batch launcher.
+            raw.push("\"");
+            command.raw_arg(raw);
+            return Ok(());
+        }
+
+        command.args(args);
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+fn windows_command_argument_supported(value: &OsStr) -> bool {
+    use std::os::windows::ffi::OsStrExt;
+
+    !value
+        .encode_wide()
+        .any(|unit| matches!(unit, 0x22 | 0x0d | 0x0a))
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Error)]
+pub enum PiInvocationError {
+    #[error("Windows Pi wrapper cannot safely represent {field}{index_suffix}", index_suffix = index.map(|value| format!(" at index {value}")).unwrap_or_default())]
+    UnsupportedWindowsCommandValue {
+        field: &'static str,
+        index: Option<usize>,
+    },
 }
 
 impl ResolvedLaunchEnvironment {
@@ -389,50 +448,82 @@ fn resolve_pi_invocation(
 ) -> Result<ResolvedPiInvocation, EnvironmentResolutionError> {
     #[cfg(windows)]
     {
-        // npm installs both an extensionless POSIX shim (`pi`) and `pi.cmd` on
-        // Windows. PATH resolution can legitimately return either one. Detect
-        // the package layout instead of guessing from the shim extension so the
-        // long-lived Pi child is always direct node.exe + cli.js.
-        if logical_pi
-            .file_stem()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name.eq_ignore_ascii_case("pi"))
-            && let Some(parent) = logical_pi.parent()
-        {
-            let cli = parent
-                .join("node_modules")
-                .join("@earendil-works")
-                .join("pi-coding-agent")
-                .join("dist")
-                .join("bundle")
-                .join("cli.js");
-            if cli.is_file() {
-                let adjacent_node = parent.join("node.exe");
-                let node = adjacent_node
-                    .is_file()
-                    .then(|| canonical_usable_executable(&adjacent_node).ok())
-                    .flatten()
-                    .or(find_executable(environment, "node")?);
-                if let Some(node) = node {
-                    return Ok(ResolvedPiInvocation {
-                        executable: node,
-                        prefix_args: vec![process_argument_path(&cli)],
-                        direct_npm_node: true,
-                    });
-                }
-                return Err(EnvironmentResolutionError::StandardNpmPiNodeUnavailable {
-                    pi: logical_pi.to_path_buf(),
-                    cli,
-                });
-            }
+        if let Some(script) = windows_command_script(logical_pi)? {
+            let command_interpreter =
+                windows_command_interpreter(environment).ok_or_else(|| {
+                    EnvironmentResolutionError::WindowsCommandWrapperUnavailable {
+                        pi: logical_pi.to_path_buf(),
+                    }
+                })?;
+            return Ok(ResolvedPiInvocation {
+                executable: command_interpreter,
+                windows_command_script: Some(script),
+            });
         }
     }
     let _ = environment;
     Ok(ResolvedPiInvocation {
         executable: logical_pi.to_path_buf(),
-        prefix_args: Vec::new(),
-        direct_npm_node: false,
+        windows_command_script: None,
     })
+}
+
+#[cfg(windows)]
+fn windows_command_script(
+    logical_pi: &Path,
+) -> Result<Option<PathBuf>, EnvironmentResolutionError> {
+    let extension = logical_pi
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default();
+    if extension.eq_ignore_ascii_case("cmd") || extension.eq_ignore_ascii_case("bat") {
+        return canonical_usable_executable(logical_pi)
+            .map(Some)
+            .map_err(
+                |source| EnvironmentResolutionError::ConfiguredPiUnavailable {
+                    path: logical_pi.to_path_buf(),
+                    source,
+                },
+            );
+    }
+    if logical_pi
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.eq_ignore_ascii_case("pi"))
+        && let Some(parent) = logical_pi.parent()
+    {
+        for candidate in [parent.join("pi.cmd"), parent.join("pi.bat")] {
+            if candidate.is_file() {
+                return canonical_usable_executable(&candidate)
+                    .map(Some)
+                    .map_err(
+                        |source| EnvironmentResolutionError::ConfiguredPiUnavailable {
+                            path: candidate,
+                            source,
+                        },
+                    );
+            }
+        }
+    }
+    Ok(None)
+}
+
+#[cfg(windows)]
+fn windows_command_interpreter(environment: &BTreeMap<OsString, OsString>) -> Option<PathBuf> {
+    let configured = env_value(environment, "COMSPEC").map(PathBuf::from);
+    let desktop = std::env::var_os("ComSpec").map(PathBuf::from);
+    let configured_system = env_value(environment, "SystemRoot")
+        .map(PathBuf::from)
+        .map(|root| root.join("System32").join("cmd.exe"));
+    let desktop_system = std::env::var_os("SystemRoot")
+        .map(PathBuf::from)
+        .map(|root| root.join("System32").join("cmd.exe"));
+    configured
+        .into_iter()
+        .chain(desktop)
+        .chain(configured_system)
+        .chain(desktop_system)
+        .find_map(|candidate| canonical_usable_executable(&candidate).ok())
 }
 
 fn process_argument_path(path: &Path) -> OsString {
@@ -583,9 +674,9 @@ pub enum EnvironmentResolutionError {
     #[error("Pi executable was not found in configured, desktop, or probed environments")]
     PiNotFoundInAnyEnvironment,
     #[error(
-        "standard npm Pi shim {pi} was found with CLI {cli}, but node.exe was not available in the selected environment"
+        "Pi command shim {pi} requires the Windows command wrapper, but cmd.exe is unavailable"
     )]
-    StandardNpmPiNodeUnavailable { pi: PathBuf, cli: PathBuf },
+    WindowsCommandWrapperUnavailable { pi: PathBuf },
 }
 
 #[cfg(test)]
@@ -705,30 +796,14 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn standard_npm_pi_shim_resolves_to_direct_node_cli_invocation() {
-        let fixture = Fixture::new("npm-direct");
+    fn standard_npm_pi_shim_uses_windows_command_wrapper_without_package_introspection() {
+        let fixture = Fixture::new("npm-wrapper");
         let bin = fixture.root.join("npm");
-        fs::create_dir_all(
-            bin.join("node_modules")
-                .join("@earendil-works")
-                .join("pi-coding-agent")
-                .join("dist")
-                .join("bundle"),
-        )
-        .expect("create npm package layout");
+        fs::create_dir_all(&bin).expect("create npm bin");
         let pi = bin.join("pi");
         File::create(&pi).expect("extensionless npm Pi shim");
-        File::create(bin.join("pi.cmd")).expect("Windows npm Pi shim");
-        let node = bin.join("node.exe");
-        File::create(&node).expect("node executable");
-        let cli = bin
-            .join("node_modules")
-            .join("@earendil-works")
-            .join("pi-coding-agent")
-            .join("dist")
-            .join("bundle")
-            .join("cli.js");
-        File::create(&cli).expect("Pi CLI entrypoint");
+        let script = bin.join("pi.cmd");
+        File::create(&script).expect("Windows npm Pi shim");
 
         let mut desktop = BTreeMap::new();
         desktop.insert(OsString::from("PATH"), fixture.path(&["npm"]));
@@ -743,50 +818,121 @@ mod tests {
             resolved.pi_executable(),
             pi.canonicalize().expect("logical Pi")
         );
+        assert!(resolved.pi_invocation().executable().ends_with("cmd.exe"));
         assert_eq!(
-            resolved.pi_invocation().executable(),
-            node.canonicalize().expect("direct Node")
-        );
-        assert_eq!(
-            resolved.pi_invocation().prefix_args(),
-            [process_argument_path(
-                &cli.canonicalize().expect("canonical Pi CLI entrypoint")
-            )]
+            resolved
+                .pi_invocation()
+                .windows_command_script()
+                .expect("wrapper script"),
+            script.canonicalize().expect("canonical Pi shim")
         );
         assert!(
-            !resolved.pi_invocation().prefix_args()[0]
-                .to_string_lossy()
-                .starts_with(r"\\?\")
+            !process_argument_path(
+                resolved
+                    .pi_invocation()
+                    .windows_command_script()
+                    .expect("wrapper script")
+            )
+            .to_string_lossy()
+            .starts_with(r"\\?\")
         );
-        assert!(resolved.pi_invocation().is_direct_npm_node());
+        assert!(resolved.pi_invocation().is_windows_command_wrapper());
     }
 
     #[cfg(windows)]
     #[test]
-    fn standard_npm_pi_shim_without_node_requires_environment_retry() {
-        let fixture = Fixture::new("npm-node-missing");
+    fn standard_npm_pi_shim_does_not_depend_on_internal_package_or_node_layout() {
+        let fixture = Fixture::new("npm-no-package-layout");
         let bin = fixture.root.join("npm");
-        let cli = bin
-            .join("node_modules")
-            .join("@earendil-works")
-            .join("pi-coding-agent")
-            .join("dist")
-            .join("bundle")
-            .join("cli.js");
-        fs::create_dir_all(cli.parent().expect("Pi CLI parent")).expect("package layout");
+        fs::create_dir_all(&bin).expect("npm bin");
         File::create(bin.join("pi.cmd")).expect("Pi shim");
-        File::create(&cli).expect("Pi CLI entrypoint");
 
         let mut desktop = BTreeMap::new();
         desktop.insert(OsString::from("PATH"), fixture.path(&["npm"]));
         desktop.insert(OsString::from("PATHEXT"), OsString::from(".EXE;.CMD"));
-        assert!(matches!(
-            resolve_launch_environment(LaunchEnvironmentInput {
-                desktop_environment: desktop,
-                ..LaunchEnvironmentInput::default()
-            }),
-            Err(EnvironmentResolutionError::StandardNpmPiNodeUnavailable { .. })
-        ));
+        let resolved = resolve_launch_environment(LaunchEnvironmentInput {
+            desktop_environment: desktop,
+            ..LaunchEnvironmentInput::default()
+        })
+        .expect("wrapper does not inspect npm package internals");
+        assert!(resolved.pi_invocation().is_windows_command_wrapper());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_command_wrapper_preserves_shell_metacharacters_in_dynamic_arguments() {
+        let fixture = Fixture::new("wrapper-metacharacters");
+        let bin = fixture.root.join("wrapper & spaces");
+        fs::create_dir_all(&bin).expect("wrapper bin");
+        let pi = bin.join("pi.cmd");
+        fs::write(
+            bin.join("capture.js"),
+            "process.stdout.write(JSON.stringify(process.argv.slice(2)));\n",
+        )
+        .expect("write argument capture");
+        fs::write(&pi, "@echo off\r\nnode \"%~dp0capture.js\" %*\r\n").expect("write wrapper");
+        let desktop_environment: BTreeMap<OsString, OsString> = std::env::vars_os().collect();
+        let resolved = resolve_launch_environment(LaunchEnvironmentInput {
+            configured_pi: Some(pi),
+            desktop_environment,
+            ..LaunchEnvironmentInput::default()
+        })
+        .expect("resolve wrapper");
+        let arguments = [
+            OsString::from("a&b"),
+            OsString::from("a%PATH%b"),
+            OsString::from("a^b"),
+            OsString::from("a|b"),
+            OsString::from("a(b)c"),
+            OsString::from("a b"),
+            OsString::from("a!PATH!b"),
+        ];
+        let mut command = std::process::Command::new(resolved.pi_invocation().executable());
+        command.env_clear().envs(resolved.variables());
+        resolved
+            .pi_invocation()
+            .configure_command(&mut command, &arguments)
+            .expect("configure wrapper");
+        let output = command.output().expect("run wrapper");
+        assert!(
+            output.status.success(),
+            "wrapper failed: stdout={:?}, stderr={:?}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let received: Vec<String> =
+            serde_json::from_slice(&output.stdout).expect("decode captured wrapper arguments");
+        assert_eq!(
+            received,
+            ["a&b", "a%PATH%b", "a^b", "a|b", "a(b)c", "a b", "a!PATH!b"]
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_command_wrapper_rejects_unrepresentable_dynamic_argument() {
+        let fixture = Fixture::new("wrapper-reject-quote");
+        let pi = fixture.root.join("pi.cmd");
+        File::create(&pi).expect("Pi shim");
+        let desktop_environment: BTreeMap<OsString, OsString> = std::env::vars_os().collect();
+        let resolved = resolve_launch_environment(LaunchEnvironmentInput {
+            configured_pi: Some(pi),
+            desktop_environment,
+            ..LaunchEnvironmentInput::default()
+        })
+        .expect("resolve wrapper");
+        let mut command = std::process::Command::new(resolved.pi_invocation().executable());
+        let error = resolved
+            .pi_invocation()
+            .configure_command(&mut command, &[OsString::from("unsafe\"argument")])
+            .expect_err("embedded quote must fail closed");
+        assert_eq!(
+            error,
+            PiInvocationError::UnsupportedWindowsCommandValue {
+                field: "launch argument",
+                index: Some(0),
+            }
+        );
     }
 
     #[test]

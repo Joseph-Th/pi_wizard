@@ -26,14 +26,21 @@ pub(crate) async fn run_bounded_command(
     deadline: Duration,
 ) -> Result<ProbeOutput, ProbeCommandError> {
     let mut command = Command::new(executable);
+    command.args(args).env_clear().envs(environment);
+    run_bounded_prepared_command(command, cwd, max_bytes_per_stream, deadline).await
+}
+
+pub(crate) async fn run_bounded_prepared_command(
+    mut command: Command,
+    cwd: Option<&Path>,
+    max_bytes_per_stream: usize,
+    deadline: Duration,
+) -> Result<ProbeOutput, ProbeCommandError> {
     command
-        .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .env_clear()
-        .envs(environment);
+        .kill_on_drop(true);
     if let Some(cwd) = cwd {
         command.current_dir(cwd);
     }

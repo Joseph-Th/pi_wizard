@@ -497,7 +497,7 @@ export function ModelPicker(props: ModelPickerProps) {
                 <div title={snapshot().diagnostics.logicalPi}>Logical Pi: {snapshot().diagnostics.logicalPi}</div>
                 <div title={snapshot().diagnostics.invocationExecutable}>
                   Invocation: {snapshot().diagnostics.invocationExecutable}
-                  {snapshot().diagnostics.directNpmNode ? " · direct npm Node" : ""}
+                  {snapshot().diagnostics.windowsCommandWrapper ? " · Windows Pi wrapper" : ""}
                 </div>
               </div>
             </details>

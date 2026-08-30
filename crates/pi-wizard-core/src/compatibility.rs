@@ -3,10 +3,11 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use tokio::process::Command;
 
 use crate::RuntimeLimits;
 use crate::environment::ResolvedLaunchEnvironment;
-use crate::probe::run_bounded_command;
+use crate::probe::run_bounded_prepared_command;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -23,13 +24,16 @@ pub async fn probe_pi_version(
     limits: RuntimeLimits,
 ) -> Result<PiVersion, PiVersionProbeError> {
     let invocation = environment.pi_invocation();
-    let mut args = invocation.prefix_args().to_vec();
-    args.push(OsString::from("--version"));
-    let output = run_bounded_command(
-        invocation.executable(),
-        &args,
+    let mut command = Command::new(invocation.executable());
+    command.env_clear().envs(environment.variables());
+    invocation
+        .configure_command(command.as_std_mut(), &[OsString::from("--version")])
+        .map_err(|error| PiVersionProbeError::CommandFailed {
+            detail: error.to_string(),
+        })?;
+    let output = run_bounded_prepared_command(
+        command,
         None,
-        environment.variables(),
         limits.max_version_probe_bytes,
         Duration::from_millis(limits.version_probe_deadline_ms),
     )

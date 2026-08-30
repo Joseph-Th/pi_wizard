@@ -784,7 +784,7 @@ export function App(props: { startup: AppStartupSnapshot }) {
                     <span>Pi invocation</span>
                     <strong title={report().invocationExecutable}>
                       {report().invocationExecutable}
-                      {report().directNpmNode ? " · direct npm Node" : ""}
+                      {report().windowsCommandWrapper ? " · Windows Pi wrapper" : ""}
                     </strong>
                   </>
                 )}

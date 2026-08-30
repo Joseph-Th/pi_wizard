@@ -32,7 +32,7 @@ export interface ProjectModelCatalog {
     pathSource: "configured" | "desktop_process" | "shell_probe";
     logicalPi: string;
     invocationExecutable: string;
-    directNpmNode: boolean;
+    windowsCommandWrapper: boolean;
   };
 }
 

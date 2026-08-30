@@ -465,7 +465,7 @@ impl DesktopRuntime {
             Ok(environment) => environment,
             Err(
                 EnvironmentResolutionError::PiNotFoundInAnyEnvironment
-                | EnvironmentResolutionError::StandardNpmPiNodeUnavailable { .. },
+                | EnvironmentResolutionError::WindowsCommandWrapperUnavailable { .. },
             ) => {
                 let shell_probe_environment =
                     probe_login_shell_environment(&desktop_environment, self.limits)

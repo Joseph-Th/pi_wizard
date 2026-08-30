@@ -38,11 +38,15 @@ function createFakeNpmPi() {
     "cli.js",
   );
   mkdirSync(dirname(cli), { recursive: true });
-  // npm exposes both an extensionless `pi` shim and `pi.cmd` on Windows.
-  // The extensionless file is deliberately not a Win32 executable: this
-  // packaged smoke must prove Pi Wizard resolves the package to node.exe.
+  // npm exposes both an extensionless POSIX shim and `pi.cmd` on Windows.
+  // The extensionless file is deliberately unusable by Win32; the .cmd shim
+  // is the public launcher contract Pi Wizard must wrap without inspecting
+  // npm's internal package layout.
   writeFileSync(resolve(npmRoot, "pi"), "#!/bin/sh\nexit 1\n");
-  writeFileSync(resolve(npmRoot, "pi.cmd"), "@echo off\r\nexit /b 1\r\n");
+  writeFileSync(
+    resolve(npmRoot, "pi.cmd"),
+    "@echo off\r\nnode \"%~dp0node_modules\\@earendil-works\\pi-coding-agent\\dist\\bundle\\cli.js\" %*\r\n",
+  );
   writeFileSync(
     cli,
     String.raw`if (process.argv.includes("--version")) {
@@ -295,9 +299,11 @@ async function launchDesktop(executablePath, fakeNpmPi) {
   const existingBrowserArgs = process.env.WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS?.trim();
   const browserArgs = `--remote-debugging-port=${port} --remote-allow-origins=*`;
   const childEnvironment = { ...process.env };
-  const pathKey = Object.keys(childEnvironment).find((key) => key.toUpperCase() === "PATH") ?? "PATH";
-  childEnvironment[pathKey] = `${fakeNpmPi};${childEnvironment[pathKey] ?? ""}`;
-  childEnvironment.PATHEXT = ".COM;.EXE;.BAT;.CMD";
+  if (fakeNpmPi) {
+    const pathKey = Object.keys(childEnvironment).find((key) => key.toUpperCase() === "PATH") ?? "PATH";
+    childEnvironment[pathKey] = `${fakeNpmPi};${childEnvironment[pathKey] ?? ""}`;
+    childEnvironment.PATHEXT = ".COM;.EXE;.BAT;.CMD";
+  }
   const child = spawn(executablePath, [], {
     env: {
       ...childEnvironment,
@@ -319,6 +325,100 @@ async function launchDesktop(executablePath, fakeNpmPi) {
     await stopChild(child);
     removeTree(webviewData);
     throw error;
+  }
+}
+
+async function smokeRealInstalledPi() {
+  const useCurrentState = process.env.PI_WIZARD_REAL_PI_USE_CURRENT_STATE === "1";
+  const appRoot = mkdtempSync(resolve(tmpdir(), "pi-wizard-real-pi-app-"));
+  const defaultProjectRoot = mkdtempSync(resolve(tmpdir(), "pi-wizard-real-pi-project-"));
+  const projectRoot = process.env.PI_WIZARD_REAL_PI_PROJECT?.trim() || defaultProjectRoot;
+  const prompt = process.env.PI_WIZARD_REAL_PI_PROMPT?.trim() || null;
+  const isolatedExecutable = resolve(appRoot, "pi-wizard-desktop.exe");
+  const executablePath = useCurrentState ? executable : isolatedExecutable;
+  if (!useCurrentState) {
+    copyFileSync(executable, isolatedExecutable);
+    mkdirSync(resolve(appRoot, "pi-wizard-data"), { recursive: true });
+  }
+  writeFileSync(resolve(defaultProjectRoot, "seed.txt"), "real Pi packaged smoke\n");
+
+  const { child, client, webviewData } = await launchDesktop(executablePath, null);
+  try {
+    const result = await client.evaluate(String.raw`(async () => {
+      const invoke = window.__TAURI_INTERNALS__.invoke;
+      const projectRoot = ${JSON.stringify(projectRoot)};
+      const probe = await invoke("probe_pi_environment", {});
+      const started = await invoke("runtime_start_project", {
+        request: {
+          projectPath: projectRoot,
+          projectTrust: "inherit",
+          contextFiles: "inherit",
+          extensionDiscovery: "inherit",
+          provider: "opencode-go",
+          model: "muse-spark-1.2-contributor",
+          thinking: null,
+          initialTask: null
+        }
+      });
+      const deadline = Date.now() + 12_000;
+      let run;
+      while (Date.now() < deadline) {
+        const hydration = await invoke("runtime_hydrate", {});
+        run = hydration?.runs?.find((candidate) => candidate.run?.id === started.runId);
+        if (run && run.run?.process !== "starting") break;
+        await new Promise((resolveDelay) => window.setTimeout(resolveDelay, 50));
+      }
+      if (run?.run?.process === "ready" && ${JSON.stringify(Boolean(process.env.PI_WIZARD_REAL_PI_PROMPT?.trim()))}) {
+        const prompt = ${JSON.stringify(process.env.PI_WIZARD_REAL_PI_PROMPT?.trim() || "")};
+        await invoke("runtime_edit_draft", { request: { runId: started.runId, text: prompt } });
+        const submitted = await invoke("runtime_submit_draft", {
+          request: { runId: started.runId, action: "send" }
+        });
+        let sawWorking = false;
+        const turnDeadline = Date.now() + 45_000;
+        while (Date.now() < turnDeadline) {
+          const hydration = await invoke("runtime_hydrate", {});
+          run = hydration?.runs?.find((candidate) => candidate.run?.id === started.runId);
+          if (!run) break;
+          if (run.run?.process !== "ready") break;
+          if (run.run?.agentWorking === true) sawWorking = true;
+          if (submitted?.accepted && sawWorking && run.run?.agentWorking === false) break;
+          await new Promise((resolveDelay) => window.setTimeout(resolveDelay, 100));
+        }
+        const diagnostics = await invoke("runtime_diagnostics", {});
+        return { probe, started, submitted, sawWorking, run, diagnostics };
+      }
+      const diagnostics = await invoke("runtime_diagnostics", {});
+      return { probe, started, run, diagnostics };
+    })()`, 55_000);
+    requireContract(Boolean(result?.probe), `real Pi environment probe failed: ${JSON.stringify(result)}`);
+    requireContract(
+      result?.probe?.windowsCommandWrapper === true &&
+        String(result?.probe?.invocationExecutable ?? "").toLowerCase().endsWith("cmd.exe"),
+      `real Pi did not resolve through the Windows command wrapper: ${JSON.stringify(result)}`,
+    );
+    requireContract(Boolean(result?.started?.runId), `real Pi run did not start: ${JSON.stringify(result)}`);
+    requireContract(
+      result?.run?.run?.process === "ready",
+      `real Pi process did not reach Ready: ${JSON.stringify(result)}`,
+    );
+    if (prompt) {
+      requireContract(result?.submitted?.accepted === true, `real Pi prompt was not accepted: ${JSON.stringify(result)}`);
+      requireContract(result?.sawWorking === true, `real Pi prompt never entered active work: ${JSON.stringify(result)}`);
+      requireContract(result?.run?.run?.agentWorking === false, `real Pi prompt did not settle: ${JSON.stringify(result)}`);
+    }
+    console.log("packaged real Pi smoke passed");
+    console.log(JSON.stringify({ probe: result.probe, run: result.run?.run, diagnostics: result.diagnostics }, null, 2));
+  } finally {
+    client?.close();
+    await stopChild(child);
+    try {
+      removeTree(webviewData);
+    } catch (error) {
+      console.warn(`real Pi smoke WebView cleanup warning: ${String(error)}`);
+    }
+    removeTree(appRoot);
+    removeTree(defaultProjectRoot);
   }
 }
 
@@ -522,11 +622,32 @@ async function smokeIsolatedTranscriptHandoff() {
         return { error: "packaged run surface did not mount", started };
       }
 
+      const sessionReadyDeadline = Date.now() + 5_000;
+      let beforeRun;
+      while (Date.now() < sessionReadyDeadline) {
+        const beforeHydration = await invoke("runtime_hydrate", {});
+        beforeRun = beforeHydration?.runs?.find(
+          (candidate) => candidate.run?.id === started.runId
+        );
+        if (
+          beforeRun?.run?.session?.sessionId &&
+          beforeRun?.run?.session?.sessionFile &&
+          beforeRun?.run?.session?.messageCount === 0
+        ) break;
+        await new Promise((resolveDelay) => window.setTimeout(resolveDelay, 25));
+      }
+      if (
+        !beforeRun?.run?.session?.sessionId ||
+        !beforeRun?.run?.session?.sessionFile ||
+        beforeRun?.run?.session?.messageCount !== 0
+      ) {
+        return { error: "brand-new Pi session identity/path was not advertised before history read", started, beforeRun };
+      }
       const emptyHistory = await invoke("runtime_read_session_history", {
         request: { runId: started.runId, cursor: null }
       });
-      const beforeHydration = await invoke("runtime_hydrate", {});
-      const beforeRun = beforeHydration?.runs?.find(
+      const afterHistoryHydration = await invoke("runtime_hydrate", {});
+      const afterHistoryRun = afterHistoryHydration?.runs?.find(
         (candidate) => candidate.run?.id === started.runId
       );
       const emptySnapshot = {
@@ -534,8 +655,8 @@ async function smokeIsolatedTranscriptHandoff() {
         sessionId: emptyHistory?.sessionId ?? null,
         advertisedSessionFile: beforeRun?.run?.session?.sessionFile ?? null,
         messageCount: beforeRun?.run?.session?.messageCount ?? null,
-        sessionSyncInitialized: beforeRun?.rpc?.sessionSync?.initialized ?? false,
-        sessionSyncCursor: beforeRun?.rpc?.sessionSync?.cursor ?? null,
+        sessionSyncInitialized: afterHistoryRun?.rpc?.sessionSync?.initialized ?? false,
+        sessionSyncCursor: afterHistoryRun?.rpc?.sessionSync?.cursor ?? null,
         visibleHistoryError: document.body.innerText.includes("Session history failed:")
       };
       if (
@@ -1025,6 +1146,11 @@ async function main() {
   requireContract(process.platform === "win32", "this release smoke requires Windows WebView2");
   requireContract(existsSync(executable), `release executable is missing: ${executable}`);
 
+  if (process.env.PI_WIZARD_SMOKE_REAL_PI === "1") {
+    await smokeRealInstalledPi();
+    return;
+  }
+
   const fakeNpmPi = createFakeNpmPi();
   const {
     child,
@@ -1065,8 +1191,8 @@ async function main() {
         results["runtime_probe_project_models"] =
           catalog?.models?.length === 4 &&
           catalog?.diagnostics?.scope === "global" &&
-          catalog?.diagnostics?.directNpmNode === true &&
-          String(catalog?.diagnostics?.invocationExecutable ?? "").toLowerCase().endsWith("node.exe")
+          catalog?.diagnostics?.windowsCommandWrapper === true &&
+          String(catalog?.diagnostics?.invocationExecutable ?? "").toLowerCase().endsWith("cmd.exe")
             ? "ok"
             : "unexpected catalog: " + JSON.stringify(catalog);
       } catch (error) {

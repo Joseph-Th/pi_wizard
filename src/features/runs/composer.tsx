@@ -62,7 +62,7 @@ export interface PiProbeReport {
   } | null;
   versionError: string | null;
   invocationExecutable: string;
-  directNpmNode: boolean;
+  windowsCommandWrapper: boolean;
 }
 
 interface DesktopBashResult {

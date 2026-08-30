@@ -7,7 +7,7 @@ pub(super) struct PiEnvironmentProbeReport {
     version: Option<PiVersion>,
     version_error: Option<String>,
     invocation_executable: PathBuf,
-    direct_npm_node: bool,
+    windows_command_wrapper: bool,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -35,7 +35,7 @@ pub(super) struct ProjectModelProbeDiagnostics {
     path_source: pi_wizard_core::environment::EnvironmentSource,
     logical_pi: PathBuf,
     invocation_executable: PathBuf,
-    direct_npm_node: bool,
+    windows_command_wrapper: bool,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -462,7 +462,9 @@ async fn probe_models_at_root(
                             .pi_invocation()
                             .executable()
                             .to_path_buf(),
-                        direct_npm_node: environment.pi_invocation().is_direct_npm_node(),
+                        windows_command_wrapper: environment
+                            .pi_invocation()
+                            .is_windows_command_wrapper(),
                     },
                 })
                 .map_err(|error| error.to_string())
@@ -525,11 +527,11 @@ pub(super) async fn runtime_probe_project_models(
     .map_err(|error| {
         let invocation = profile.environment.pi_invocation();
         format!(
-            "Pi model probe failed at {scope} root {} using logical Pi {} via {} (direct npm Node={}): {error}",
+            "Pi model probe failed at {scope} root {} using logical Pi {} via {} (Windows command wrapper={}): {error}",
             root.display(),
             profile.environment.pi_executable().display(),
             invocation.executable().display(),
-            invocation.is_direct_npm_node(),
+            invocation.is_windows_command_wrapper(),
         )
     })
 }
@@ -2020,7 +2022,10 @@ pub(super) async fn probe_pi_environment(
             .pi_invocation()
             .executable()
             .to_path_buf(),
-        direct_npm_node: profile.environment.pi_invocation().is_direct_npm_node(),
+        windows_command_wrapper: profile
+            .environment
+            .pi_invocation()
+            .is_windows_command_wrapper(),
     })
 }
 

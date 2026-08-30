@@ -35,7 +35,11 @@ impl WorkflowFakePiFixture {
         #[cfg(windows)]
         let fake_pi = {
             let path = root.join("pi.cmd");
-            fs::write(&path, "@echo off\r\nexit /b 1\r\n").expect("write logical Pi shim");
+            fs::write(
+                &path,
+                "@echo off\r\nnode \"%~dp0node_modules\\@earendil-works\\pi-coding-agent\\dist\\bundle\\cli.js\" %*\r\n",
+            )
+            .expect("write wrapped Pi shim");
             path
         };
 
