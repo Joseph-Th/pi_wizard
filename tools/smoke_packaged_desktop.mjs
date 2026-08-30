@@ -11,19 +11,79 @@ const configuredExecutable = process.env.PI_WIZARD_SMOKE_EXECUTABLE?.trim();
 const executable = configuredExecutable
   ? resolve(configuredExecutable)
   : resolve(root, "target", "release", "pi-wizard-desktop.exe");
+const deferredWebViewCleanup = new Set();
 
 function requireContract(condition, detail) {
   if (!condition) throw new Error(`packaged desktop smoke failed: ${detail}`);
 }
 
-function removeTree(path) {
-  // WebView2 can keep its disposable user-data directory locked briefly after
-  // the desktop process has exited. Node's recursive rm already retries the
-  // Windows EPERM/EBUSY family, but two seconds proved too short on an
-  // optimized release shutdown. Keep cleanup strict while allowing a bounded
-  // ten-second handle-release window; a genuinely leaked process still fails
-  // the release smoke instead of silently leaving test state behind.
-  rmSync(path, { recursive: true, force: true, maxRetries: 80, retryDelay: 125 });
+async function removeTree(path, deferTransientLock = false) {
+  // WebView2 can hold its disposable profile briefly while CDP and browser
+  // processes unwind. A synchronous retry loop blocks Node's event loop and
+  // can therefore prevent that shutdown from completing. Retry only the
+  // transient Windows lock errors while yielding between attempts; all other
+  // filesystem errors still fail immediately.
+  const deadline = Date.now() + (deferTransientLock ? 3_000 : 15_000);
+  while (true) {
+    try {
+      rmSync(path, { recursive: true, force: true });
+      return;
+    } catch (error) {
+      if (!["EPERM", "EBUSY", "EACCES", "ENOTEMPTY"].includes(error?.code)) throw error;
+      const nativeRemoval = spawnSync(
+        "powershell.exe",
+        [
+          "-NoProfile",
+          "-NonInteractive",
+          "-Command",
+          "Remove-Item -LiteralPath $env:PI_WIZARD_REMOVE_TREE -Recurse -Force -ErrorAction Stop",
+        ],
+        {
+          env: { ...process.env, PI_WIZARD_REMOVE_TREE: path },
+          windowsHide: true,
+          stdio: "ignore",
+        },
+      );
+      if (nativeRemoval.status === 0) return;
+      if (Date.now() >= deadline) {
+        if (deferTransientLock) {
+          deferredWebViewCleanup.add(path);
+          return;
+        }
+        throw error;
+      }
+      await delay(125);
+    }
+  }
+}
+
+function scheduleDeferredWebViewCleanup() {
+  if (deferredWebViewCleanup.size === 0) return;
+  const helper = spawn(
+    "powershell.exe",
+    [
+      "-NoProfile",
+      "-NonInteractive",
+      "-Command",
+      "$parentId=[int]$env:PI_WIZARD_CLEANUP_PARENT; " +
+        "$paths=ConvertFrom-Json $env:PI_WIZARD_CLEANUP_PATHS; " +
+        "$parentDeadline=(Get-Date).AddSeconds(30); " +
+        "while ((Get-Date) -lt $parentDeadline -and (Get-Process -Id $parentId -ErrorAction SilentlyContinue)) { Start-Sleep -Milliseconds 100 }; " +
+        "foreach ($path in $paths) { $deadline=(Get-Date).AddSeconds(60); while ((Get-Date) -lt $deadline) { try { Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction Stop; break } catch { Start-Sleep -Milliseconds 250 } } }",
+    ],
+    {
+      detached: true,
+      env: {
+        ...process.env,
+        PI_WIZARD_CLEANUP_PARENT: String(process.pid),
+        PI_WIZARD_CLEANUP_PATHS: JSON.stringify([...deferredWebViewCleanup]),
+      },
+      stdio: "ignore",
+      windowsHide: true,
+    },
+  );
+  helper.on("error", () => {});
+  helper.unref();
 }
 
 function createFakeNpmPi() {
@@ -59,6 +119,10 @@ const path = require("node:path");
 const sessionArg = process.argv.indexOf("--session-id");
 const persistedSession = sessionArg >= 0 && Boolean(process.argv[sessionArg + 1]);
 const sessionId = persistedSession ? String(process.argv[sessionArg + 1]) : "packaged-smoke";
+const providerArg = process.argv.indexOf("--provider");
+const modelArg = process.argv.indexOf("--model");
+const selectedProvider = providerArg >= 0 ? String(process.argv[providerArg + 1] ?? "") : "";
+const selectedModel = modelArg >= 0 ? String(process.argv[modelArg + 1] ?? "") : "";
 const sessionFile = persistedSession
   ? path.join(process.cwd(), "pi-wizard-packaged-" + sessionId + ".jsonl")
   : null;
@@ -133,7 +197,14 @@ process.stdin.on("data", (chunk) => {
       ] });
     } else if (request.type === "get_state") {
       respond(request, {
-        model: null,
+        model: selectedProvider && selectedModel
+          ? {
+              provider: selectedProvider,
+              id: selectedModel,
+              name: selectedModel === "muse-spark-1.2-contributor" ? "Muse Spark 1.2 Contributor" : selectedModel,
+              input: ["text", "image"]
+            }
+          : null,
         thinkingLevel: "medium",
         isStreaming: working,
         isCompacting: false,
@@ -154,6 +225,25 @@ process.stdin.on("data", (chunk) => {
       const index = since == null ? -1 : entries.findIndex((entry) => entry.id === since);
       const start = since == null ? 0 : index >= 0 ? index + 1 : entries.length;
       respond(request, { entries: entries.slice(start), leafId });
+    } else if (request.type === "get_session_stats" && persistedSession) {
+      respond(request, {
+        sessionFile,
+        sessionId,
+        userMessages: 1,
+        assistantMessages: 1,
+        toolCalls: 0,
+        toolResults: 0,
+        totalMessages: 2,
+        tokens: {
+          input: 50000,
+          output: 10000,
+          cacheRead: 40000,
+          cacheWrite: 5000,
+          total: 105000
+        },
+        cost: 0.1234,
+        contextUsage: { tokens: 42000, contextWindow: 200000, percent: 21 }
+      });
     } else if (request.type === "get_available_thinking_levels") {
       respond(request, { levels: ["off", "medium", "high"] });
     } else if (request.type === "get_commands") {
@@ -268,6 +358,18 @@ process.stdin.on("data", (chunk) => {
             stopReason: "stop"
           }
         });
+        // This persisted custom entry deliberately makes the successful
+        // get_entries response exceed Pi Wizard's 512 KiB hot-page ceiling.
+        // The packaged release must recover through cold JSONL resync while
+        // keeping the Pi process Ready instead of converting a local bound
+        // into a fatal protocol failure.
+        appendEntry({
+          type: "custom",
+          id: "packaged-large-" + turn,
+          parentId: assistantId,
+          customType: "packaged-sync-overflow",
+          data: { payload: "x".repeat(524500) }
+        });
         emit({
           type: "message_end",
           message: {
@@ -323,7 +425,7 @@ async function launchDesktop(executablePath, fakeNpmPi) {
     return { child, client, webviewData };
   } catch (error) {
     await stopChild(child);
-    removeTree(webviewData);
+    await removeTree(webviewData, true);
     throw error;
   }
 }
@@ -410,15 +512,15 @@ async function smokeRealInstalledPi() {
     console.log("packaged real Pi smoke passed");
     console.log(JSON.stringify({ probe: result.probe, run: result.run?.run, diagnostics: result.diagnostics }, null, 2));
   } finally {
-    client?.close();
+    await client?.close();
     await stopChild(child);
     try {
-      removeTree(webviewData);
+      await removeTree(webviewData, true);
     } catch (error) {
       console.warn(`real Pi smoke WebView cleanup warning: ${String(error)}`);
     }
-    removeTree(appRoot);
-    removeTree(defaultProjectRoot);
+    await removeTree(appRoot);
+    await removeTree(defaultProjectRoot);
   }
 }
 
@@ -532,9 +634,9 @@ async function smokeIsolatedModelPreferences() {
     );
       return result;
     } finally {
-      client.close();
+      await client.close();
       await stopChild(child);
-      removeTree(webviewData);
+      await removeTree(webviewData, true);
     }
   };
 
@@ -558,8 +660,8 @@ async function smokeIsolatedModelPreferences() {
       "last New Run model did not survive desktop restart",
     );
   } finally {
-    removeTree(fakeNpmPi);
-    removeTree(appRoot);
+    await removeTree(fakeNpmPi);
+    await removeTree(appRoot);
   }
 }
 
@@ -584,8 +686,8 @@ async function smokeIsolatedTranscriptHandoff() {
           projectTrust: "inherit",
           contextFiles: "disabled",
           extensionDiscovery: "disabled",
-          provider: null,
-          model: null,
+          provider: "opencode-go",
+          model: "muse-spark-1.2-contributor",
           thinking: null,
           initialTask: null
         }
@@ -719,6 +821,7 @@ async function smokeIsolatedTranscriptHandoff() {
         const rawHtmlExecuted = Boolean(
           markdown?.querySelector("script") || window.__PI_WIZARD_SMOKE_SCRIPTED__
         );
+        const railText = document.querySelector(".app-context-rail")?.textContent ?? "";
         if (
           prompt === initialTask &&
           heading === "Packaged handoff" &&
@@ -729,7 +832,10 @@ async function smokeIsolatedTranscriptHandoff() {
           !rawHtmlExecuted &&
           !liveAnswerPresent &&
           !liveReasoningPresent &&
-          status.includes("Pi is idle and ready")
+          status.includes("Pi is idle and ready") &&
+          railText.includes("105,000") &&
+          railText.includes("21.0%") &&
+          railText.includes("Tool calls")
         ) {
           const hydration = await invoke("runtime_hydrate", {});
           const run = hydration?.runs?.find((candidate) => candidate.run?.id === started.runId);
@@ -744,10 +850,12 @@ async function smokeIsolatedTranscriptHandoff() {
             liveAnswerPresent,
             liveReasoningPresent,
             status,
+            process: run?.run?.process ?? null,
             messageCount: run?.run?.session?.messageCount ?? null,
             sessionSyncInitialized: run?.rpc?.sessionSync?.initialized ?? false,
             sessionSyncRevision: run?.rpc?.sessionSync?.revision ?? null,
             sessionSyncCursor: run?.rpc?.sessionSync?.cursor ?? null,
+            railText,
             visibleError:
               document.body.innerText.includes("Runtime update failed:") ||
               document.body.innerText.includes("Session history failed:") ||
@@ -875,11 +983,18 @@ async function smokeIsolatedTranscriptHandoff() {
     requireContract(result.finalSnapshot.rawHtmlVisible === true && result.finalSnapshot.rawHtmlExecuted === false, `raw assistant HTML was not escaped safely: ${JSON.stringify(result)}`);
     requireContract(result.finalSnapshot.liveAnswerPresent === false && result.finalSnapshot.liveReasoningPresent === false, `settled answer/reasoning remained duplicated in Live activity: ${JSON.stringify(result)}`);
     requireContract(result.finalSnapshot.messageCount === 0, `fixture no longer proves stale get_state messageCount: ${JSON.stringify(result)}`);
+    requireContract(result.finalSnapshot.process === "ready", `oversized get_entries page killed the packaged Pi process: ${JSON.stringify(result)}`);
     requireContract(
       result.finalSnapshot.sessionSyncInitialized === true &&
         result.finalSnapshot.sessionSyncRevision > 0 &&
-        result.finalSnapshot.sessionSyncCursor === "packaged-a1",
-      `persisted handoff did not advance live session synchronization: ${JSON.stringify(result)}`,
+        result.finalSnapshot.sessionSyncCursor === "packaged-large-1",
+      `oversized live page did not recover through persisted session resynchronization: ${JSON.stringify(result)}`,
+    );
+    requireContract(
+      result.finalSnapshot.railText.includes("105,000") &&
+        result.finalSnapshot.railText.includes("21.0%") &&
+        result.finalSnapshot.railText.includes("Tool calls"),
+      `selected-run context rail did not expose Pi usage and run facts: ${JSON.stringify(result)}`,
     );
     requireContract(result.finalSnapshot.visibleError === false, `packaged transcript exposed a runtime/history/CSP error: ${JSON.stringify(result)}`);
     requireContract(Boolean(result.utilitySnapshot), `packaged run utilities were not exercised: ${JSON.stringify(result)}`);
@@ -1021,12 +1136,12 @@ async function smokeIsolatedTranscriptHandoff() {
       `reloaded direct-Bash status/cancellation surface was not explicit and healthy: ${JSON.stringify(reloadOwnership)}`,
     );
   } finally {
-    client.close();
+    await client.close();
     await stopChild(child);
-    removeTree(webviewData);
-    removeTree(fakeNpmPi);
-    removeTree(projectRoot);
-    removeTree(appRoot);
+    await removeTree(webviewData, true);
+    await removeTree(fakeNpmPi);
+    await removeTree(projectRoot);
+    await removeTree(appRoot);
   }
 }
 
@@ -1118,28 +1233,40 @@ class CdpClient {
     return result.result?.value;
   }
 
-  close() {
+  async close() {
+    if (this.socket.readyState === WebSocket.CLOSED) return;
+    const closed = new Promise((resolveClose) => {
+      this.socket.addEventListener("close", resolveClose, { once: true });
+    });
     this.socket.close();
+    await Promise.race([closed, delay(1_000)]);
   }
 }
 
 async function stopChild(child) {
   if (child.exitCode !== null) return;
-  child.kill();
-  await Promise.race([
-    new Promise((resolveExit) => child.once("exit", resolveExit)),
-    delay(2_000),
-  ]);
-  if (child.exitCode === null && child.pid) {
-    spawnSync("taskkill.exe", ["/PID", String(child.pid), "/T", "/F"], {
+  const pid = child.pid;
+  if (pid) {
+    // Terminate the exact desktop tree while the parent PID is still alive.
+    // Killing the parent first can let WebView2 descendants outlive it long
+    // enough to retain the disposable profile and make strict cleanup flaky.
+    spawnSync("taskkill.exe", ["/PID", String(pid), "/T", "/F"], {
       windowsHide: true,
       stdio: "ignore",
     });
     await Promise.race([
       new Promise((resolveExit) => child.once("exit", resolveExit)),
+      delay(5_000),
+    ]);
+  }
+  if (child.exitCode === null) {
+    child.kill();
+    await Promise.race([
+      new Promise((resolveExit) => child.once("exit", resolveExit)),
       delay(2_000),
     ]);
   }
+  requireContract(child.exitCode !== null, `desktop process ${pid ?? "unknown"} did not terminate`);
 }
 
 async function main() {
@@ -1464,16 +1591,20 @@ async function main() {
     );
 
   } finally {
-    client?.close();
+    await client?.close();
     await stopChild(child);
-    removeTree(webviewData);
-    removeTree(fakeNpmPi);
+    await removeTree(webviewData, true);
+    await removeTree(fakeNpmPi);
   }
 
   await smokeIsolatedModelPreferences();
   await smokeIsolatedTranscriptHandoff();
   console.log("packaged desktop WebView smoke passed");
-  console.log("verified: custom IPC, event listen/unlisten ACL, global model discovery, first-run Muse default, remembered New Run model, favorites-first persistence, project preset routing without sidebar manager, CSP-safe keyboard sidebar resizing, full-width New Run/Supervision surfaces, real packaged run streaming-to-persisted transcript handoff with stale messageCount, sanitized rich final Markdown, native session HTML export, one-shot Bash streaming/result with context exclusion, direct-Bash execution-root ownership across renderer reload with cancellation and mutation gating, main navigation, no visible ACL/CSP/runtime-update failure");
+  console.log("verified: custom IPC, event listen/unlisten ACL, global model discovery, first-run Muse default, remembered New Run model, favorites-first persistence, project preset routing without sidebar manager, CSP-safe keyboard sidebar resizing, full-width New Run/Supervision surfaces, dashboard/right-rail run status, Pi session usage metrics and run facts, oversized get_entries cold-resync recovery without process failure, real packaged run streaming-to-persisted transcript handoff with stale messageCount, sanitized rich final Markdown, native session HTML export, one-shot Bash streaming/result with context exclusion, direct-Bash execution-root ownership across renderer reload with cancellation and mutation gating, main navigation, no visible ACL/CSP/runtime-update failure");
 }
 
-await main();
+try {
+  await main();
+} finally {
+  scheduleDeferredWebViewCleanup();
+}

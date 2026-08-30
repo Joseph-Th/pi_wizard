@@ -67,6 +67,31 @@ export function runStateLabel(run: RunHydration): string {
   return "ready";
 }
 
+export type RunStatusTone = "active" | "ready" | "warning" | "danger" | "neutral";
+
+export function runStatusTone(run: RunHydration): RunStatusTone {
+  if (run.run.process === "failed" || run.run.process === "quarantined") return "danger";
+  if (run.run.process === "exited") return "neutral";
+  if (
+    run.run.process === "stopping" ||
+    (run.rpc?.pendingDialogs.length ?? 0) > 0 ||
+    Boolean(run.rpc?.summarizationRetry && !run.rpc.summarizationRetry.finished) ||
+    Boolean(run.rpc?.retry && !run.rpc.retry.finished) ||
+    Boolean(run.rpc?.streamStalled)
+  )
+    return "warning";
+  if (
+    run.run.process === "starting" ||
+    run.run.compacting ||
+    run.run.agentWorking ||
+    (run.rpc?.live.directBash.length ?? 0) > 0 ||
+    run.run.queue.steering + run.run.queue.followUp > 0
+  )
+    return "active";
+  if (run.run.process === "ready") return "ready";
+  return "neutral";
+}
+
 export function runQueuedCount(run: RunHydration): number {
   return run.run.queue.steering + run.run.queue.followUp;
 }

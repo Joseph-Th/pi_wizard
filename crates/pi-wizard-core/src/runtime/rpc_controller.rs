@@ -19,8 +19,8 @@ use super::{
     PendingExtensionDialogSnapshot, ProjectionError, QueueState, RunCapabilities,
     RunCompactionSnapshot, RunExtensionErrorSnapshot, RunModelState, RunMutation, RunRetrySnapshot,
     RunRpcHydrationSnapshot, RunStateObservation, RunSummarizationRetrySnapshot, RuntimeError,
-    RuntimeStore, SessionSyncApplied, SessionSyncError, SessionSyncResync, SessionSyncState,
-    ToolPreview, WidgetPlacement,
+    RuntimeStore, SessionSyncApplied, SessionSyncError, SessionSyncState, ToolPreview,
+    WidgetPlacement,
 };
 
 /// Tauri-independent owner for one live run's RPC correlation and transient
@@ -173,17 +173,37 @@ impl RunRpcController {
         if pending.command == "get_entries" {
             let request = self.take_session_sync_request(&pending.id)?;
             session_sync = if response.success {
-                let page = response.entries_page(self.limits)?;
-                let applied =
-                    self.session_sync
-                        .apply_page(request.since.as_deref(), &page, self.limits)?;
-                Some(SessionSyncCompletion::Page { page, applied })
+                match response.entries_page(self.limits) {
+                    Ok(page) => {
+                        let applied = self.session_sync.apply_page(
+                            request.since.as_deref(),
+                            &page,
+                            self.limits,
+                        )?;
+                        Some(SessionSyncCompletion::Page { page, applied })
+                    }
+                    Err(
+                        error @ (RpcResponsePayloadError::SessionEntryByteLimit { .. }
+                        | RpcResponsePayloadError::SessionEntryLimit { .. }),
+                    ) => {
+                        // A successful Pi response can legitimately contain more
+                        // incremental history than Pi Wizard retains in one hot
+                        // page. Fall back to bounded file-backed history and
+                        // reseed the cursor instead of killing a healthy process.
+                        let revision = self.session_sync.mark_projection_resync_required();
+                        Some(SessionSyncCompletion::ResyncRequired {
+                            revision,
+                            error: Some(error.to_string()),
+                        })
+                    }
+                    Err(error) => return Err(error.into()),
+                }
             } else if let Some(rejected_since) = request.since {
                 let resync = self
                     .session_sync
                     .mark_resync_required(&rejected_since, self.limits)?;
                 Some(SessionSyncCompletion::ResyncRequired {
-                    resync,
+                    revision: resync.revision,
                     error: response.error.clone(),
                 })
             } else {
@@ -935,7 +955,7 @@ pub enum SessionSyncCompletion {
         applied: SessionSyncApplied,
     },
     ResyncRequired {
-        resync: SessionSyncResync,
+        revision: u64,
         error: Option<String>,
     },
     Rejected {
@@ -1253,6 +1273,59 @@ mod tests {
         assert_eq!(applied.appended_entries, 2);
         assert_eq!(controller.session_sync_state().cursor(), Some("c"));
         assert_eq!(controller.session_sync_state().leaf_id(), Some("b"));
+    }
+
+    #[test]
+    fn oversized_successful_get_entries_page_requests_cold_resync_instead_of_failing_protocol() {
+        let run_id = RunId::new();
+        let mut store = ready_store(run_id);
+        let limits = RuntimeLimits::default();
+        let mut controller = RunRpcController::new(run_id, limits);
+        controller
+            .seed_session_sync(Some("a".to_owned()), Some("a".to_owned()))
+            .expect("seed cursor");
+        let request = RpcRequest::with_id(
+            RequestId::from_wire("entries-large"),
+            RpcCommand::GetEntries {
+                since: Some("a".to_owned()),
+            },
+        );
+        controller
+            .begin_request(&request, None)
+            .expect("begin entries");
+
+        let completed = controller
+            .complete_response(
+                &response(
+                    "entries-large",
+                    "get_entries",
+                    json!({
+                        "entries":[{
+                            "type":"message",
+                            "id":"b",
+                            "parentId":"a",
+                            "message":{"role":"assistant","content":"x".repeat(limits.max_session_entry_page_bytes)}
+                        }],
+                        "leafId":"b"
+                    }),
+                ),
+                &mut store,
+            )
+            .expect("oversized app projection is recoverable");
+
+        let Some(SessionSyncCompletion::ResyncRequired { revision, error }) =
+            completed.session_sync
+        else {
+            panic!("expected bounded resync request");
+        };
+        assert_eq!(revision, 2);
+        assert!(error.is_some_and(|detail| detail.contains("524288")));
+        assert!(controller.session_sync_state().resync_required());
+        assert_eq!(controller.session_sync_state().cursor(), Some("a"));
+        assert_eq!(
+            store.get(run_id).expect("run").process_state(),
+            ProcessState::Ready
+        );
     }
 
     #[test]

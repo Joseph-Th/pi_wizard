@@ -66,13 +66,14 @@ Keeping Session and Run separate prevents a common GUI failure: treating whateve
 
 ### Application shell
 
-The desktop window has three structural regions, but only two are normally visible:
+The desktop window has four structural regions, with the contextual rail only present when wide-screen space makes it useful:
 
 1. **Sidebar**: active runs, recent sessions, primary workflows, and a compact Needs Attention entry.
 2. **Main surface**: either the active session timeline or the multi-agent dashboard.
-3. **Inspector drawer**: changes, session tree, or run details. It is closed by default and only one inspector is mounted at a time.
+3. **Context rail**: on wide Dashboard and selected-Run views, a compact right-side summary of concrete run health/activity and Pi-reported session usage. It collapses away at narrower widths and never becomes a second navigation tree.
+4. **Inspector drawer**: changes, session tree, or run details. It is closed by default and only one inspector is mounted at a time.
 
-Avoid a permanent three-pane IDE layout. The primary object is an agent session, not a file tree.
+Avoid an IDE-shaped permanent file/tree pane. The right rail exists to use otherwise empty desktop width for orchestration facts, not to create another runtime authority.
 
 ### Top bar
 
@@ -115,7 +116,7 @@ The dashboard is the orchestration home. It shows one compact card per live run:
 - change summary when already known;
 - Stop and Open controls.
 
-It is not a miniature transcript grid. Detailed streams stay inside the session view.
+State is reinforced with restrained semantic color plus text: active work, healthy Ready state, attention/retry/stall conditions, and failed/uncertain terminal conditions must remain distinguishable without relying on color alone. The wide-screen context rail adds aggregate counts and a short list of what live runs are doing in plain language. It is not a miniature transcript grid. Detailed streams stay inside the session view.
 
 ### Automation
 
@@ -144,6 +145,8 @@ The run surface separates the durable conversation from current execution detail
 - Compaction/retry/session events remain lightweight notices rather than conversation rows; compaction abort/failure/overflow-retry and provider/summarization retry state stay visible when they affect recovery.
 
 Only bounded history pages and bounded live projections are mounted. Older conversation content loads in bounded pages as the user navigates upward.
+
+On wide displays the selected-run context rail may show Pi's native `get_session_stats` projection: context-window usage, input/output/cache token totals, session cost, user-turn/tool-call counts, plus already-hydrated run facts such as elapsed time, thinking level, queue depth, active tools, and pending input. The rail refreshes session stats when a session becomes selected/ready, after an active turn settles, or on explicit user refresh. It does not poll continuously and does not invent provider-account quota/balance state that Pi cannot report.
 
 ### Composer
 
@@ -229,6 +232,8 @@ The Session Tree inspector supports:
 - session rename where Pi exposes it.
 
 Recent history should open on the latest bounded window. For a live Pi process, new history synchronizes incrementally with Pi's stable `get_entries(since)` entry cursor. Cold history is parsed from Pi JSONL incrementally as the user moves backward. Neither path hydrates an entire large transcript merely to open its latest turn. Session catalog previews may normalize Pi's explicit persisted skill wrapper so generated skill instructions do not hide the user's actual task, but Pi JSONL remains untouched. Before a historical session is resumed for writing, an unterminated JSONL tail is rejected rather than allowing Pi's next append to concatenate records.
+
+If Pi returns a successful incremental `get_entries` page that exceeds Pi Wizard's bounded hot-page count/byte projection, that local display limit is a resynchronization condition, not evidence that Pi's protocol or process failed. The app marks live synchronization stale and reloads/reseeds from bounded authoritative JSONL history instead of terminating the healthy Pi process.
 
 ## 10. Design constraints
 

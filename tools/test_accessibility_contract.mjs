@@ -22,10 +22,15 @@ const attention = [
   readFileSync(resolve(root, "src", "features", "attention", "NeedsAttentionView.tsx"), "utf8"),
 ].join("\n");
 const composer = readFileSync(resolve(root, "src", "features", "runs", "composer.tsx"), "utf8");
+const runContextRail = readFileSync(
+  resolve(root, "src", "features", "runs", "RunContextRail.tsx"),
+  "utf8",
+);
 const runs = [
   readFileSync(resolve(root, "src", "features", "runs", "types.tsx"), "utf8"),
   readFileSync(resolve(root, "src", "features", "runs", "history.tsx"), "utf8"),
   composer,
+  runContextRail,
   readFileSync(resolve(root, "src", "features", "runs", "presentation.tsx"), "utf8"),
   readFileSync(resolve(root, "src", "features", "runs", "MarkdownText.tsx"), "utf8"),
 ].join("\n");
@@ -81,7 +86,7 @@ requireContract(
   "reduced-motion preference must be honored",
 );
 requireContract(
-  app.includes('class={`app-shell sidebar-width-${sidebarWidth()}`}'),
+  app.includes('class={`app-shell sidebar-width-${sidebarWidth()}${contextRailVisible() ? " context-rail-visible" : ""}`}'),
   "desktop shell must expose sidebar/main navigation",
 );
 requireContract(
@@ -90,7 +95,7 @@ requireContract(
     app.includes("setPointerCapture") &&
     app.includes('event.key !== "ArrowLeft" && event.key !== "ArrowRight"') &&
     app.includes("Math.round((bounded - 208) / 16) * 16") &&
-    app.includes('class={`app-shell sidebar-width-${sidebarWidth()}`}') &&
+    app.includes('contextRailVisible() ? " context-rail-visible" : ""') &&
     !app.includes('style={`--sidebar-width') &&
     styles.includes("--sidebar-width") &&
     styles.includes(".sidebar-width-208") &&
@@ -100,6 +105,23 @@ requireContract(
   "desktop navigation width must be pointer- and keyboard-adjustable through CSP-safe bounded static classes without constraining the main surface width",
 );
 requireContract(ui.includes('class="run-grid"'), "dashboard must render compact run cards");
+requireContract(
+  runContextRail.includes('aria-label="Run overview and usage"') &&
+    runContextRail.includes('"runtime_session_stats"') &&
+    runContextRail.includes("justSettled") &&
+    runContextRail.includes("sessionChanged || justSettled") &&
+    runContextRail.includes("Total tokens") &&
+    runContextRail.includes("Cache read") &&
+    runContextRail.includes("Context") &&
+    runContextRail.includes("Run facts") &&
+    runContextRail.includes("Active tools") &&
+    !runContextRail.includes("setInterval") &&
+    app.includes("runStatusTone(run)") &&
+    styles.includes(".app-context-rail") &&
+    styles.includes(".tone-danger") &&
+    styles.includes(".tone-ready"),
+  "wide desktop run surfaces must expose event-driven Pi session usage and semantic run health without passive metrics polling",
+);
 requireContract(
   mainCapability.windows?.length === 1 &&
     mainCapability.windows[0] === "main" &&

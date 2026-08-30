@@ -2820,13 +2820,13 @@ impl RuntimeManagerTask {
                         },
                     );
                 }
-                SessionSyncCompletion::ResyncRequired { resync, .. } => {
+                SessionSyncCompletion::ResyncRequired { revision, .. } => {
                     session_resync_required = true;
                     self.push_semantic(
                         run_id,
                         RuntimeUiEvent::SessionSyncChanged {
                             run_id,
-                            revision: resync.revision,
+                            revision,
                             resync_required: true,
                         },
                     );
@@ -5855,6 +5855,11 @@ mod tests {
         let fixture = ManagerFixture::new("draft-shutdown-flush");
         let persistence_root = fixture.root.join("app-state");
         let limits = RuntimeLimits {
+            // This test owns shutdown draft flushing, not startup timing. Give
+            // the fake Node child room to start while the full suite runs many
+            // Windows process/Git fixtures in parallel; the dedicated startup
+            // deadline test above remains the authority for readiness bounds.
+            startup_rpc_deadline_ms: 15_000,
             draft_save_debounce_ms: 60_000,
             draft_flush_deadline_ms: 1_000,
             ..RuntimeLimits::default()

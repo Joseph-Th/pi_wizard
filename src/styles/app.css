@@ -7,6 +7,11 @@
   color: CanvasText;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
+  --status-active: color-mix(in srgb, Highlight 72%, CanvasText 28%);
+  --status-ready: color-mix(in srgb, seagreen 68%, CanvasText 32%);
+  --status-warning: color-mix(in srgb, darkorange 72%, CanvasText 28%);
+  --status-danger: color-mix(in srgb, crimson 72%, CanvasText 28%);
+  --status-neutral: GrayText;
 }
 
 .auto-retry-control {
@@ -1746,6 +1751,10 @@ body {
   min-height: 0;
 }
 
+.app-shell.context-rail-visible {
+  grid-template-columns: var(--sidebar-width, 18rem) 0.35rem minmax(0, 1fr) minmax(16rem, 19rem);
+}
+
 .sidebar-width-208 { --sidebar-width: 208px; }
 .sidebar-width-224 { --sidebar-width: 224px; }
 .sidebar-width-240 { --sidebar-width: 240px; }
@@ -1956,6 +1965,203 @@ body {
   overflow-y: auto;
 }
 
+.app-context-rail {
+  display: grid;
+  align-content: start;
+  gap: 0.8rem;
+  min-width: 0;
+  min-height: 0;
+  padding: 1.25rem 1rem 2rem;
+  overflow-y: auto;
+  border-left: 1px solid color-mix(in srgb, CanvasText 14%, transparent);
+  background: color-mix(in srgb, CanvasText 2.5%, Canvas);
+}
+
+.context-rail-section {
+  display: grid;
+  gap: 0.65rem;
+  min-width: 0;
+  padding-bottom: 0.8rem;
+  border-bottom: 1px solid color-mix(in srgb, CanvasText 10%, transparent);
+}
+
+.context-rail-section > header {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.6rem;
+  align-items: center;
+}
+
+.context-rail-section > header > span,
+.context-rail-note,
+.current-run-activity small,
+.context-run-list small,
+.context-usage-meter small {
+  color: GrayText;
+  font-size: 0.72rem;
+  line-height: 1.4;
+}
+
+.context-rail-section button {
+  padding: 0.3rem 0.5rem;
+  font: inherit;
+  font-size: 0.72rem;
+}
+
+.context-rail-note {
+  margin: 0;
+}
+
+.run-overview-counts {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.45rem;
+}
+
+.run-overview-counts > div {
+  display: grid;
+  gap: 0.05rem;
+  padding: 0.5rem 0.55rem;
+  border: 1px solid color-mix(in srgb, CanvasText 10%, transparent);
+  border-left: 3px solid var(--status-tone, var(--status-neutral));
+  border-radius: 0.4rem;
+  background: color-mix(in srgb, var(--status-tone, CanvasText) 4%, Canvas);
+}
+
+.run-overview-counts strong {
+  font-size: 1rem;
+}
+
+.run-overview-counts span {
+  color: GrayText;
+  font-size: 0.68rem;
+}
+
+.overview-active { --status-tone: var(--status-active); }
+.overview-ready { --status-tone: var(--status-ready); }
+.overview-warning { --status-tone: var(--status-warning); }
+.overview-danger { --status-tone: var(--status-danger); }
+.overview-neutral {
+  --status-tone: var(--status-neutral);
+  grid-column: 1 / -1;
+}
+
+.context-run-list {
+  display: grid;
+  gap: 0.35rem;
+}
+
+.context-run-list button {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 0.5rem;
+  align-items: center;
+  width: 100%;
+  min-width: 0;
+  padding: 0.5rem;
+  text-align: left;
+}
+
+.context-run-list button > span:last-child,
+.current-run-activity > div {
+  display: grid;
+  gap: 0.1rem;
+  min-width: 0;
+}
+
+.context-run-list strong,
+.context-run-list small,
+.current-run-activity strong,
+.current-run-activity small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.status-dot {
+  width: 0.6rem;
+  height: 0.6rem;
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: var(--status-tone, var(--status-neutral));
+}
+
+.tone-active { --status-tone: var(--status-active); }
+.tone-ready { --status-tone: var(--status-ready); }
+.tone-warning { --status-tone: var(--status-warning); }
+.tone-danger { --status-tone: var(--status-danger); }
+.tone-neutral { --status-tone: var(--status-neutral); }
+
+.context-state {
+  padding: 0.15rem 0.4rem;
+  border: 1px solid color-mix(in srgb, var(--status-tone, CanvasText) 58%, transparent);
+  border-radius: 999px;
+  color: var(--status-tone, CanvasText);
+  font-size: 0.68rem;
+  font-weight: 650;
+  text-transform: capitalize;
+}
+
+.current-run-activity {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 0.55rem;
+  align-items: center;
+  min-width: 0;
+}
+
+.context-usage-meter {
+  display: grid;
+  gap: 0.35rem;
+}
+
+.context-usage-meter > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+  align-items: baseline;
+  font-size: 0.76rem;
+}
+
+.context-usage-meter progress {
+  width: 100%;
+  height: 0.55rem;
+  accent-color: var(--status-active);
+}
+
+.usage-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.45rem;
+  margin: 0;
+}
+
+.usage-grid > div {
+  display: grid;
+  gap: 0.05rem;
+  min-width: 0;
+  padding: 0.4rem 0.45rem;
+  border: 1px solid color-mix(in srgb, CanvasText 9%, transparent);
+  border-radius: 0.35rem;
+}
+
+.usage-grid dt {
+  color: GrayText;
+  font-size: 0.65rem;
+}
+
+.usage-grid dd {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  font-size: 0.75rem;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+
 .surface-heading {
   display: flex;
   justify-content: space-between;
@@ -2142,7 +2348,9 @@ body {
   min-width: 0;
   padding: 0.85rem;
   border: 1px solid color-mix(in srgb, CanvasText 16%, transparent);
+  border-left: 3px solid var(--status-tone, color-mix(in srgb, CanvasText 16%, transparent));
   border-radius: 0.5rem;
+  background: color-mix(in srgb, var(--status-tone, CanvasText) 2.5%, Canvas);
 }
 
 .run-card > div:first-child,
@@ -2170,6 +2378,10 @@ body {
   text-transform: capitalize;
 }
 
+.run-state[class*="tone-"] {
+  border-color: color-mix(in srgb, var(--status-tone, CanvasText) 55%, transparent);
+}
+
 .state-working,
 .state-needs-attention {
   border-color: color-mix(in srgb, Highlight 48%, CanvasText 16%);
@@ -2179,13 +2391,39 @@ body {
   font-size: 0.75rem;
 }
 
-.run-activity {
+.run-card-activity {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 0.5rem;
+  align-items: center;
+  min-width: 0;
+  padding: 0.45rem 0.5rem;
+  overflow: hidden;
+  border-radius: 0.35rem;
+  background: color-mix(in srgb, var(--status-tone, CanvasText) 4%, transparent);
+}
+
+.run-card-activity > div {
+  display: grid;
+  gap: 0.08rem;
+  min-width: 0;
+}
+
+.run-card-activity strong,
+.run-card-activity small {
   min-width: 0;
   overflow: hidden;
-  color: CanvasText;
-  font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.run-card-activity strong {
+  font-size: 0.76rem;
+}
+
+.run-card-activity small {
+  color: GrayText;
+  font-size: 0.68rem;
 }
 
 .empty-state {
@@ -2816,8 +3054,23 @@ body {
   }
 }
 
+@media (max-width: 1200px) {
+  .app-shell.context-rail-visible {
+    grid-template-columns: var(--sidebar-width, 18rem) 0.35rem minmax(0, 1fr);
+  }
+
+  .app-context-rail {
+    display: none;
+  }
+}
+
 @media (max-width: 640px) {
   .app-shell {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto minmax(0, 1fr);
+  }
+
+  .app-shell.context-rail-visible {
     grid-template-columns: 1fr;
     grid-template-rows: auto minmax(0, 1fr);
   }

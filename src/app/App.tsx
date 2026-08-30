@@ -52,8 +52,10 @@ import {
   runHasStoppableActivity,
   canCloseRun,
   runDisplayPriority,
+  runStatusTone,
   ExtensionUiPanel,
   PiRuntimeNoticePanel,
+  RunContextRail,
 } from "../features/runs/RunSurface";
 
 export interface AppStartupSnapshot {
@@ -358,6 +360,9 @@ export function App(props: { startup: AppStartupSnapshot }) {
     const id = selectedRunId();
     return id ? runById(id) : undefined;
   };
+
+  const contextRailVisible = () =>
+    view() === "dashboard" || (view() === "run" && Boolean(selectedRun()));
 
   const openRun = (runId: string) => {
     setRunActionError(undefined);
@@ -674,7 +679,9 @@ export function App(props: { startup: AppStartupSnapshot }) {
   return (
     <>
       <a class="skip-link" href="#main-content">Skip to main content</a>
-      <div class={`app-shell sidebar-width-${sidebarWidth()}`}>
+      <div
+        class={`app-shell sidebar-width-${sidebarWidth()}${contextRailVisible() ? " context-rail-visible" : ""}`}
+      >
         <aside class="app-sidebar" aria-label="Pi Wizard navigation">
           <header class="app-brand">
             <strong>Pi Wizard</strong>
@@ -1161,10 +1168,10 @@ export function App(props: { startup: AppStartupSnapshot }) {
                 <div class="run-grid">
                   <For each={sortedRuns()}>
                     {(run) => (
-                      <article class="run-card">
+                      <article class={`run-card tone-${runStatusTone(run)}`}>
                         <div>
                           <strong>{runTitle(run)}</strong>
-                          <span class={`run-state state-${runStateLabel(run).replaceAll(" ", "-")}`}>
+                          <span class={`run-state state-${runStateLabel(run).replaceAll(" ", "-")} tone-${runStatusTone(run)}`}>
                             {runStateLabel(run)}
                           </span>
                         </div>
@@ -1175,7 +1182,19 @@ export function App(props: { startup: AppStartupSnapshot }) {
                           {(worktree) => <small>{worktree().branch} · {worktree().baseCommit.slice(0, 12)}</small>}
                         </Show>
                         <small>{runModelLabel(run)} · {runThinkingLabel(run)}</small>
-                        <small class="run-activity">{runActivityLabel(run)}</small>
+                        <div class="run-card-activity">
+                          <span class={`status-dot tone-${runStatusTone(run)}`} aria-hidden="true" />
+                          <div>
+                            <strong>{runActivityLabel(run)}</strong>
+                            <small>
+                              {run.run.process === "ready" && !run.run.agentWorking
+                                ? "Pi process is available"
+                                : run.run.process === "exited"
+                                  ? "Process finished"
+                                  : "Live backend state"}
+                            </small>
+                          </div>
+                        </div>
                         <div class="run-card-meta">
                           <small title={`Started ${new Date(run.run.startedUnixMs).toLocaleString()}`}>
                             {runElapsedLabel(run, elapsedClockUnixMs())}
@@ -1268,6 +1287,14 @@ export function App(props: { startup: AppStartupSnapshot }) {
             </Show>
           </Show>
         </main>
+        <Show when={contextRailVisible()}>
+          <RunContextRail
+            run={view() === "run" ? selectedRun() : undefined}
+            runs={sortedRuns()}
+            nowUnixMs={elapsedClockUnixMs()}
+            onOpenRun={openRun}
+          />
+        </Show>
       </div>
     </>
   );

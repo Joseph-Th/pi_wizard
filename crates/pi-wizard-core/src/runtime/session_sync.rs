@@ -138,6 +138,16 @@ impl SessionSyncState {
         })
     }
 
+    /// Invalidates the live append cursor when Pi returned a successful page
+    /// that cannot fit the app's bounded incremental projection. The persisted
+    /// JSONL remains authoritative, so this is a cold-history resync condition,
+    /// not a transport/protocol failure that should terminate the Pi process.
+    pub fn mark_projection_resync_required(&mut self) -> u64 {
+        self.resync_required = true;
+        self.revision = self.revision.saturating_add(1);
+        self.revision
+    }
+
     pub fn reset_for_session_replacement(&mut self) {
         *self = Self::default();
     }
@@ -257,6 +267,24 @@ mod tests {
             .expect("offline resync seed");
         assert_eq!(sync.cursor(), Some("z"));
         assert!(!sync.resync_required());
+    }
+
+    #[test]
+    fn local_projection_overflow_marks_resync_without_destroying_cursor_identity() {
+        let limits = RuntimeLimits::default();
+        let mut sync = SessionSyncState::default();
+        sync.seed(Some("a".to_owned()), Some("a".to_owned()), limits)
+            .expect("seed");
+        let revision = sync.mark_projection_resync_required();
+
+        assert!(sync.resync_required());
+        assert_eq!(sync.cursor(), Some("a"));
+        assert_eq!(sync.leaf_id(), Some("a"));
+        assert_eq!(revision, 2);
+        assert_eq!(
+            sync.validate_request(Some("a"), limits),
+            Err(SessionSyncError::ResyncRequired)
+        );
     }
 
     #[test]
