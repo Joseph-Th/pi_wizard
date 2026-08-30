@@ -7,7 +7,7 @@ use pi_wizard_core::launch::{
     ContextFilesPolicy, ExtensionDiscoveryPolicy, PiLaunchSpec, ProjectTrustPolicy, SessionLaunch,
 };
 use pi_wizard_core::project::ProjectBinding;
-use pi_wizard_core::rpc::{RpcCommand, RpcRequest};
+use pi_wizard_core::rpc::{AssistantStopReason, RpcCommand, RpcRequest};
 use pi_wizard_core::runtime::{
     ActivityState, ExecutionIsolation, ProcessState, RunHydrationSnapshot, RunStartSpec,
     RuntimeHydrationSnapshot, RuntimeManagerHandle,
@@ -157,7 +157,6 @@ pub(crate) struct SupervisionPlan {
     pub(crate) environment: ResolvedLaunchEnvironment,
     pub(crate) base: WorktreeBaseSnapshot,
     pub(crate) selection: LaunchSelection,
-    pub(crate) prompt_templates: Vec<String>,
     pub(crate) max_cycles: Option<usize>,
 }
 
@@ -190,6 +189,7 @@ struct SupervisorReply {
 struct ObservedRunVersion {
     session_replacement_generation: u64,
     session_id: Option<String>,
+    agent_settled_generation: u64,
     assistant_message_generation: u64,
 }
 
@@ -302,6 +302,7 @@ async fn run_supervision_inner(
             let generation = ObservedRunVersion {
                 session_replacement_generation: run.run.session_replacement_generation(),
                 session_id: run.run.session_state().session_id.clone(),
+                agent_settled_generation: run.run.agent_settled_generation(),
                 assistant_message_generation: run.run.assistant_message_generation(),
             };
             observed.insert(*run_id, generation.clone());
@@ -634,7 +635,7 @@ async fn run_supervisor_cycle(
     observed: &HashMap<RunId, ObservedRunVersion>,
     stop: &mut watch::Receiver<bool>,
 ) -> Result<HashSet<RunId>, String> {
-    let prompt = supervisor_prompt(context, plan, hydration, eligible, settled).await?;
+    let prompt = supervisor_prompt(context, hydration, eligible, settled).await?;
     if *stop.borrow() {
         return Ok(HashSet::new());
     }
@@ -649,7 +650,9 @@ async fn run_supervisor_cycle(
         .find(|run| run.run.id() == supervisor_run)
         .ok_or_else(|| "supervisor run disappeared before its turn".to_owned())?
         .run
-        .assistant_message_generation();
+        .clone();
+    let assistant_generation_before = before.assistant_message_generation();
+    let settled_generation_before = before.agent_settled_generation();
     submit_text_prompt(&context.manager, supervisor_run, &prompt).await?;
     let wait = async {
         loop {
@@ -683,7 +686,7 @@ async fn run_supervisor_cycle(
             }
             if run.run.process_state() == ProcessState::Ready
                 && run.run.activity_state() == ActivityState::Idle
-                && run.run.assistant_message_generation() > before
+                && run.run.agent_settled_generation() > settled_generation_before
             {
                 return Ok(true);
             }
@@ -702,7 +705,51 @@ async fn run_supervisor_cycle(
         return Ok(HashSet::new());
     }
 
-    let text = last_assistant_text(&context.manager, supervisor_run).await?;
+    let current = context
+        .manager
+        .hydrate()
+        .await
+        .map_err(|error| error.to_string())?;
+    let supervisor = current
+        .runs
+        .iter()
+        .find(|run| run.run.id() == supervisor_run)
+        .ok_or_else(|| "supervisor run disappeared after settlement".to_owned())?;
+    if supervisor.run.assistant_message_generation() <= assistant_generation_before {
+        return Err("supervisor settled without producing an assistant result".to_owned());
+    }
+    match supervisor.run.last_assistant_stop_reason() {
+        Some(AssistantStopReason::Stop) => {}
+        Some(AssistantStopReason::Error) => {
+            return Err(supervisor
+                .run
+                .last_assistant_error()
+                .unwrap_or("supervisor assistant turn ended with an error")
+                .to_owned());
+        }
+        Some(AssistantStopReason::Length) => {
+            return Err("supervisor assistant output hit its length limit".to_owned());
+        }
+        Some(AssistantStopReason::Aborted) => {
+            return Err("supervisor assistant turn was aborted".to_owned());
+        }
+        Some(AssistantStopReason::ToolUse) => {
+            return Err(
+                "supervisor settled on a tool-use message without a final directive response"
+                    .to_owned(),
+            );
+        }
+        Some(AssistantStopReason::Unknown(reason)) => {
+            return Err(format!(
+                "supervisor assistant used unknown stop reason {reason:?}"
+            ));
+        }
+        None => return Err("supervisor settled without a recorded assistant outcome".to_owned()),
+    }
+
+    let text = last_assistant_text(&context.manager, supervisor_run)
+        .await?
+        .ok_or_else(|| "supervisor settled without assistant text".to_owned())?;
     if text.len() > context.limits.max_supervisor_context_bytes {
         return Err(format!(
             "supervisor response used {} bytes, exceeding limit {}",
@@ -780,11 +827,12 @@ async fn run_supervisor_cycle(
         if matches!(
             directive.action,
             SupervisorAction::Send | SupervisorAction::Stop
-        ) && run.run.assistant_message_generation()
-            != observed_version.assistant_message_generation
+        ) && (run.run.agent_settled_generation() != observed_version.agent_settled_generation
+            || run.run.assistant_message_generation()
+                != observed_version.assistant_message_generation)
         {
             decision_summary.push(format!(
-                "Skipped run {}: it produced a newer assistant result during the supervisor decision",
+                "Skipped run {}: it completed newer work during the supervisor decision",
                 short_run_id(directive.run_id)
             ));
             continue;
@@ -969,7 +1017,6 @@ async fn terminate_supervised_run(
 
 async fn supervisor_prompt(
     context: &SupervisionRuntimeContext,
-    plan: &SupervisionPlan,
     hydration: &RuntimeHydrationSnapshot,
     eligible: &HashSet<RunId>,
     settled: &HashSet<RunId>,
@@ -1000,22 +1047,34 @@ async fn supervisor_prompt(
             .map(|model| format!("{}/{}", model.provider, model.id))
             .unwrap_or_else(|| "pi-default".to_owned());
         let decision_required = settled.contains(&run_id);
+        let outcome = match run.run.last_assistant_stop_reason() {
+            Some(AssistantStopReason::Stop) => "stop",
+            Some(AssistantStopReason::Length) => "length",
+            Some(AssistantStopReason::ToolUse) => "tool_use",
+            Some(AssistantStopReason::Error) => "error",
+            Some(AssistantStopReason::Aborted) => "aborted",
+            Some(AssistantStopReason::Unknown(_)) => "unknown",
+            None => "none",
+        };
+        let last_error = run
+            .run
+            .last_assistant_error()
+            .map(|error| truncate_utf8_prefix(error, 2_048));
         let result = if decision_required {
             last_assistant_text(&context.manager, run_id)
-                .await
-                .ok()
+                .await?
                 .map(|text| truncate_utf8_prefix(&text, 4_096).to_owned())
         } else {
             None
         };
         let line = match result {
             Some(result) => format!(
-                "- runId={run_id} projectId={} decisionRequired={decision_required} status={status} model={model:?} root={:?} lastResult={result:?}\n",
+                "- runId={run_id} projectId={} decisionRequired={decision_required} status={status} outcome={outcome} model={model:?} root={:?} lastError={last_error:?} lastResult={result:?}\n",
                 run.run.project_id(),
                 run.run.execution_root()
             ),
             None => format!(
-                "- runId={run_id} projectId={} decisionRequired={decision_required} status={status} model={model:?} root={:?}\n",
+                "- runId={run_id} projectId={} decisionRequired={decision_required} status={status} outcome={outcome} model={model:?} root={:?} lastError={last_error:?}\n",
                 run.run.project_id(),
                 run.run.execution_root()
             ),
@@ -1024,22 +1083,6 @@ async fn supervisor_prompt(
             break;
         }
         prompt.push_str(&line);
-    }
-    if !plan.prompt_templates.is_empty() {
-        let heading = "Reusable playbook prompts. Treat these as candidate work themes, adapt them to each project's current state, and choose the next logical one rather than blindly replaying them:\n";
-        if prompt.len().saturating_add(heading.len()) <= context.limits.max_supervisor_context_bytes
-        {
-            prompt.push_str(heading);
-            for template in &plan.prompt_templates {
-                let line = format!("- {:?}\n", truncate_utf8_prefix(template, 2_048));
-                if prompt.len().saturating_add(line.len())
-                    > context.limits.max_supervisor_context_bytes
-                {
-                    break;
-                }
-                prompt.push_str(&line);
-            }
-        }
     }
     if prompt.len() > context.limits.max_supervisor_context_bytes {
         return Err("supervisor instruction prefix exceeds configured context limit".to_owned());
@@ -1104,6 +1147,22 @@ mod tests {
                 }
             }
         }
+    }
+
+    fn delay_supervisor_turn(fixture: &WorkflowFakePiFixture) {
+        fs::write(
+            fixture.root.join("workflow-delay-supervisor-turn"),
+            b"delay",
+        )
+        .expect("configure delayed supervisor turn");
+    }
+
+    fn configure_supervisor_stop_directive(fixture: &WorkflowFakePiFixture) {
+        fs::write(
+            fixture.root.join("workflow-supervisor-stop-directive"),
+            b"stop",
+        )
+        .expect("configure supervisor stop directive");
     }
 
     async fn wait_for_supervisor_turn_started(
@@ -1294,6 +1353,7 @@ mod tests {
     #[tokio::test]
     async fn supervision_skips_send_when_user_takes_over_idle_run_during_supervisor_turn() {
         let fixture = WorkflowFakePiFixture::new("supervision-send-race");
+        delay_supervisor_turn(&fixture);
         let environment = fixture.initialize_git_repository();
         let limits = RuntimeLimits {
             max_live_runs: 3,
@@ -1335,7 +1395,6 @@ mod tests {
                 None,
                 None,
                 None,
-                Some(1),
             ))
             .await
             .expect("insert send-race supervision");
@@ -1364,7 +1423,6 @@ mod tests {
                 environment,
                 base,
                 selection,
-                prompt_templates: vec!["RACE_TEST_DELAY".to_owned()],
                 max_cycles: Some(1),
             },
             stop,
@@ -1450,6 +1508,8 @@ mod tests {
     #[tokio::test]
     async fn supervision_defers_autonomous_stop_while_direct_bash_owns_execution_root() {
         let fixture = WorkflowFakePiFixture::new("supervision-bash-race");
+        delay_supervisor_turn(&fixture);
+        configure_supervisor_stop_directive(&fixture);
         let environment = fixture.initialize_git_repository();
         let limits = RuntimeLimits {
             max_live_runs: 3,
@@ -1491,7 +1551,6 @@ mod tests {
                 None,
                 None,
                 None,
-                None,
             ))
             .await
             .expect("insert Bash-race supervision");
@@ -1518,7 +1577,6 @@ mod tests {
                     model: None,
                     thinking: None,
                 },
-                prompt_templates: vec!["RACE_TEST_DELAY STOP_DURING_BASH_RACE".to_owned()],
                 max_cycles: None,
             },
             stop,
@@ -1696,6 +1754,7 @@ mod tests {
     #[tokio::test]
     async fn supervision_skips_stale_send_when_target_switches_sessions_during_decision() {
         let fixture = WorkflowFakePiFixture::new("supervision-session-race");
+        delay_supervisor_turn(&fixture);
         let environment = fixture.initialize_git_repository();
         let limits = RuntimeLimits {
             max_live_runs: 3,
@@ -1749,7 +1808,6 @@ mod tests {
                 None,
                 None,
                 None,
-                Some(1),
             ))
             .await
             .expect("insert session-race supervision");
@@ -1775,7 +1833,6 @@ mod tests {
                     model: None,
                     thinking: None,
                 },
-                prompt_templates: vec!["RACE_TEST_DELAY".to_owned()],
                 max_cycles: Some(1),
             },
             stop,
@@ -1872,6 +1929,7 @@ mod tests {
     #[tokio::test]
     async fn supervision_skips_stale_send_after_newer_manual_result_already_settled() {
         let fixture = WorkflowFakePiFixture::new("supervision-newer-result-race");
+        delay_supervisor_turn(&fixture);
         let environment = fixture.initialize_git_repository();
         let limits = RuntimeLimits {
             max_live_runs: 3,
@@ -1916,7 +1974,6 @@ mod tests {
                 None,
                 None,
                 None,
-                Some(1),
             ))
             .await
             .expect("insert newer-result supervision");
@@ -1942,7 +1999,6 @@ mod tests {
                     model: None,
                     thinking: None,
                 },
-                prompt_templates: vec!["RACE_TEST_DELAY".to_owned()],
                 max_cycles: Some(1),
             },
             stop,
@@ -1964,7 +2020,7 @@ mod tests {
                     .iter()
                     .find(|run| run.run.id() == worker)
                     .expect("newer-result worker remains live");
-                if run_is_idle_actionable(run) && run.run.assistant_message_generation() >= 1 {
+                if run_is_idle_actionable(run) && run.run.agent_settled_generation() >= 1 {
                     break;
                 }
                 match runtime_changes.recv().await {
@@ -1997,7 +2053,7 @@ mod tests {
             .last_decision
             .as_deref()
             .expect("newer-result last decision");
-        assert!(decision.contains("newer assistant result"), "{decision}");
+        assert!(decision.contains("completed newer work"), "{decision}");
 
         let prompts = fs::read_to_string(fixture.root.join("workflow-worker-prompts.log"))
             .expect("read newer-result worker prompt audit");
@@ -2016,6 +2072,7 @@ mod tests {
     #[tokio::test]
     async fn stopping_supervision_during_supervisor_turn_prevents_worker_directives() {
         let fixture = WorkflowFakePiFixture::new("supervision-user-stop-race");
+        delay_supervisor_turn(&fixture);
         let environment = fixture.initialize_git_repository();
         let limits = RuntimeLimits {
             max_live_runs: 3,
@@ -2060,7 +2117,6 @@ mod tests {
                 None,
                 None,
                 None,
-                None,
             ))
             .await
             .expect("insert user-stop-race supervision");
@@ -2086,7 +2142,6 @@ mod tests {
                     model: None,
                     thinking: None,
                 },
-                prompt_templates: vec!["RACE_TEST_DELAY".to_owned()],
                 max_cycles: None,
             },
             stop,
@@ -2233,7 +2288,7 @@ mod tests {
             .await
             .expect("second ordinary worker ready");
 
-        submit_text_prompt(&manager, first_worker, "first initial task")
+        submit_text_prompt(&manager, first_worker, "provider error step")
             .await
             .expect("submit first worker prompt");
         submit_text_prompt(&manager, second_worker, "second initial task")
@@ -2258,8 +2313,8 @@ mod tests {
                     .expect("second ordinary worker");
                 if run_is_idle_actionable(first)
                     && run_is_idle_actionable(second)
-                    && first.run.assistant_message_generation() >= 1
-                    && second.run.assistant_message_generation() >= 1
+                    && first.run.agent_settled_generation() >= 1
+                    && second.run.agent_settled_generation() >= 1
                 {
                     break;
                 }
@@ -2284,7 +2339,6 @@ mod tests {
                 None,
                 None,
                 None,
-                Some(1),
             ))
             .await
             .expect("insert supervision session");
@@ -2312,7 +2366,6 @@ mod tests {
                 environment: environment.clone(),
                 base,
                 selection,
-                prompt_templates: vec!["Improve testing after audits complete".to_owned()],
                 max_cycles: Some(1),
             },
             stop,
@@ -2387,13 +2440,24 @@ mod tests {
             .expect("read second worker prompt audit");
         assert_eq!(
             first_prompts.lines().collect::<Vec<_>>(),
-            ["first initial task", "supervised continuation"],
-            "supervisor must continue the idle run in the first project"
+            ["provider error step", "supervised continuation"],
+            "supervisor must receive a settled provider error as actionable worker state"
         );
         assert_eq!(
             second_prompts.lines().collect::<Vec<_>>(),
             ["second initial task", "supervised continuation"],
             "supervisor must continue the idle run in the second project"
+        );
+        let supervisor_prompts =
+            fs::read_to_string(fixture.root.join("workflow-supervisor-prompts.log"))
+                .expect("read supervisor prompt audit");
+        assert!(
+            supervisor_prompts.contains("outcome=error"),
+            "{supervisor_prompts}"
+        );
+        assert!(
+            supervisor_prompts.contains("fixture provider rate limit"),
+            "{supervisor_prompts}"
         );
         assert_no_session_stats_probes(&fixture.root);
         assert_no_session_stats_probes(&fixture.worktree_parent());
@@ -2454,7 +2518,7 @@ mod tests {
                     .iter()
                     .find(|run| run.run.id() == worker)
                     .expect("continuous worker");
-                if run_is_idle_actionable(run) && run.run.assistant_message_generation() >= 1 {
+                if run_is_idle_actionable(run) && run.run.agent_settled_generation() >= 1 {
                     break;
                 }
                 match runtime_changes.recv().await {
@@ -2475,7 +2539,6 @@ mod tests {
                 id,
                 vec![project.id()],
                 project.id(),
-                None,
                 None,
                 None,
                 None,
@@ -2505,7 +2568,6 @@ mod tests {
                     model: None,
                     thinking: None,
                 },
-                prompt_templates: Vec::new(),
                 max_cycles: None,
             },
             stop,
@@ -2612,7 +2674,6 @@ mod tests {
                 None,
                 None,
                 None,
-                None,
             ))
             .await
             .expect("insert prelaunch-stop supervision");
@@ -2642,7 +2703,6 @@ mod tests {
                     model: None,
                     thinking: None,
                 },
-                prompt_templates: Vec::new(),
                 max_cycles: None,
             },
             stop,
@@ -2703,7 +2763,6 @@ mod tests {
                 None,
                 None,
                 None,
-                None,
             ))
             .await
             .expect("insert startup-stop supervision");
@@ -2730,7 +2789,6 @@ mod tests {
                     model: None,
                     thinking: None,
                 },
-                prompt_templates: Vec::new(),
                 max_cycles: None,
             },
             stop,

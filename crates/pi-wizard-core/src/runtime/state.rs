@@ -7,7 +7,7 @@ use thiserror::Error;
 
 use crate::bounded::BoundedText;
 use crate::launch::ProjectTrustPolicy;
-use crate::rpc::{QueueMode, ThinkingLevel};
+use crate::rpc::{AssistantStopReason, QueueMode, ThinkingLevel};
 use crate::worktree::GitWorktreeIdentity;
 use crate::{ProjectId, RunId, RuntimeLimits};
 
@@ -166,6 +166,12 @@ pub struct RunRecord {
     #[serde(skip)]
     assistant_message_generation: u64,
     #[serde(skip)]
+    agent_settled_generation: u64,
+    #[serde(skip)]
+    last_assistant_stop_reason: Option<AssistantStopReason>,
+    #[serde(skip)]
+    last_assistant_error: Option<String>,
+    #[serde(skip)]
     session_replacement_generation: u64,
     process: ProcessState,
     agent_working: bool,
@@ -223,6 +229,9 @@ impl RunRecord {
             terminal_unix_ms: None,
             change_revision: 0,
             assistant_message_generation: 0,
+            agent_settled_generation: 0,
+            last_assistant_stop_reason: None,
+            last_assistant_error: None,
             session_replacement_generation: 0,
             process: ProcessState::Starting,
             agent_working: false,
@@ -301,13 +310,31 @@ impl RunRecord {
         self.change_revision
     }
 
-    /// Monotonic backend-only generation for authoritative assistant
-    /// `message_end` events observed on this live run. This is intentionally
-    /// skipped from renderer serialization; orchestration owners use it to
-    /// detect completed model output without issuing Pi stats probes.
+    /// Monotonic backend-only generation for assistant `message_end` events
+    /// only. Tool-result `message_end` events do not advance this counter.
+    /// Orchestration pairs it with `agent_settled_generation` to verify that a
+    /// settled prompt actually produced a new assistant result.
     #[must_use]
     pub const fn assistant_message_generation(&self) -> u64 {
         self.assistant_message_generation
+    }
+
+    /// Monotonic backend-only generation for Pi `agent_settled`. Unlike
+    /// `message_end`, this is the session-level boundary after retries,
+    /// compaction retries, and queued continuation work have finished.
+    #[must_use]
+    pub const fn agent_settled_generation(&self) -> u64 {
+        self.agent_settled_generation
+    }
+
+    #[must_use]
+    pub const fn last_assistant_stop_reason(&self) -> Option<&AssistantStopReason> {
+        self.last_assistant_stop_reason.as_ref()
+    }
+
+    #[must_use]
+    pub fn last_assistant_error(&self) -> Option<&str> {
+        self.last_assistant_error.as_deref()
     }
 
     /// Monotonic backend-only generation for accepted Pi session replacement
@@ -461,16 +488,24 @@ impl RunRecord {
                 self.abort_requested = false;
                 self.retry_waiting = false;
                 self.summarization_retry_active = false;
+                self.agent_settled_generation = self.agent_settled_generation.saturating_add(1);
             }
-            RunMutation::AssistantMessageCompleted => {
+            RunMutation::AssistantMessageCompleted {
+                stop_reason,
+                error_message,
+            } => {
                 self.require_process("assistant_message_completed", &[ProcessState::Ready])?;
                 self.assistant_message_generation =
                     self.assistant_message_generation.saturating_add(1);
+                self.last_assistant_stop_reason = Some(stop_reason);
+                self.last_assistant_error = error_message;
             }
             RunMutation::SessionReplacementAccepted => {
                 self.require_process("session_replacement_accepted", &[ProcessState::Ready])?;
                 self.session_replacement_generation =
                     self.session_replacement_generation.saturating_add(1);
+                self.last_assistant_stop_reason = None;
+                self.last_assistant_error = None;
             }
             RunMutation::AutoRetryStarted => {
                 self.require_process("auto_retry_started", &[ProcessState::Ready])?;
@@ -641,7 +676,10 @@ pub enum RunMutation {
     ProcessReady,
     AgentStarted,
     AgentSettled,
-    AssistantMessageCompleted,
+    AssistantMessageCompleted {
+        stop_reason: AssistantStopReason,
+        error_message: Option<String>,
+    },
     SessionReplacementAccepted,
     AutoRetryStarted,
     AutoRetryEnded,
@@ -1079,6 +1117,7 @@ mod tests {
         let run = store.get(id).expect("run remains registered");
         assert_eq!(run.process_state(), ProcessState::Ready);
         assert_eq!(run.activity_state(), ActivityState::Idle);
+        assert_eq!(run.agent_settled_generation(), 1);
 
         store
             .apply(id, RunMutation::AgentStarted)

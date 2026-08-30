@@ -305,6 +305,46 @@ process.stdin.on("data", (chunk) => {
       emit({ type: "agent_start" });
       emit({ type: "message_start", message: { role: "assistant", content: [] } });
       emit({
+        type: "message_end",
+        message: {
+          role: "assistant",
+          stopReason: "toolUse",
+          content: [
+            { type: "thinking", thinking: "inspect before answering" },
+            { type: "text", text: "Packaged intermediate tool step" },
+            { type: "toolCall", id: "packaged-call-" + turn, name: "read", arguments: { path: "seed.txt" } }
+          ]
+        }
+      });
+      emit({
+        type: "tool_execution_start",
+        toolCallId: "packaged-call-" + turn,
+        toolName: "read",
+        args: { path: "seed.txt" }
+      });
+      emit({
+        type: "tool_execution_end",
+        toolCallId: "packaged-call-" + turn,
+        toolName: "read",
+        result: { content: [{ type: "text", text: "packaged tool result" }], details: {} },
+        isError: false
+      });
+      emit({
+        type: "message_start",
+        message: { role: "toolResult", toolCallId: "packaged-call-" + turn, toolName: "read", content: [] }
+      });
+      emit({
+        type: "message_end",
+        message: {
+          role: "toolResult",
+          toolCallId: "packaged-call-" + turn,
+          toolName: "read",
+          content: [{ type: "text", text: "packaged tool result" }],
+          isError: false
+        }
+      });
+      emit({ type: "message_start", message: { role: "assistant", content: [] } });
+      emit({
         type: "message_update",
         assistantMessageEvent: { type: "thinking_start", contentIndex: 0 }
       });
@@ -405,6 +445,7 @@ process.stdin.on("data", (chunk) => {
           type: "message_end",
           message: {
             role: "assistant",
+            stopReason: "stop",
             content: [
               { type: "thinking", thinking: "verify packaged handoff" },
               { type: "text", text: finalAnswer }

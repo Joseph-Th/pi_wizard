@@ -23,10 +23,6 @@ pub(crate) struct StartSupervisionRequest {
     pub(crate) model: Option<String>,
     #[serde(default)]
     pub(crate) thinking: Option<ThinkingLevel>,
-    #[serde(default)]
-    pub(crate) prompt_templates: Vec<String>,
-    #[serde(default)]
-    pub(crate) max_cycles: Option<usize>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize)]
@@ -63,48 +59,6 @@ pub(crate) async fn runtime_start_supervision(
         if project_id_set.insert(project_id) {
             project_ids.push(project_id);
         }
-    }
-    if let Some(max_cycles) = request.max_cycles
-        && (max_cycles == 0 || max_cycles > runtime.limits.max_supervision_cycles)
-    {
-        return Err(format!(
-            "finite supervision cycles must be between 1 and {}",
-            runtime.limits.max_supervision_cycles
-        ));
-    }
-    if request.prompt_templates.len() > runtime.limits.max_automation_steps_per_chain {
-        return Err(format!(
-            "supervision playbook has {} prompts, exceeding limit {}",
-            request.prompt_templates.len(),
-            runtime.limits.max_automation_steps_per_chain
-        ));
-    }
-    let mut template_bytes = 0usize;
-    let mut prompt_templates = Vec::with_capacity(request.prompt_templates.len());
-    for (index, template) in request.prompt_templates.iter().enumerate() {
-        let template = template.trim();
-        if template.is_empty() {
-            return Err(format!(
-                "supervision playbook prompt {} is empty",
-                index + 1
-            ));
-        }
-        if template.len() > runtime.limits.max_draft_bytes_per_session {
-            return Err(format!(
-                "supervision playbook prompt {} uses {} bytes, exceeding prompt limit {}",
-                index + 1,
-                template.len(),
-                runtime.limits.max_draft_bytes_per_session
-            ));
-        }
-        template_bytes = template_bytes.saturating_add(template.len());
-        if template_bytes > runtime.limits.max_supervisor_context_bytes {
-            return Err(format!(
-                "supervision playbook uses more than {} bytes",
-                runtime.limits.max_supervisor_context_bytes
-            ));
-        }
-        prompt_templates.push(template.to_owned());
     }
     let capacity = runtime.capacity_report().await?;
     if capacity.active_runs >= capacity.live_run_limit {
@@ -161,7 +115,6 @@ pub(crate) async fn runtime_start_supervision(
         selection.provider.clone(),
         selection.model.clone(),
         selection.thinking,
-        request.max_cycles,
     );
     let stop = runtime.supervision.insert(snapshot).await?;
     let context = SupervisionRuntimeContext {
@@ -181,8 +134,7 @@ pub(crate) async fn runtime_start_supervision(
                 environment: profile.environment,
                 base,
                 selection,
-                prompt_templates,
-                max_cycles: request.max_cycles,
+                max_cycles: None,
             },
             stop,
         )
@@ -212,15 +164,13 @@ mod tests {
             "provider": "openai",
             "model": "gpt-5.6",
             "thinking": "high",
-            "promptTemplates": ["Audit the project", "Improve testing"],
-            "maxCycles": null
+            "promptTemplates": ["obsolete hidden playbook"],
+            "maxCycles": 3
         }))
         .expect("deserialize supervision request");
         assert_eq!(request.project_ids, vec![first_project, second_project]);
         assert_eq!(request.provider.as_deref(), Some("openai"));
         assert_eq!(request.model.as_deref(), Some("gpt-5.6"));
         assert_eq!(request.thinking, Some(ThinkingLevel::High));
-        assert_eq!(request.prompt_templates.len(), 2);
-        assert_eq!(request.max_cycles, None);
     }
 }

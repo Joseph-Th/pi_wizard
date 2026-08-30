@@ -557,18 +557,28 @@ impl RunRpcController {
                 RunRpcEffect::AssistantBlockUpdated { content_index }
             }
             RpcEventKind::MessageEnd => {
-                let blocks = event
-                    .assistant_message_end()?
-                    .expect("message-end parser is gated by event kind");
+                let Some(message) = event.assistant_message_end()? else {
+                    return Ok(RunRpcEffect::None);
+                };
+                let error_message = message
+                    .error_message
+                    .as_deref()
+                    .map(|error| self.bound_detail(error).0);
                 self.live
-                    .reconcile_assistant_message(blocks.into_iter().map(|block| {
+                    .reconcile_assistant_message(message.blocks.into_iter().map(|block| {
                         (
                             block.content_index,
                             assistant_kind(block.kind),
                             block.content,
                         )
                     }))?;
-                store.apply(self.run_id, RunMutation::AssistantMessageCompleted)?;
+                store.apply(
+                    self.run_id,
+                    RunMutation::AssistantMessageCompleted {
+                        stop_reason: message.stop_reason,
+                        error_message,
+                    },
+                )?;
                 RunRpcEffect::SemanticStateChanged
             }
             RpcEventKind::ToolExecutionStart => {
@@ -1512,7 +1522,7 @@ mod tests {
 
         let effect = controller
             .apply_event(
-                &event(br#"{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"final answer"},{"type":"thinking","thinking":"final reasoning"}]}}"#),
+                &event(br#"{"type":"message_end","message":{"role":"assistant","stopReason":"stop","content":[{"type":"text","text":"final answer"},{"type":"thinking","thinking":"final reasoning"}]}}"#),
                 &mut store,
             )
             .expect("message end");
@@ -1523,6 +1533,10 @@ mod tests {
                 .expect("run")
                 .assistant_message_generation(),
             1
+        );
+        assert_eq!(
+            store.get(run_id).expect("run").last_assistant_stop_reason(),
+            Some(&crate::rpc::AssistantStopReason::Stop)
         );
         assert!(
             serde_json::to_value(store.get(run_id).expect("run"))
@@ -1575,6 +1589,64 @@ mod tests {
             .apply_event(&event(br#"{"type":"agent_start"}"#), &mut store)
             .expect("new agent turn");
         assert!(controller.live_projection().snapshot().reasoning.is_empty());
+    }
+
+    #[test]
+    fn tool_result_message_end_does_not_advance_assistant_generation_and_settlement_is_separate() {
+        let run_id = RunId::new();
+        let mut store = ready_store(run_id);
+        let mut controller = RunRpcController::new(run_id, RuntimeLimits::default());
+        controller
+            .apply_event(&event(br#"{"type":"agent_start"}"#), &mut store)
+            .expect("agent start");
+        controller
+            .apply_event(
+                &event(br#"{"type":"message_end","message":{"role":"assistant","stopReason":"toolUse","content":[{"type":"toolCall","id":"call-1","name":"read","arguments":{"path":"README.md"}}]}}"#),
+                &mut store,
+            )
+            .expect("assistant tool-use message");
+        assert_eq!(
+            store
+                .get(run_id)
+                .expect("run")
+                .assistant_message_generation(),
+            1
+        );
+        assert_eq!(
+            store.get(run_id).expect("run").agent_settled_generation(),
+            0
+        );
+
+        let effect = controller
+            .apply_event(
+                &event(br#"{"type":"message_end","message":{"role":"toolResult","toolCallId":"call-1","toolName":"read","content":[{"type":"text","text":"done"}],"isError":false}}"#),
+                &mut store,
+            )
+            .expect("tool result message");
+        assert!(matches!(effect, RunRpcEffect::None));
+        assert_eq!(
+            store
+                .get(run_id)
+                .expect("run")
+                .assistant_message_generation(),
+            1
+        );
+        assert_eq!(
+            store.get(run_id).expect("run").agent_settled_generation(),
+            0
+        );
+
+        controller
+            .apply_event(&event(br#"{"type":"agent_settled"}"#), &mut store)
+            .expect("agent settled");
+        assert_eq!(
+            store.get(run_id).expect("run").agent_settled_generation(),
+            1
+        );
+        assert_eq!(
+            store.get(run_id).expect("run").activity_state(),
+            ActivityState::Idle
+        );
     }
 
     #[test]

@@ -31,7 +31,6 @@ pub struct SupervisionSnapshot {
     pub model: Option<String>,
     pub thinking: Option<ThinkingLevel>,
     pub cycles: usize,
-    pub max_cycles: Option<usize>,
     pub watched_runs: usize,
     pub last_decision: Option<String>,
     pub status: SupervisionStatus,
@@ -47,7 +46,6 @@ impl SupervisionSnapshot {
         provider: Option<String>,
         model: Option<String>,
         thinking: Option<ThinkingLevel>,
-        max_cycles: Option<usize>,
     ) -> Self {
         project_ids.sort_by_key(ToString::to_string);
         project_ids.dedup();
@@ -60,7 +58,6 @@ impl SupervisionSnapshot {
             model,
             thinking,
             cycles: 0,
-            max_cycles,
             watched_runs: 0,
             last_decision: None,
             status: SupervisionStatus::Starting,
@@ -84,12 +81,10 @@ mod tests {
             Some("provider".to_owned()),
             Some("model".to_owned()),
             Some(ThinkingLevel::High),
-            None,
         );
         assert_eq!(snapshot.status, SupervisionStatus::Starting);
         assert_eq!(snapshot.project_ids.len(), 2);
         assert_eq!(snapshot.host_project_id, first);
-        assert_eq!(snapshot.max_cycles, None);
         assert!(snapshot.last_decision.is_none());
         assert!(snapshot.supervisor_run_id.is_none());
     }

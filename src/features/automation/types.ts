@@ -35,8 +35,6 @@ export interface AutomationExecutionSnapshot {
   chainId: string;
   chainName: string;
   projectId: string;
-  concurrency: number;
-  worktrees: boolean;
   error: string | null;
   status: AutomationExecutionStatus;
   steps: AutomationStepSnapshot[];

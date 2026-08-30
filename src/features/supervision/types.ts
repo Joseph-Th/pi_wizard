@@ -11,7 +11,6 @@ export interface SupervisionSnapshot {
   model: string | null;
   thinking: ThinkingLevel | null;
   cycles: number;
-  maxCycles: number | null;
   watchedRuns: number;
   lastDecision: string | null;
   status: SupervisionStatus;

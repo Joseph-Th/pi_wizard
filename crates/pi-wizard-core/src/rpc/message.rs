@@ -80,6 +80,29 @@ pub enum AssistantMessageBlockKind {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AssistantStopReason {
+    Stop,
+    Length,
+    ToolUse,
+    Error,
+    Aborted,
+    Unknown(String),
+}
+
+impl AssistantStopReason {
+    fn from_wire(value: &str) -> Self {
+        match value {
+            "stop" => Self::Stop,
+            "length" => Self::Length,
+            "toolUse" => Self::ToolUse,
+            "error" => Self::Error,
+            "aborted" => Self::Aborted,
+            unknown => Self::Unknown(unknown.to_owned()),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ToolCallStartMeta {
     pub id: String,
     pub tool_name: String,
@@ -122,6 +145,13 @@ pub struct AssistantMessageFinalBlock {
     pub content_index: usize,
     pub kind: AssistantMessageBlockKind,
     pub content: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AssistantMessageEnd {
+    pub blocks: Vec<AssistantMessageFinalBlock>,
+    pub stop_reason: AssistantStopReason,
+    pub error_message: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -326,12 +356,12 @@ impl RpcEvent {
         Ok(Some(update))
     }
 
-    /// Parses Pi's authoritative completed assistant message. Streaming
-    /// `message_update` events are transient previews; `message_end.message`
-    /// is the final source for the completed model content.
+    /// Parses Pi's authoritative completed assistant message. Pi emits
+    /// `message_end` for every AgentMessage, including tool results, so a
+    /// non-assistant message is not an assistant completion.
     pub fn assistant_message_end(
         &self,
-    ) -> Result<Option<Vec<AssistantMessageFinalBlock>>, RpcEventPayloadError> {
+    ) -> Result<Option<AssistantMessageEnd>, RpcEventPayloadError> {
         if self.kind != RpcEventKind::MessageEnd {
             return Ok(None);
         }
@@ -348,8 +378,24 @@ impl RpcEvent {
             },
         )?;
         if role != "assistant" {
-            return Ok(Some(Vec::new()));
+            return Ok(None);
         }
+        let stop_reason = message.get("stopReason").and_then(Value::as_str).ok_or(
+            RpcEventPayloadError::MissingString {
+                event: "message_end",
+                field: "message.stopReason",
+            },
+        )?;
+        let error_message = match message.get("errorMessage") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(value)) => Some(value.clone()),
+            Some(_) => {
+                return Err(RpcEventPayloadError::InvalidOptionalString {
+                    event: "message_end",
+                    field: "message.errorMessage",
+                });
+            }
+        };
         let content = message.get("content").and_then(Value::as_array).ok_or(
             RpcEventPayloadError::MissingArray {
                 event: "message_end",
@@ -407,7 +453,11 @@ impl RpcEvent {
                 content,
             });
         }
-        Ok(Some(blocks))
+        Ok(Some(AssistantMessageEnd {
+            blocks,
+            stop_reason: AssistantStopReason::from_wire(stop_reason),
+            error_message,
+        }))
     }
 
     /// Typed view of direct RPC bash output. Pi includes the originating
@@ -1107,9 +1157,9 @@ mod tests {
     }
 
     #[test]
-    fn message_end_exposes_authoritative_text_thinking_and_tool_call_content() {
+    fn message_end_exposes_authoritative_assistant_content_and_outcome() {
         let message = parse_frame(
-            br#"{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"final answer"},{"type":"thinking","thinking":"final reasoning"},{"type":"toolCall","id":"call-1","name":"read","arguments":{"path":"README.md"}},{"type":"futureBlock","payload":true}]}}"#,
+            br#"{"type":"message_end","message":{"role":"assistant","stopReason":"stop","content":[{"type":"text","text":"final answer"},{"type":"thinking","thinking":"final reasoning"},{"type":"toolCall","id":"call-1","name":"read","arguments":{"path":"README.md"}},{"type":"futureBlock","payload":true}]}}"#,
         )
         .expect("message end");
         let InboundMessage::Event(event) = message else {
@@ -1117,23 +1167,61 @@ mod tests {
         };
         assert_eq!(
             event.assistant_message_end().expect("typed final message"),
-            Some(vec![
-                AssistantMessageFinalBlock {
-                    content_index: 0,
-                    kind: AssistantMessageBlockKind::Text,
-                    content: "final answer".to_owned(),
-                },
-                AssistantMessageFinalBlock {
-                    content_index: 1,
-                    kind: AssistantMessageBlockKind::Thinking,
-                    content: "final reasoning".to_owned(),
-                },
-                AssistantMessageFinalBlock {
-                    content_index: 2,
-                    kind: AssistantMessageBlockKind::ToolCall,
-                    content: r#"{"path":"README.md"}"#.to_owned(),
-                },
-            ])
+            Some(AssistantMessageEnd {
+                blocks: vec![
+                    AssistantMessageFinalBlock {
+                        content_index: 0,
+                        kind: AssistantMessageBlockKind::Text,
+                        content: "final answer".to_owned(),
+                    },
+                    AssistantMessageFinalBlock {
+                        content_index: 1,
+                        kind: AssistantMessageBlockKind::Thinking,
+                        content: "final reasoning".to_owned(),
+                    },
+                    AssistantMessageFinalBlock {
+                        content_index: 2,
+                        kind: AssistantMessageBlockKind::ToolCall,
+                        content: r#"{"path":"README.md"}"#.to_owned(),
+                    },
+                ],
+                stop_reason: AssistantStopReason::Stop,
+                error_message: None,
+            })
+        );
+    }
+
+    #[test]
+    fn tool_result_message_end_is_not_an_assistant_completion() {
+        let message = parse_frame(
+            br#"{"type":"message_end","message":{"role":"toolResult","toolCallId":"call-1","toolName":"read","content":[{"type":"text","text":"done"}],"isError":false}}"#,
+        )
+        .expect("tool result message end");
+        let InboundMessage::Event(event) = message else {
+            panic!("expected event");
+        };
+        assert_eq!(
+            event.assistant_message_end().expect("typed message end"),
+            None
+        );
+    }
+
+    #[test]
+    fn assistant_error_message_end_preserves_provider_error() {
+        let message = parse_frame(
+            br#"{"type":"message_end","message":{"role":"assistant","stopReason":"error","errorMessage":"rate limited","content":[]}}"#,
+        )
+        .expect("assistant error message end");
+        let InboundMessage::Event(event) = message else {
+            panic!("expected event");
+        };
+        assert_eq!(
+            event.assistant_message_end().expect("typed message end"),
+            Some(AssistantMessageEnd {
+                blocks: Vec::new(),
+                stop_reason: AssistantStopReason::Error,
+                error_message: Some("rate limited".to_owned()),
+            })
         );
     }
 

@@ -152,8 +152,8 @@ requireContract(
     ui.includes("refreshCapacity(),") &&
     ui.includes("const installRuntimeListeners = async () =>") &&
     ui.includes("void connectBackend();") &&
-    automation.includes("concurrency: 1") &&
-    automation.includes("worktrees: false") &&
+    !automation.includes("concurrency") &&
+    !automation.includes("worktrees") &&
     automation.includes("promptChainViewDraft") &&
     !automation.includes("Git-isolated workers") &&
     !automation.includes("<span>Workers</span>") &&
@@ -162,8 +162,8 @@ requireContract(
     supervision.includes('"runtime_start_supervision"') &&
     supervision.includes('"runtime_stop_supervision"') &&
     supervision.includes("projectIds") &&
-    supervision.includes("promptTemplates: []") &&
-    supervision.includes("maxCycles: null") &&
+    !supervision.includes("promptTemplates") &&
+    !supervision.includes("maxCycles") &&
     supervision.includes("modelProject()?.canonicalRoot") &&
     !supervision.includes("Reusable prompt playbook") &&
     !app.includes("chains={automation()?.catalog.chains ?? []}") &&

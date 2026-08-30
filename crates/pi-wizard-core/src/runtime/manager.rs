@@ -6804,7 +6804,7 @@ function streamAssistant() {
   emit({type: "message_update", assistantMessageEvent: {type: "text_delta", contentIndex: 0, delta: "Hello "}});
   emit({type: "message_update", assistantMessageEvent: {type: "text_delta", contentIndex: 0, delta: "world"}});
   emit({type: "message_update", assistantMessageEvent: {type: "text_end", contentIndex: 0, content: "Hello world"}});
-  emit({type: "message_end", message: {role: "assistant", content: [{type: "text", text: "Hello world"}]}});
+  emit({type: "message_end", message: {role: "assistant", stopReason: "stop", content: [{type: "text", text: "Hello world"}]}});
 }
 
 function handle(request) {

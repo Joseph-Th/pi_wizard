@@ -13,8 +13,8 @@ Pi Wizard provides these primary workflows:
 - **Recent Sessions** — automatically show the newest Pi-owned JSONL sessions for the selected project, with bounded paging and search.
 - **Needs Attention** — answer backend-owned Pi extension requests by exact run/request identity.
 - **Changes** — inspect bounded repository status and paged per-file diffs for a run's immutable execution root.
-- **Prompt chains** — run an ordered saved prompt list sequentially. Each prompt gets a fresh Pi session in the selected project's local checkout, then the next prompt starts after that session settles and closes.
-- **Supervision** — keep live runs moving across any selected set of projects with one independent Pi supervisor session. Idle results trigger bounded LLM decisions that may Send the next task, Steer/Follow up active work, or Stop a run that should not continue.
+- **Prompt chains** — run an ordered saved prompt list sequentially. Each prompt gets a fresh Pi process/session in the selected project's local checkout; Pi's `agent_settled` plus the final assistant outcome decides success or failure, the process closes, and later prompts continue.
+- **Supervision** — continuously keep live runs moving across any selected set of projects with one independent Pi supervisor session. Newly settled results and errors trigger bounded LLM decisions that may Send the next task, Steer/Follow up active work, or Stop a run that should not continue.
 
 ## Core model
 

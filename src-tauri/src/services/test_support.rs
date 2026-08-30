@@ -62,7 +62,11 @@ impl WorkflowFakePiFixture {
     }
 
     pub(crate) fn environment(&self) -> ResolvedLaunchEnvironment {
-        let desktop_environment: BTreeMap<OsString, OsString> = std::env::vars_os().collect();
+        let mut desktop_environment: BTreeMap<OsString, OsString> = std::env::vars_os().collect();
+        desktop_environment.insert(
+            OsString::from("PI_WIZARD_WORKFLOW_FIXTURE_ROOT"),
+            self.root.as_os_str().to_os_string(),
+        );
         resolve_launch_environment(LaunchEnvironmentInput {
             configured_pi: Some(self.fake_pi.clone()),
             desktop_environment,
@@ -120,15 +124,21 @@ impl Drop for WorkflowFakePiFixture {
 
 const WORKFLOW_FAKE_PI_JS: &str = r#"
 const fs = require("fs");
+const path = require("path");
 let buffer = "";
 let working = false;
 let assistantMessages = 0;
-let lastAssistantText = "";
+let lastAssistantText = null;
 let supervisorTurns = 0;
 let sessionId = `workflow-${process.pid}`;
+let workerSessionLogged = false;
 let delayNextStateAfterSwitch = false;
 const supervisorProcess = process.argv.includes("--no-context-files") && process.argv.includes("--no-extensions");
-const delayedSupervisorStartup = supervisorProcess && fs.existsSync("workflow-delay-supervisor-startup");
+const fixtureRoot = process.env.PI_WIZARD_WORKFLOW_FIXTURE_ROOT || process.cwd();
+const hasControl = (name) => fs.existsSync(path.join(fixtureRoot, name));
+const delayedSupervisorStartup = supervisorProcess && hasControl("workflow-delay-supervisor-startup");
+const delayedSupervisorTurn = supervisorProcess && hasControl("workflow-delay-supervisor-turn");
+const stopDuringBashRace = supervisorProcess && hasControl("workflow-supervisor-stop-directive");
 
 function emit(value) {
   process.stdout.write(JSON.stringify(value) + "\n");
@@ -180,6 +190,10 @@ function state() {
 function handle(request) {
   switch (request.type) {
     case "get_state":
+      if (!supervisorProcess && !workerSessionLogged) {
+        fs.appendFileSync(path.join(fixtureRoot, "workflow-worker-sessions.log"), sessionId + "\n");
+        workerSessionLogged = true;
+      }
       if (delayNextStateAfterSwitch) {
         delayNextStateAfterSwitch = false;
         setTimeout(() => respond(request, state()), 900);
@@ -202,7 +216,10 @@ function handle(request) {
       respond(request, {levels: ["off", "medium", "high", "xhigh"]});
       break;
     case "get_commands":
-      respond(request, {commands: []});
+      respond(request, {commands: [
+        {name: "fixture-extension", description: "immediate extension command", source: "extension"},
+        {name: "fixture-template", description: "prompt template", source: "prompt"},
+      ]});
       break;
     case "get_session_stats":
       fs.appendFileSync("workflow-session-stats.log", "probe\n");
@@ -249,7 +266,7 @@ function handle(request) {
     case "switch_session":
       sessionId = `workflow-switched-${process.pid}`;
       assistantMessages = 0;
-      lastAssistantText = "";
+      lastAssistantText = null;
       delayNextStateAfterSwitch = true;
       respond(request, {cancelled: false});
       break;
@@ -262,8 +279,11 @@ function handle(request) {
       working = true;
       emit({type: "agent_start"});
       if (supervisorProcess) {
+        fs.appendFileSync(
+          path.join(fixtureRoot, "workflow-supervisor-prompts.log"),
+          JSON.stringify(String(request.message)) + "\n",
+        );
         const matches = [...String(request.message).matchAll(/runId=([0-9a-f-]{36}) projectId=[0-9a-f-]{36} decisionRequired=true status=idle/g)];
-        const stopDuringBashRace = String(request.message).includes("STOP_DURING_BASH_RACE");
         if (supervisorTurns === 0 && matches.length > 0) {
           lastAssistantText = JSON.stringify({
             directives: matches.map((match) => stopDuringBashRace
@@ -280,20 +300,113 @@ function handle(request) {
         supervisorTurns += 1;
       } else {
         fs.appendFileSync("workflow-worker-prompts.log", String(request.message) + "\n");
-        lastAssistantText = `done: ${request.message}`;
+        lastAssistantText = request.message === "provider error step"
+          ? null
+          : `done: ${request.message}`;
       }
       setTimeout(() => {
-        emit({
-          type: "message_end",
-          message: {
-            role: "assistant",
-            content: [{type: "text", text: lastAssistantText}],
-          },
-        });
-        assistantMessages += 1;
+        if (!supervisorProcess && request.message === "tool loop step") {
+          emit({type: "message_start", message: {role: "assistant", content: []}});
+          emit({
+            type: "message_end",
+            message: {
+              role: "assistant",
+              stopReason: "toolUse",
+              content: [
+                {type: "text", text: "fixture intermediate tool step"},
+                {type: "toolCall", id: "fixture-call", name: "read", arguments: {path: "seed.txt"}},
+              ],
+            },
+          });
+          assistantMessages += 1;
+          emit({type: "tool_execution_start", toolCallId: "fixture-call", toolName: "read", args: {path: "seed.txt"}});
+          emit({
+            type: "tool_execution_end",
+            toolCallId: "fixture-call",
+            toolName: "read",
+            result: {content: [{type: "text", text: "fixture tool result"}], details: {}},
+            isError: false,
+          });
+          emit({type: "message_start", message: {role: "toolResult", content: []}});
+          emit({
+            type: "message_end",
+            message: {
+              role: "toolResult",
+              toolCallId: "fixture-call",
+              toolName: "read",
+              content: [{type: "text", text: "fixture tool result"}],
+              isError: false,
+            },
+          });
+          emit({type: "message_start", message: {role: "assistant", content: []}});
+          emit({
+            type: "message_end",
+            message: {
+              role: "assistant",
+              stopReason: "stop",
+              content: [{type: "text", text: lastAssistantText}],
+            },
+          });
+          assistantMessages += 1;
+        } else if (!supervisorProcess && request.message === "tool-only settle step") {
+          emit({type: "message_start", message: {role: "assistant", content: []}});
+          emit({
+            type: "message_end",
+            message: {
+              role: "assistant",
+              stopReason: "toolUse",
+              content: [
+                {type: "text", text: "fixture tool-only step"},
+                {type: "toolCall", id: "fixture-unfinished-call", name: "read", arguments: {path: "seed.txt"}},
+              ],
+            },
+          });
+          assistantMessages += 1;
+          emit({type: "tool_execution_start", toolCallId: "fixture-unfinished-call", toolName: "read", args: {path: "seed.txt"}});
+          emit({
+            type: "tool_execution_end",
+            toolCallId: "fixture-unfinished-call",
+            toolName: "read",
+            result: {content: [{type: "text", text: "fixture tool result"}], details: {}},
+            isError: false,
+          });
+          emit({
+            type: "message_end",
+            message: {
+              role: "toolResult",
+              toolCallId: "fixture-unfinished-call",
+              toolName: "read",
+              content: [{type: "text", text: "fixture tool result"}],
+              isError: false,
+            },
+          });
+        } else if (!supervisorProcess && request.message === "provider error step") {
+          emit({type: "message_start", message: {role: "assistant", content: []}});
+          emit({
+            type: "message_end",
+            message: {
+              role: "assistant",
+              stopReason: "error",
+              errorMessage: "fixture provider rate limit",
+              content: [],
+            },
+          });
+          assistantMessages += 1;
+        } else {
+          emit({type: "message_start", message: {role: "assistant", content: []}});
+          emit({
+            type: "message_end",
+            message: {
+              role: "assistant",
+              stopReason: "stop",
+              content: [{type: "text", text: lastAssistantText}],
+            },
+          });
+          assistantMessages += 1;
+        }
         working = false;
         emit({type: "agent_settled"});
-      }, supervisorProcess && String(request.message).includes("RACE_TEST_DELAY")
+      }, delayedSupervisorTurn
         ? 500
         : String(request.message).startsWith("race ")
           ? 1000

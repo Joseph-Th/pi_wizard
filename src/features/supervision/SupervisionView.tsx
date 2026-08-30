@@ -84,8 +84,6 @@ export function SupervisionView(props: SupervisionViewProps) {
           provider: model()?.provider ?? null,
           model: model()?.id ?? null,
           thinking: thinking() || null,
-          promptTemplates: [],
-          maxCycles: null,
         },
       });
       await props.onRefresh();
@@ -212,7 +210,7 @@ export function SupervisionView(props: SupervisionViewProps) {
                   <div>
                     <strong>{projectNames(snapshot.projectIds)}</strong>
                     <span>
-                      {snapshot.status} · {snapshot.cycles}{snapshot.maxCycles == null ? " decisions · continuous" : `/${snapshot.maxCycles} decisions`} · {snapshot.watchedRuns} watched run{snapshot.watchedRuns === 1 ? "" : "s"}
+                      {snapshot.status} · {snapshot.cycles} decisions · continuous · {snapshot.watchedRuns} watched run{snapshot.watchedRuns === 1 ? "" : "s"}
                     </span>
                     <small>
                       {snapshot.provider && snapshot.model

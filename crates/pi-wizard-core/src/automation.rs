@@ -77,8 +77,6 @@ pub struct AutomationExecutionSnapshot {
     pub chain_id: AutomationChainId,
     pub chain_name: String,
     pub project_id: ProjectId,
-    pub concurrency: usize,
-    pub worktrees: bool,
     pub error: Option<String>,
     pub status: AutomationExecutionStatus,
     pub steps: Vec<AutomationStepSnapshot>,
@@ -90,8 +88,6 @@ impl AutomationExecutionSnapshot {
         id: AutomationExecutionId,
         chain: &AutomationChain,
         project_id: ProjectId,
-        concurrency: usize,
-        worktrees: bool,
         limits: RuntimeLimits,
     ) -> Self {
         Self {
@@ -99,8 +95,6 @@ impl AutomationExecutionSnapshot {
             chain_id: chain.id,
             chain_name: chain.name.clone(),
             project_id,
-            concurrency,
-            worktrees,
             error: None,
             status: AutomationExecutionStatus::Starting,
             steps: chain
@@ -554,8 +548,6 @@ mod tests {
             AutomationExecutionId::new(),
             &chain,
             ProjectId::new(),
-            2,
-            true,
             RuntimeLimits::default(),
         );
         assert_eq!(snapshot.steps.len(), 2);
@@ -574,8 +566,6 @@ mod tests {
             AutomationExecutionId::new(),
             &chain,
             ProjectId::new(),
-            1,
-            false,
             limits,
         );
         assert_eq!(snapshot.steps[0].prompt_preview, "abc");

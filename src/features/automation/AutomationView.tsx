@@ -158,8 +158,6 @@ export function AutomationView(props: AutomationViewProps) {
         request: {
           chainId: id,
           projectId: project,
-          concurrency: 1,
-          worktrees: false,
           provider: model()?.provider ?? null,
           model: model()?.id ?? null,
           thinking: thinking() || null,

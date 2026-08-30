@@ -61,6 +61,10 @@ The useful surface is substantially richer than prompt/response streaming. Curre
 
 The GUI can therefore be a semantic client of Pi rather than an emulation of its TUI.
 
+The event boundaries are materially different and must not be collapsed. `message_end` completes one `AgentMessage`, which may be an assistant message or a tool-result message. `agent_end` completes one low-level agent run but may still be followed by automatic retry, compaction retry, or queued continuation. `agent_settled` is the session-level boundary after those automatic continuations are exhausted. A successful `prompt` response means the input was accepted, queued, or handled immediately; failures after acceptance arrive through the event/message stream. Pi's `get_last_assistant_text` also legitimately returns `null` when there is no assistant text.
+
+Slash commands need source-aware handling. Pi expands skills and prompt templates into ordinary prompt input, while extension commands execute immediately and own any LLM interaction they initiate. An orchestrator that promises one normal settled model task per chain step therefore cannot treat every slash command as equivalent without inspecting Pi's command catalog.
+
 ### Session history is already branchable
 
 Pi stores persistent sessions as JSONL and models branch relationships in the file. Current user commands expose resume/new/name/session/tree/fork/clone/compact/export/share semantics. A desktop thread tree should visualize this model, not create a competing conversation graph.

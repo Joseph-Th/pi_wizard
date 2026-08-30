@@ -4,7 +4,6 @@ use pi_wizard_core::automation::{AutomationChain, AutomationExecutionSnapshot};
 use pi_wizard_core::launch::{ContextFilesPolicy, ExtensionDiscoveryPolicy};
 use pi_wizard_core::project::ProjectRegisteredLocation;
 use pi_wizard_core::rpc::ThinkingLevel;
-use pi_wizard_core::worktree::inspect_worktree_base;
 use pi_wizard_core::{AutomationChainId, AutomationExecutionId, ProjectId};
 use serde::Deserialize;
 
@@ -34,8 +33,6 @@ pub(crate) struct AutomationChainRequest {
 pub(crate) struct StartAutomationRequest {
     pub(crate) chain_id: AutomationChainId,
     pub(crate) project_id: ProjectId,
-    pub(crate) concurrency: usize,
-    pub(crate) worktrees: bool,
     #[serde(default)]
     pub(crate) provider: Option<String>,
     #[serde(default)]
@@ -116,19 +113,6 @@ pub(crate) async fn runtime_start_automation(
         .get(request.chain_id)
         .cloned()
         .ok_or_else(|| format!("unknown automation chain {}", request.chain_id))?;
-    let capacity = runtime.capacity_report().await?;
-    if request.concurrency == 0 || request.concurrency > capacity.live_run_limit {
-        return Err(format!(
-            "automation worker concurrency must be between 1 and {}",
-            capacity.live_run_limit
-        ));
-    }
-    if !request.worktrees && request.concurrency != 1 {
-        return Err(
-            "parallel automation in one project requires Git worktrees; local-checkout chains are sequential"
-                .to_owned(),
-        );
-    }
     let selection = LaunchSelection::validate(
         ContextFilesPolicy::Inherit,
         ExtensionDiscoveryPolicy::Inherit,
@@ -143,39 +127,16 @@ pub(crate) async fn runtime_start_automation(
         );
     }
     let profile = runtime.launch_profile().await?;
-    let base = if request.worktrees {
-        Some(
-            inspect_worktree_base(
-                project.canonical_root(),
-                &profile.environment,
-                runtime.limits,
-            )
-            .await
-            .map_err(|error| error.to_string())?,
-        )
-    } else {
-        None
-    };
 
     let id = AutomationExecutionId::new();
-    let snapshot = AutomationExecutionSnapshot::new(
-        id,
-        &chain,
-        request.project_id,
-        request.concurrency,
-        request.worktrees,
-        runtime.limits,
-    );
+    let snapshot = AutomationExecutionSnapshot::new(id, &chain, request.project_id, runtime.limits);
     let cancel = runtime.automation.insert_execution(snapshot).await?;
     let context = AutomationRuntimeContext {
         manager: runtime.manager.clone(),
         limits: runtime.limits,
         launch_cleanup_gate: Arc::clone(&runtime.launch_cleanup_gate),
-        worktrees: Arc::clone(&runtime.worktrees),
         coordinator: runtime.automation.clone(),
     };
-    let concurrency = request.concurrency;
-    let worktrees = request.worktrees;
     tauri::async_runtime::spawn(async move {
         run_automation_execution(
             context,
@@ -184,9 +145,6 @@ pub(crate) async fn runtime_start_automation(
                 chain,
                 project,
                 environment: profile.environment,
-                base,
-                concurrency,
-                worktrees,
                 selection,
             },
             cancel,
@@ -209,14 +167,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn automation_start_wire_shape_has_worker_model_but_no_supervisor_switch() {
+    fn automation_start_wire_shape_is_sequential_and_model_selectable() {
         let chain_id = AutomationChainId::new();
         let project_id = ProjectId::new();
         let request: StartAutomationRequest = serde_json::from_value(serde_json::json!({
             "chainId": chain_id,
             "projectId": project_id,
-            "concurrency": 6,
-            "worktrees": true,
             "provider": "opencode-go",
             "model": "gpt-5.6-luna",
             "thinking": "xhigh"
@@ -224,24 +180,22 @@ mod tests {
         .expect("deserialize independent automation request");
         assert_eq!(request.chain_id, chain_id);
         assert_eq!(request.project_id, project_id);
-        assert_eq!(request.concurrency, 6);
-        assert!(request.worktrees);
         assert_eq!(request.provider.as_deref(), Some("opencode-go"));
         assert_eq!(request.model.as_deref(), Some("gpt-5.6-luna"));
         assert_eq!(request.thinking, Some(ThinkingLevel::Xhigh));
     }
 
     #[test]
-    fn old_coupled_supervisor_field_is_ignored_not_reintroduced_into_automation_state() {
+    fn obsolete_parallel_and_supervisor_fields_are_ignored() {
         let request: StartAutomationRequest = serde_json::from_value(serde_json::json!({
             "chainId": AutomationChainId::new(),
             "projectId": ProjectId::new(),
-            "concurrency": 1,
-            "worktrees": false,
+            "concurrency": 8,
+            "worktrees": true,
             "supervisor": true
         }))
-        .expect("serde ignores obsolete extra field");
-        assert_eq!(request.concurrency, 1);
-        assert!(!request.worktrees);
+        .expect("serde ignores obsolete extra fields");
+        assert!(request.provider.is_none());
+        assert!(request.model.is_none());
     }
 }
