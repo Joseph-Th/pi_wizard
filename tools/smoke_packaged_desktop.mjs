@@ -760,6 +760,184 @@ async function smokeIsolatedModelPreferences() {
   }
 }
 
+async function smokeIsolatedPromptChainUi() {
+  const appRoot = mkdtempSync(resolve(tmpdir(), "pi-wizard-packaged-chain-ui-app-"));
+  const projectRoot = mkdtempSync(resolve(tmpdir(), "pi-wizard-packaged-chain-ui-project-"));
+  const isolatedExecutable = resolve(appRoot, "pi-wizard-desktop.exe");
+  const fakeNpmPi = createFakeNpmPi();
+  copyFileSync(executable, isolatedExecutable);
+  mkdirSync(resolve(appRoot, "pi-wizard-data"), { recursive: true });
+  writeFileSync(resolve(projectRoot, "seed.txt"), "packaged prompt-chain UI fixture\n");
+
+  const { child, client, webviewData } = await launchDesktop(isolatedExecutable, fakeNpmPi);
+  try {
+    const setup = await client.evaluate(String.raw`(async () => {
+      const invoke = window.__TAURI_INTERNALS__.invoke;
+      const projectRoot = ${JSON.stringify(projectRoot)};
+
+      const started = await invoke("runtime_start_project", {
+        request: {
+          projectPath: projectRoot,
+          projectTrust: "inherit",
+          contextFiles: "disabled",
+          extensionDiscovery: "disabled",
+          provider: "fake",
+          model: "vision",
+          thinking: null,
+          initialTask: null
+        }
+      });
+      if (!started?.runId) return { error: "prompt-chain fixture project did not register", started };
+
+      const readyDeadline = Date.now() + 8_000;
+      let registeredRun;
+      while (Date.now() < readyDeadline) {
+        const hydration = await invoke("runtime_hydrate", {});
+        registeredRun = hydration?.runs?.find((candidate) => candidate.run?.id === started.runId);
+        if (registeredRun?.run?.process === "ready") break;
+        await new Promise((resolveDelay) => window.setTimeout(resolveDelay, 50));
+      }
+      if (registeredRun?.run?.process !== "ready" || !registeredRun?.run?.projectId) {
+        return { error: "prompt-chain fixture project never became ready", started, registeredRun };
+      }
+      const projectId = registeredRun.run.projectId;
+
+      await invoke("runtime_close", { request: { runId: started.runId } });
+      const closedDeadline = Date.now() + 5_000;
+      while (Date.now() < closedDeadline) {
+        const hydration = await invoke("runtime_hydrate", {});
+        const run = hydration?.runs?.find((candidate) => candidate.run?.id === started.runId);
+        if (["exited", "failed", "quarantined"].includes(run?.run?.process)) break;
+        await new Promise((resolveDelay) => window.setTimeout(resolveDelay, 25));
+      }
+
+      const preferences = await invoke("runtime_set_new_run_model_preference", {
+        request: { model: { provider: "fake", model: "vision" } }
+      });
+      if (preferences?.newRunModel?.provider !== "fake" || preferences?.newRunModel?.model !== "vision") {
+        return { error: "shared New Run model preference did not persist", preferences };
+      }
+
+      const savedChain = await invoke("runtime_save_automation_chain", {
+        request: {
+          projectId,
+          name: "Main Chain",
+          prompts: ["Run the packaged prompt chain"]
+        }
+      });
+      if (!savedChain?.id) return { error: "prompt-chain fixture did not save", savedChain };
+      return { projectId, savedChainId: savedChain.id };
+    })()`, 20_000);
+
+    requireContract(!setup.error, setup.error ?? "prompt-chain UI fixture setup failed");
+    await client.send("Page.reload", { ignoreCache: true }, 5_000);
+    await delay(250);
+    await waitForTauriBridge(client, child);
+
+    const result = await client.evaluate(String.raw`(async () => {
+      const invoke = window.__TAURI_INTERNALS__.invoke;
+      const savedChainId = ${JSON.stringify(setup.savedChainId)};
+      const visionKey = JSON.stringify(["fake", "vision"]);
+
+      const promptChains = [...document.querySelectorAll("button")].find(
+        (candidate) => candidate.textContent.trim().startsWith("Prompt chains")
+      );
+      if (!promptChains) return { error: "Prompt chains navigation missing" };
+      promptChains.click();
+
+      const surfaceDeadline = Date.now() + 8_000;
+      let chainButton;
+      let modelSelect;
+      while (Date.now() < surfaceDeadline) {
+        chainButton = [...document.querySelectorAll('.automation-library > button')].find(
+          (candidate) => candidate.querySelector("strong")?.textContent.trim() === "Main Chain"
+        );
+        modelSelect = document.querySelector(".automation-builder .model-picker-model-control select");
+        if (chainButton && modelSelect?.value === visionKey) break;
+        await new Promise((resolveDelay) => window.setTimeout(resolveDelay, 50));
+      }
+      if (!chainButton) return { error: "saved Main Chain never appeared in Prompt chains" };
+      if (!modelSelect) return { error: "Prompt chains shared model selector did not mount" };
+
+      chainButton.click();
+      await new Promise((resolveDelay) => window.setTimeout(resolveDelay, 0));
+      const nameInput = document.querySelector(".automation-name input");
+      const promptInput = document.querySelector(".automation-prompt-card textarea");
+      const runChain = [...document.querySelectorAll(".automation-builder-actions button")].find(
+        (candidate) => candidate.textContent.trim() === "Run chain"
+      );
+      const selection = {
+        pressed: chainButton.getAttribute("aria-pressed"),
+        controls: chainButton.getAttribute("aria-controls"),
+        name: nameInput?.value ?? null,
+        prompt: promptInput?.value ?? null,
+        focusedEditor: document.activeElement === nameInput,
+        model: modelSelect.value,
+        runEnabled: Boolean(runChain && !runChain.disabled)
+      };
+      if (
+        selection.pressed !== "true" ||
+        selection.controls !== "prompt-chain-editor" ||
+        selection.name !== "Main Chain" ||
+        selection.prompt !== "Run the packaged prompt chain" ||
+        selection.focusedEditor !== true ||
+        selection.model !== visionKey ||
+        selection.runEnabled !== true
+      ) {
+        return { error: "saved-chain selection did not open the populated editor with the shared model", selection };
+      }
+
+      runChain.click();
+      const executionDeadline = Date.now() + 15_000;
+      let execution;
+      while (Date.now() < executionDeadline) {
+        const executions = await invoke("runtime_automation_executions", {});
+        execution = executions?.find((candidate) => candidate.chainId === savedChainId);
+        if (execution && ["completed", "completed_with_errors", "failed", "cancelled"].includes(execution.status)) break;
+        await new Promise((resolveDelay) => window.setTimeout(resolveDelay, 50));
+      }
+      const finalPreferences = await invoke("runtime_model_preferences", {});
+      return {
+        selection,
+        execution,
+        modelPreference: finalPreferences?.newRunModel ?? null,
+        visibleError: document.body.innerText.includes("Prompt chains:") ||
+          document.body.innerText.includes("Execution failed:")
+      };
+    })()`, 25_000);
+
+    requireContract(!result.error, result.error ?? "prompt-chain UI smoke failed");
+    requireContract(
+      result.selection?.pressed === "true" &&
+        result.selection?.focusedEditor === true &&
+        result.selection?.name === "Main Chain" &&
+        result.selection?.prompt === "Run the packaged prompt chain",
+      `saved Main Chain did not select/open its populated editor: ${JSON.stringify(result)}`,
+    );
+    requireContract(
+      result.selection?.model === JSON.stringify(["fake", "vision"]) &&
+        result.modelPreference?.provider === "fake" &&
+        result.modelPreference?.model === "vision",
+      `Prompt chains did not use the regular durable model selection: ${JSON.stringify(result)}`,
+    );
+    requireContract(
+      result.execution?.status === "completed" &&
+        result.execution?.steps?.length === 1 &&
+        result.execution?.steps?.[0]?.status === "completed" &&
+        Boolean(result.execution?.steps?.[0]?.runId),
+      `saved Main Chain did not execute through the packaged Prompt chains UI: ${JSON.stringify(result)}`,
+    );
+    requireContract(result.visibleError === false, `Prompt chains UI exposed an error: ${JSON.stringify(result)}`);
+  } finally {
+    await client.close();
+    await stopChild(child);
+    await removeTree(webviewData, true);
+    await removeTree(fakeNpmPi);
+    await removeTree(projectRoot);
+    await removeTree(appRoot);
+  }
+}
+
 async function smokeIsolatedTranscriptHandoff() {
   const appRoot = mkdtempSync(resolve(tmpdir(), "pi-wizard-packaged-transcript-app-"));
   const projectRoot = mkdtempSync(resolve(tmpdir(), "pi-wizard-packaged-transcript-project-"));
@@ -1844,9 +2022,10 @@ async function main() {
   }
 
   await smokeIsolatedModelPreferences();
+  await smokeIsolatedPromptChainUi();
   await smokeIsolatedTranscriptHandoff();
   console.log("packaged desktop WebView smoke passed");
-  console.log("verified: custom IPC, event listen/unlisten ACL, global model discovery, first-run Muse default, remembered New Run model, favorites-first persistence, project preset routing without sidebar manager, project-local prompt-chain persistence with no global catalog, CSP-safe keyboard sidebar resizing, full-width New Run/Supervision surfaces, dashboard/right-rail run status, Pi session usage metrics and run facts, oversized get_entries cold-resync recovery without process failure, real packaged run streaming-to-persisted transcript handoff with stale messageCount, terminal-run persisted history after Pi process exit, sanitized rich final Markdown, native session HTML export, one-shot Bash streaming/result with context exclusion, direct-Bash execution-root ownership across renderer reload with cancellation and mutation gating, main navigation, no visible ACL/CSP/runtime-update failure");
+  console.log("verified: custom IPC, event listen/unlisten ACL, global model discovery, first-run Muse default, remembered New Run model, favorites-first persistence, project preset routing without sidebar manager, project-local prompt-chain persistence with no global catalog, saved-chain UI selection/start, Prompt chains shared New Run model preference, CSP-safe keyboard sidebar resizing, full-width New Run/Supervision surfaces, dashboard/right-rail run status, Pi session usage metrics and run facts, oversized get_entries cold-resync recovery without process failure, real packaged run streaming-to-persisted transcript handoff with stale messageCount, terminal-run persisted history after Pi process exit, sanitized rich final Markdown, native session HTML export, one-shot Bash streaming/result with context exclusion, direct-Bash execution-root ownership across renderer reload with cancellation and mutation gating, main navigation, no visible ACL/CSP/runtime-update failure");
 }
 
 try {

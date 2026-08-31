@@ -121,7 +121,7 @@ State is reinforced with restrained semantic color plus text: active work, healt
 
 ### Prompt chains
 
-Prompt chains are a first-class main view rather than another mode hidden inside the composer. It contains a compact saved-chain list for the currently selected project, an ordered prompt-card editor, project/model controls, and bounded current execution progress with links to each fresh Pi session. The project selector is also the persistence scope: switching it never shows or mutates another directory's chain definitions.
+Prompt chains are a first-class main view rather than another mode hidden inside the composer. It contains a compact saved-chain list for the currently selected project, an ordered prompt-card editor, project/model controls, and bounded current execution progress with links to each fresh Pi session. Selecting a saved chain moves keyboard focus into its populated editor so the selection has an immediate visible and keyboard-observable result. The project selector is also the persistence scope: switching it never shows or mutates another directory's chain definitions. Prompt chains use the same durable model preference and shared model selector as New Run rather than maintaining a second independent model default.
 
 Chains are finite and sequential. Cancel stops the chain from launching more work but does not kill the currently running Pi session. Step failures are attached to their exact prompt and do not silently discard later prompts. A step is complete only at Pi's session-level settlement boundary, not when an intermediate assistant/tool message ends.
 

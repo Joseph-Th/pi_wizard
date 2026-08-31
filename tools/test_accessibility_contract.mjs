@@ -162,6 +162,9 @@ requireContract(
     automation.includes("promptChainViewDraft") &&
     automation.includes("projectId: project") &&
     automation.includes("visibleCatalog") &&
+    automation.includes('aria-pressed={chainId() === chain.id}') &&
+    automation.includes('aria-controls="prompt-chain-editor"') &&
+    automation.includes("queueMicrotask(() => chainNameInput?.focus())") &&
     app.includes("request: { projectId: requestedProjectId }") &&
     desktopHost.includes('const PROJECT_AUTOMATION_DIRECTORY: &str = ".pi-wizard"') &&
     desktopHost.includes("project.canonical_root().join(PROJECT_AUTOMATION_DIRECTORY)") &&
@@ -223,6 +226,8 @@ requireContract(
     projects.includes("<ModelPicker") &&
     automation.includes("<ModelPicker") &&
     supervision.includes("<ModelPicker") &&
+    automation.includes("rememberNewRunSelection") &&
+    !automation.includes("setModel(undefined)") &&
     automation.includes("provider: model()?.provider ?? null") &&
     supervision.includes("provider: model()?.provider ?? null") &&
     supervision.includes('label="Model and thinking"') &&

@@ -44,6 +44,7 @@ export function AutomationView(props: AutomationViewProps) {
   const [thinking, setThinking] = createSignal<ThinkingLevel | "">(promptChainViewDraft.thinking);
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal<string>();
+  let chainNameInput: HTMLInputElement | undefined;
 
   createEffect(() => {
     promptChainViewDraft = {
@@ -81,6 +82,7 @@ export function AutomationView(props: AutomationViewProps) {
     setName(chain.name);
     setPrompts([...chain.prompts]);
     setError(undefined);
+    queueMicrotask(() => chainNameInput?.focus());
   };
 
   const newChain = () => {
@@ -219,6 +221,8 @@ export function AutomationView(props: AutomationViewProps) {
               <button
                 type="button"
                 class={chainId() === chain.id ? "active" : undefined}
+                aria-pressed={chainId() === chain.id}
+                aria-controls="prompt-chain-editor"
                 onClick={() => loadChain(chain)}
               >
                 <strong>{chain.name}</strong>
@@ -231,10 +235,14 @@ export function AutomationView(props: AutomationViewProps) {
           </Show>
         </aside>
 
-        <div class="automation-builder">
+        <div class="automation-builder" id="prompt-chain-editor">
           <label class="automation-name">
             <span>Chain name</span>
-            <input value={name()} onInput={(event) => setName(event.currentTarget.value)} />
+            <input
+              ref={chainNameInput}
+              value={name()}
+              onInput={(event) => setName(event.currentTarget.value)}
+            />
           </label>
 
           <div class="automation-prompts" aria-label="Ordered prompts">
@@ -271,7 +279,6 @@ export function AutomationView(props: AutomationViewProps) {
                 onChange={(event) => {
                   newChain();
                   setProjectId(event.currentTarget.value);
-                  setModel(undefined);
                   setThinking("");
                 }}
               >
@@ -294,6 +301,7 @@ export function AutomationView(props: AutomationViewProps) {
             thinking={thinking()}
             onModelChange={setModel}
             onThinkingChange={setThinking}
+            rememberNewRunSelection
             label="Model and thinking"
           />
 
