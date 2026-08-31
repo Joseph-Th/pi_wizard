@@ -17,6 +17,30 @@ function requireContract(condition, detail) {
   if (!condition) throw new Error(`packaged desktop smoke failed: ${detail}`);
 }
 
+async function clickWebViewPoint(client, point) {
+  await client.send("Input.dispatchMouseEvent", {
+    type: "mouseMoved",
+    x: point.x,
+    y: point.y,
+  });
+  await client.send("Input.dispatchMouseEvent", {
+    type: "mousePressed",
+    x: point.x,
+    y: point.y,
+    button: "left",
+    buttons: 1,
+    clickCount: 1,
+  });
+  await client.send("Input.dispatchMouseEvent", {
+    type: "mouseReleased",
+    x: point.x,
+    y: point.y,
+    button: "left",
+    buttons: 0,
+    clickCount: 1,
+  });
+}
+
 async function removeTree(path, deferTransientLock = false) {
   // WebView2 can hold its disposable profile briefly while CDP and browser
   // processes unwind. A synchronous retry loop blocks Node's event loop and
@@ -834,7 +858,7 @@ async function smokeIsolatedPromptChainUi() {
     await delay(250);
     await waitForTauriBridge(client, child);
 
-    const result = await client.evaluate(String.raw`(async () => {
+    const chainTarget = await client.evaluate(String.raw`(async () => {
       const invoke = window.__TAURI_INTERNALS__.invoke;
       const savedChainId = ${JSON.stringify(setup.savedChainId)};
       const visionKey = JSON.stringify(["fake", "vision"]);
@@ -858,8 +882,37 @@ async function smokeIsolatedPromptChainUi() {
       }
       if (!chainButton) return { error: "saved Main Chain never appeared in Prompt chains" };
       if (!modelSelect) return { error: "Prompt chains shared model selector did not mount" };
+      const rect = chainButton.getBoundingClientRect();
+      const x = rect.left + rect.width / 2;
+      const y = rect.top + rect.height / 2;
+      const hit = document.elementFromPoint(x, y);
+      return {
+        savedChainId,
+        visionKey,
+        x,
+        y,
+        hitInsideChainButton: Boolean(hit && chainButton.contains(hit)),
+        hitTag: hit?.tagName ?? null,
+        hitClass: hit?.className ?? null
+      };
+    })()`, 10_000);
 
-      chainButton.click();
+    requireContract(!chainTarget.error, chainTarget.error ?? "prompt-chain click target was unavailable");
+    requireContract(
+      chainTarget.hitInsideChainButton === true,
+      `saved Main Chain is not pointer-reachable: ${JSON.stringify(chainTarget)}`,
+    );
+    await clickWebViewPoint(client, chainTarget);
+
+    const result = await client.evaluate(String.raw`(async () => {
+      const invoke = window.__TAURI_INTERNALS__.invoke;
+      const savedChainId = ${JSON.stringify(setup.savedChainId)};
+      const visionKey = JSON.stringify(["fake", "vision"]);
+      const chainButton = [...document.querySelectorAll('.automation-library > button')].find(
+        (candidate) => candidate.querySelector("strong")?.textContent.trim() === "Main Chain"
+      );
+      const modelSelect = document.querySelector(".automation-builder .model-picker-model-control select");
+      if (!chainButton || !modelSelect) return { error: "Prompt chains surface disappeared after pointer click" };
       await new Promise((resolveDelay) => window.setTimeout(resolveDelay, 0));
       const nameInput = document.querySelector(".automation-name input");
       const promptInput = document.querySelector(".automation-prompt-card textarea");
@@ -887,7 +940,32 @@ async function smokeIsolatedPromptChainUi() {
         return { error: "saved-chain selection did not open the populated editor with the shared model", selection };
       }
 
-      runChain.click();
+      runChain.scrollIntoView({ block: "center", inline: "nearest" });
+      await new Promise((resolveFrame) => window.requestAnimationFrame(() => resolveFrame()));
+      const runRect = runChain.getBoundingClientRect();
+      const runX = runRect.left + runRect.width / 2;
+      const runY = runRect.top + runRect.height / 2;
+      const runHit = document.elementFromPoint(runX, runY);
+      return {
+        selection,
+        runPoint: {
+          x: runX,
+          y: runY
+        },
+        runPointerReachable: Boolean(runHit && runChain.contains(runHit))
+      };
+    })()`, 10_000);
+
+    requireContract(!result.error, result.error ?? "prompt-chain pointer selection failed");
+    requireContract(
+      result.runPointerReachable === true,
+      `Run chain is not pointer-reachable after scrolling into view: ${JSON.stringify(result)}`,
+    );
+    await clickWebViewPoint(client, result.runPoint);
+
+    const executionResult = await client.evaluate(String.raw`(async () => {
+      const invoke = window.__TAURI_INTERNALS__.invoke;
+      const savedChainId = ${JSON.stringify(setup.savedChainId)};
       const executionDeadline = Date.now() + 15_000;
       let execution;
       while (Date.now() < executionDeadline) {
@@ -898,7 +976,6 @@ async function smokeIsolatedPromptChainUi() {
       }
       const finalPreferences = await invoke("runtime_model_preferences", {});
       return {
-        selection,
         execution,
         modelPreference: finalPreferences?.newRunModel ?? null,
         visibleError: document.body.innerText.includes("Prompt chains:") ||
@@ -906,7 +983,6 @@ async function smokeIsolatedPromptChainUi() {
       };
     })()`, 25_000);
 
-    requireContract(!result.error, result.error ?? "prompt-chain UI smoke failed");
     requireContract(
       result.selection?.pressed === "true" &&
         result.selection?.focusedEditor === true &&
@@ -916,18 +992,21 @@ async function smokeIsolatedPromptChainUi() {
     );
     requireContract(
       result.selection?.model === JSON.stringify(["fake", "vision"]) &&
-        result.modelPreference?.provider === "fake" &&
-        result.modelPreference?.model === "vision",
-      `Prompt chains did not use the regular durable model selection: ${JSON.stringify(result)}`,
+        executionResult.modelPreference?.provider === "fake" &&
+        executionResult.modelPreference?.model === "vision",
+      `Prompt chains did not use the regular durable model selection: ${JSON.stringify({ result, executionResult })}`,
     );
     requireContract(
-      result.execution?.status === "completed" &&
-        result.execution?.steps?.length === 1 &&
-        result.execution?.steps?.[0]?.status === "completed" &&
-        Boolean(result.execution?.steps?.[0]?.runId),
-      `saved Main Chain did not execute through the packaged Prompt chains UI: ${JSON.stringify(result)}`,
+      executionResult.execution?.status === "completed" &&
+        executionResult.execution?.steps?.length === 1 &&
+        executionResult.execution?.steps?.[0]?.status === "completed" &&
+        Boolean(executionResult.execution?.steps?.[0]?.runId),
+      `saved Main Chain did not execute through the packaged Prompt chains UI: ${JSON.stringify(executionResult)}`,
     );
-    requireContract(result.visibleError === false, `Prompt chains UI exposed an error: ${JSON.stringify(result)}`);
+    requireContract(
+      executionResult.visibleError === false,
+      `Prompt chains UI exposed an error: ${JSON.stringify(executionResult)}`,
+    );
   } finally {
     await client.close();
     await stopChild(child);

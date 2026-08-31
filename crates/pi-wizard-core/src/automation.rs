@@ -223,7 +223,18 @@ impl AutomationStore {
                 Some(existing) if existing == &chain => {}
                 Some(_) => return Err(AutomationError::MigrationConflict { id }),
                 None => {
-                    merged.insert(id, chain);
+                    let redundant_legacy = merged.values().any(|existing| {
+                        existing.name == chain.name
+                            && existing.prompts.len() >= chain.prompts.len()
+                            && chain.prompts.iter().zip(existing.prompts.iter()).all(
+                                |(legacy_prompt, local_prompt)| {
+                                    legacy_prompt.trim() == local_prompt.trim()
+                                },
+                            )
+                    });
+                    if !redundant_legacy {
+                        merged.insert(id, chain);
+                    }
                 }
             }
         }
@@ -569,6 +580,46 @@ mod tests {
         let reopened = AutomationStore::open(&root, limits).expect("reopen");
         assert_eq!(reopened.get(saved.id), Some(&saved));
         assert!(reopened.recovery_notice.is_none());
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn legacy_catalog_migration_skips_same_name_prefix_already_extended_locally() {
+        let root = fixture("legacy-redundant-prefix");
+        let global = root.join("global");
+        let project = root.join("project").join(".pi-wizard");
+        fs::create_dir_all(&global).expect("global fixture");
+        let legacy_path = global.join("automation-chains.json");
+        let legacy_chain = chain("Main Chain", &[" first ", "second"]);
+        fs::write(
+            &legacy_path,
+            serde_json::to_vec(&PersistedAutomationCatalog {
+                schema_version: AUTOMATION_SCHEMA_VERSION,
+                chains: vec![legacy_chain],
+            })
+            .expect("encode legacy catalog"),
+        )
+        .expect("write legacy catalog");
+
+        let mut local = AutomationStore::open(&project, RuntimeLimits::default())
+            .expect("open project catalog");
+        let local_chain = local
+            .upsert(chain("Main Chain", &["first", "second", "third"]))
+            .expect("save extended local chain");
+
+        assert!(
+            AutomationStore::migrate_legacy_catalog(
+                &legacy_path,
+                &project,
+                RuntimeLimits::default()
+            )
+            .expect("migrate legacy catalog")
+        );
+        assert!(!legacy_path.exists());
+        let reopened = AutomationStore::open(&project, RuntimeLimits::default())
+            .expect("reopen project catalog");
+        let snapshot = reopened.snapshot();
+        assert_eq!(snapshot.chains, vec![local_chain]);
         fs::remove_dir_all(root).expect("cleanup");
     }
 
