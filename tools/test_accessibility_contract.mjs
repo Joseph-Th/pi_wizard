@@ -160,6 +160,10 @@ requireContract(
     !automation.includes("concurrency") &&
     !automation.includes("worktrees") &&
     automation.includes("promptChainViewDraft") &&
+    automation.includes("autoOpenSavedChain: true") &&
+    automation.includes("if (!catalog || !autoOpenSavedChain() || chainId()) return;") &&
+    automation.includes("const saved = catalog.chains[0]") &&
+    automation.includes("if (saved) loadChain(saved)") &&
     automation.includes("projectId: project") &&
     automation.includes("visibleCatalog") &&
     automation.includes('aria-pressed={chainId() === chain.id}') &&

@@ -24,6 +24,7 @@ interface PromptChainViewDraft {
   projectId: string;
   model: ModelSelection | undefined;
   thinking: ThinkingLevel | "";
+  autoOpenSavedChain: boolean;
 }
 
 let promptChainViewDraft: PromptChainViewDraft = {
@@ -33,6 +34,7 @@ let promptChainViewDraft: PromptChainViewDraft = {
   projectId: "",
   model: undefined,
   thinking: "",
+  autoOpenSavedChain: true,
 };
 
 export function AutomationView(props: AutomationViewProps) {
@@ -42,9 +44,21 @@ export function AutomationView(props: AutomationViewProps) {
   const [projectId, setProjectId] = createSignal(promptChainViewDraft.projectId);
   const [model, setModel] = createSignal<ModelSelection | undefined>(promptChainViewDraft.model);
   const [thinking, setThinking] = createSignal<ThinkingLevel | "">(promptChainViewDraft.thinking);
+  const [autoOpenSavedChain, setAutoOpenSavedChain] = createSignal(
+    promptChainViewDraft.autoOpenSavedChain,
+  );
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal<string>();
   let chainNameInput: HTMLInputElement | undefined;
+
+  const loadChain = (chain: AutomationChain) => {
+    setChainId(chain.id);
+    setName(chain.name);
+    setPrompts([...chain.prompts]);
+    setAutoOpenSavedChain(false);
+    setError(undefined);
+    queueMicrotask(() => chainNameInput?.focus());
+  };
 
   createEffect(() => {
     promptChainViewDraft = {
@@ -54,6 +68,7 @@ export function AutomationView(props: AutomationViewProps) {
       projectId: projectId(),
       model: model(),
       thinking: thinking(),
+      autoOpenSavedChain: autoOpenSavedChain(),
     };
   });
 
@@ -77,19 +92,30 @@ export function AutomationView(props: AutomationViewProps) {
   const visibleCatalog = () =>
     props.snapshot?.projectId === projectId() ? props.snapshot.catalog : undefined;
 
-  const loadChain = (chain: AutomationChain) => {
-    setChainId(chain.id);
-    setName(chain.name);
-    setPrompts([...chain.prompts]);
-    setError(undefined);
-    queueMicrotask(() => chainNameInput?.focus());
-  };
+  createEffect(() => {
+    const catalog = visibleCatalog();
+    if (!catalog || !autoOpenSavedChain() || chainId()) return;
+    const saved = catalog.chains[0];
+    if (saved) loadChain(saved);
+    else setAutoOpenSavedChain(false);
+  });
 
   const newChain = () => {
     setChainId(undefined);
     setName("");
     setPrompts([""]);
+    setAutoOpenSavedChain(false);
     setError(undefined);
+  };
+
+  const switchProject = (nextProjectId: string) => {
+    setChainId(undefined);
+    setName("");
+    setPrompts([""]);
+    setAutoOpenSavedChain(true);
+    setError(undefined);
+    setProjectId(nextProjectId);
+    setThinking("");
   };
 
   const updatePrompt = (index: number, value: string) =>
@@ -156,6 +182,7 @@ export function AutomationView(props: AutomationViewProps) {
         request: { projectId: project, id },
       });
       newChain();
+      setAutoOpenSavedChain(true);
       await props.onRefresh(project);
     } catch (caught) {
       setError(String(caught));
@@ -276,11 +303,7 @@ export function AutomationView(props: AutomationViewProps) {
               <span>Project</span>
               <select
                 value={projectId()}
-                onChange={(event) => {
-                  newChain();
-                  setProjectId(event.currentTarget.value);
-                  setThinking("");
-                }}
+                onChange={(event) => switchProject(event.currentTarget.value)}
               >
                 <option value="">Select project</option>
                 <For each={props.projects}>

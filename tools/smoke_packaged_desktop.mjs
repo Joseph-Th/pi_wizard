@@ -793,9 +793,10 @@ async function smokeIsolatedPromptChainUi() {
   mkdirSync(resolve(appRoot, "pi-wizard-data"), { recursive: true });
   writeFileSync(resolve(projectRoot, "seed.txt"), "packaged prompt-chain UI fixture\n");
 
-  const { child, client, webviewData } = await launchDesktop(isolatedExecutable, fakeNpmPi);
+  let setup;
+  const firstLaunch = await launchDesktop(isolatedExecutable, fakeNpmPi);
   try {
-    const setup = await client.evaluate(String.raw`(async () => {
+    setup = await firstLaunch.client.evaluate(String.raw`(async () => {
       const invoke = window.__TAURI_INTERNALS__.invoke;
       const projectRoot = ${JSON.stringify(projectRoot)};
 
@@ -854,7 +855,14 @@ async function smokeIsolatedPromptChainUi() {
     })()`, 20_000);
 
     requireContract(!setup.error, setup.error ?? "prompt-chain UI fixture setup failed");
-    await client.send("Page.reload", { ignoreCache: true }, 5_000);
+  } finally {
+    await firstLaunch.client.close();
+    await stopChild(firstLaunch.child);
+    await removeTree(firstLaunch.webviewData, true);
+  }
+
+  const { child, client, webviewData } = await launchDesktop(isolatedExecutable, fakeNpmPi);
+  try {
     await delay(250);
     await waitForTauriBridge(client, child);
 
@@ -872,12 +880,21 @@ async function smokeIsolatedPromptChainUi() {
       const surfaceDeadline = Date.now() + 8_000;
       let chainButton;
       let modelSelect;
+      let nameInput;
+      let promptInput;
       while (Date.now() < surfaceDeadline) {
         chainButton = [...document.querySelectorAll('.automation-library > button')].find(
           (candidate) => candidate.querySelector("strong")?.textContent.trim() === "Main Chain"
         );
         modelSelect = document.querySelector(".automation-builder .model-picker-model-control select");
-        if (chainButton && modelSelect?.value === visionKey) break;
+        nameInput = document.querySelector(".automation-name input");
+        promptInput = document.querySelector(".automation-prompt-card textarea");
+        if (
+          chainButton?.getAttribute("aria-pressed") === "true" &&
+          nameInput?.value === "Main Chain" &&
+          promptInput?.value === "Run the packaged prompt chain" &&
+          modelSelect?.value === visionKey
+        ) break;
         await new Promise((resolveDelay) => window.setTimeout(resolveDelay, 50));
       }
       if (!chainButton) return { error: "saved Main Chain never appeared in Prompt chains" };
@@ -891,6 +908,12 @@ async function smokeIsolatedPromptChainUi() {
         visionKey,
         x,
         y,
+        persistedSelection: {
+          pressed: chainButton.getAttribute("aria-pressed"),
+          name: nameInput?.value ?? null,
+          prompt: promptInput?.value ?? null,
+          model: modelSelect.value
+        },
         hitInsideChainButton: Boolean(hit && chainButton.contains(hit)),
         hitTag: hit?.tagName ?? null,
         hitClass: hit?.className ?? null
@@ -898,6 +921,13 @@ async function smokeIsolatedPromptChainUi() {
     })()`, 10_000);
 
     requireContract(!chainTarget.error, chainTarget.error ?? "prompt-chain click target was unavailable");
+    requireContract(
+      chainTarget.persistedSelection?.pressed === "true" &&
+        chainTarget.persistedSelection?.name === "Main Chain" &&
+        chainTarget.persistedSelection?.prompt === "Run the packaged prompt chain" &&
+        chainTarget.persistedSelection?.model === JSON.stringify(["fake", "vision"]),
+      `saved Main Chain did not hydrate after a full desktop restart: ${JSON.stringify(chainTarget)}`,
+    );
     requireContract(
       chainTarget.hitInsideChainButton === true,
       `saved Main Chain is not pointer-reachable: ${JSON.stringify(chainTarget)}`,
@@ -2104,7 +2134,7 @@ async function main() {
   await smokeIsolatedPromptChainUi();
   await smokeIsolatedTranscriptHandoff();
   console.log("packaged desktop WebView smoke passed");
-  console.log("verified: custom IPC, event listen/unlisten ACL, global model discovery, first-run Muse default, remembered New Run model, favorites-first persistence, project preset routing without sidebar manager, project-local prompt-chain persistence with no global catalog, saved-chain UI selection/start, Prompt chains shared New Run model preference, CSP-safe keyboard sidebar resizing, full-width New Run/Supervision surfaces, dashboard/right-rail run status, Pi session usage metrics and run facts, oversized get_entries cold-resync recovery without process failure, real packaged run streaming-to-persisted transcript handoff with stale messageCount, terminal-run persisted history after Pi process exit, sanitized rich final Markdown, native session HTML export, one-shot Bash streaming/result with context exclusion, direct-Bash execution-root ownership across renderer reload with cancellation and mutation gating, main navigation, no visible ACL/CSP/runtime-update failure");
+  console.log("verified: custom IPC, event listen/unlisten ACL, global model discovery, first-run Muse default, remembered New Run model, favorites-first persistence, project preset routing without sidebar manager, project-local prompt-chain persistence with no global catalog, saved-chain desktop-restart hydration/pointer selection/start, Prompt chains shared New Run model preference, CSP-safe keyboard sidebar resizing, full-width New Run/Supervision surfaces, dashboard/right-rail run status, Pi session usage metrics and run facts, oversized get_entries cold-resync recovery without process failure, real packaged run streaming-to-persisted transcript handoff with stale messageCount, terminal-run persisted history after Pi process exit, sanitized rich final Markdown, native session HTML export, one-shot Bash streaming/result with context exclusion, direct-Bash execution-root ownership across renderer reload with cancellation and mutation gating, main navigation, no visible ACL/CSP/runtime-update failure");
 }
 
 try {
