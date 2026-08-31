@@ -1215,6 +1215,107 @@ async function smokeIsolatedTranscriptHandoff() {
         reloadOwnership.visibleError === false,
       `reloaded direct-Bash status/cancellation surface was not explicit and healthy: ${JSON.stringify(reloadOwnership)}`,
     );
+
+    const terminalRead = await client.evaluate(String.raw`(async () => {
+      const invoke = window.__TAURI_INTERNALS__.invoke;
+      const runId = ${JSON.stringify(result.started.runId)};
+      const bashDeadline = Date.now() + 5_000;
+      while (Date.now() < bashDeadline) {
+        const hydration = await invoke("runtime_hydrate", {});
+        const run = hydration?.runs?.find((candidate) => candidate.run?.id === runId);
+        if ((run?.rpc?.live?.directBash?.length ?? 0) === 0) break;
+        await new Promise((resolveDelay) => window.setTimeout(resolveDelay, 25));
+      }
+      let close;
+      try {
+        close = await invoke("runtime_close", { request: { runId } });
+      } catch (error) {
+        return { error: "could not close packaged run before terminal-history check: " + String(error) };
+      }
+      const terminalDeadline = Date.now() + 5_000;
+      let process = null;
+      while (Date.now() < terminalDeadline) {
+        const hydration = await invoke("runtime_hydrate", {});
+        const run = hydration?.runs?.find((candidate) => candidate.run?.id === runId);
+        process = run?.run?.process ?? null;
+        if (["exited", "failed", "quarantined"].includes(process)) break;
+        await new Promise((resolveDelay) => window.setTimeout(resolveDelay, 25));
+      }
+      try {
+        const page = await invoke("runtime_read_session_history", {
+          request: { runId, cursor: null }
+        });
+        return {
+          close,
+          process,
+          items: page?.items?.length ?? null,
+          assistantItems: (page?.items ?? []).filter((item) => item.kind === "assistant").length,
+        };
+      } catch (error) {
+        return {
+          error: "terminal persisted history read failed: " + String(error),
+          close,
+          process,
+        };
+      }
+    })()`, 15_000);
+    requireContract(!terminalRead.error, terminalRead.error ?? "terminal persisted history read failed");
+    requireContract(
+      terminalRead.close?.processTerminated === true &&
+        terminalRead.close?.quarantined === false &&
+        terminalRead.process === "exited" &&
+        terminalRead.items >= 2 &&
+        terminalRead.assistantItems === 1,
+      `persisted history was not readable after the Pi child exited: ${JSON.stringify(terminalRead)}`,
+    );
+
+    await client.send("Page.reload", { ignoreCache: true }, 5_000);
+    await delay(250);
+    const terminalHistoryUi = await client.evaluate(String.raw`(async () => {
+      const deadline = Date.now() + 8_000;
+      let card;
+      while (Date.now() < deadline) {
+        const dashboard = [...document.querySelectorAll("button")].find(
+          (candidate) => candidate.textContent.trim() === "Dashboard"
+        );
+        dashboard?.click();
+        await new Promise((resolveDelay) => window.setTimeout(resolveDelay, 50));
+        const cards = [...document.querySelectorAll(".run-card")];
+        card = cards.length === 1 ? cards[0] : undefined;
+        if (card) break;
+      }
+      if (!card) return { error: "terminal run card did not recover after renderer reload" };
+      const open = [...card.querySelectorAll("button")].find(
+        (candidate) => candidate.textContent.trim() === "Open"
+      );
+      if (!open) return { error: "terminal run has no Open action after renderer reload" };
+      open.click();
+      const historyDeadline = Date.now() + 5_000;
+      while (Date.now() < historyDeadline) {
+        const assistantRows = [...document.querySelectorAll(".history-assistant")];
+        const historyError = document.body.innerText.includes("Session history failed:");
+        if (assistantRows.some((row) => row.textContent.includes("Packaged handoff")) || historyError) {
+          return {
+            assistantRows: assistantRows.length,
+            finalVisible: assistantRows.some((row) => row.textContent.includes("Packaged handoff")),
+            historyError,
+          };
+        }
+        await new Promise((resolveDelay) => window.setTimeout(resolveDelay, 25));
+      }
+      return {
+        assistantRows: document.querySelectorAll(".history-assistant").length,
+        finalVisible: false,
+        historyError: document.body.innerText.includes("Session history failed:"),
+      };
+    })()`, 15_000);
+    requireContract(!terminalHistoryUi.error, terminalHistoryUi.error ?? "terminal history UI smoke failed");
+    requireContract(
+      terminalHistoryUi.finalVisible === true &&
+        terminalHistoryUi.assistantRows === 1 &&
+        terminalHistoryUi.historyError === false,
+      `terminal run did not render persisted conversation after renderer reload: ${JSON.stringify(terminalHistoryUi)}`,
+    );
   } finally {
     await client.close();
     await stopChild(child);
@@ -1682,7 +1783,7 @@ async function main() {
   await smokeIsolatedModelPreferences();
   await smokeIsolatedTranscriptHandoff();
   console.log("packaged desktop WebView smoke passed");
-  console.log("verified: custom IPC, event listen/unlisten ACL, global model discovery, first-run Muse default, remembered New Run model, favorites-first persistence, project preset routing without sidebar manager, CSP-safe keyboard sidebar resizing, full-width New Run/Supervision surfaces, dashboard/right-rail run status, Pi session usage metrics and run facts, oversized get_entries cold-resync recovery without process failure, real packaged run streaming-to-persisted transcript handoff with stale messageCount, sanitized rich final Markdown, native session HTML export, one-shot Bash streaming/result with context exclusion, direct-Bash execution-root ownership across renderer reload with cancellation and mutation gating, main navigation, no visible ACL/CSP/runtime-update failure");
+  console.log("verified: custom IPC, event listen/unlisten ACL, global model discovery, first-run Muse default, remembered New Run model, favorites-first persistence, project preset routing without sidebar manager, CSP-safe keyboard sidebar resizing, full-width New Run/Supervision surfaces, dashboard/right-rail run status, Pi session usage metrics and run facts, oversized get_entries cold-resync recovery without process failure, real packaged run streaming-to-persisted transcript handoff with stale messageCount, terminal-run persisted history after Pi process exit, sanitized rich final Markdown, native session HTML export, one-shot Bash streaming/result with context exclusion, direct-Bash execution-root ownership across renderer reload with cancellation and mutation gating, main navigation, no visible ACL/CSP/runtime-update failure");
 }
 
 try {

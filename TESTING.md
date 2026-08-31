@@ -182,6 +182,7 @@ Cover:
 - renderer paging errors retain an explicit restart-from-newest path;
 - derived index deletion/rebuild without data loss.
 - active-session incremental reads through `get_entries(since)` using the last stable entry ID;
+- retained terminal-run history remains readable from Pi JSONL after the owned process exits, and latest-page reads do not attempt live `get_entries` bootstrap once the run is terminal;
 - unknown/stale entry cursor widens to an explicit resync rather than silently skipping entries;
 - leaf/branch movement remains distinguishable from append-only continuation;
 - `get_messages` is never required to hydrate an entire long live session for routine synchronization.

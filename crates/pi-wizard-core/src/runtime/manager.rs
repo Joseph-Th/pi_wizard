@@ -2460,15 +2460,29 @@ impl RuntimeManagerTask {
         cursor: Option<String>,
         leaf_id: Option<String>,
     ) -> Result<(), String> {
-        let current_session_id = self
-            .store
-            .get(run_id)
-            .and_then(|run| run.session_state().session_id.as_deref())
-            .ok_or_else(|| format!("run {run_id} has no authoritative session id"))?;
+        let (current_session_id, process_state) = {
+            let run = self
+                .store
+                .get(run_id)
+                .ok_or_else(|| format!("run {run_id} is not registered"))?;
+            let session_id = run
+                .session_state()
+                .session_id
+                .clone()
+                .ok_or_else(|| format!("run {run_id} has no authoritative session id"))?;
+            (session_id, run.process_state())
+        };
         if current_session_id != expected_session_id {
             return Err(format!(
                 "run {run_id} changed Pi sessions before history synchronization could start"
             ));
+        }
+        if process_state.is_terminal() {
+            // Persisted JSONL remains authoritative after the owned Pi child
+            // exits. There is no live append race left to close, so a latest
+            // cold-history read must not fail merely because get_entries can
+            // no longer be sent to this retained terminal run.
+            return Ok(());
         }
         let revision = {
             let controller = self
@@ -4014,6 +4028,73 @@ mod tests {
         assert_eq!(
             after.runs[0].draft.as_ref().expect("draft").text,
             "typed while sending"
+        );
+        manager.shutdown().await.expect("shutdown");
+    }
+
+    #[tokio::test]
+    async fn terminal_run_history_bootstrap_does_not_require_a_live_process() {
+        let fixture = ManagerFixture::new("terminal-history-bootstrap");
+        let manager = spawn_runtime_manager(RuntimeLimits::default()).expect("manager");
+        let run_id = manager
+            .start_run(fixture.start_spec())
+            .await
+            .expect("start run");
+        synchronize(&manager, run_id, "terminal-history-startup").await;
+
+        manager
+            .request(
+                run_id,
+                RpcRequest::new(RpcCommand::Prompt {
+                    message: "exit-process".to_owned(),
+                    images: Vec::new(),
+                    streaming_behavior: None,
+                }),
+            )
+            .await
+            .expect("exit request accepted");
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let snapshot = manager.hydrate().await.expect("terminal hydration");
+                let run = snapshot
+                    .runs
+                    .iter()
+                    .find(|run| run.run.id() == run_id)
+                    .expect("retained terminal run");
+                if run.run.process_state().is_terminal() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("run reaches terminal state");
+
+        manager
+            .bootstrap_session_sync(
+                run_id,
+                "fake-session".to_owned(),
+                Some("persisted-tail".to_owned()),
+                Some("persisted-tail".to_owned()),
+            )
+            .await
+            .expect("terminal persisted history does not require live get_entries");
+
+        let after = manager.hydrate().await.expect("post-bootstrap hydration");
+        let run = after
+            .runs
+            .iter()
+            .find(|run| run.run.id() == run_id)
+            .expect("terminal run remains retained");
+        assert!(run.run.process_state().is_terminal());
+        assert!(
+            !run.rpc
+                .as_ref()
+                .expect("retained rpc projection")
+                .session_sync
+                .initialized(),
+            "terminal cold-history reads must not manufacture live synchronization state"
         );
         manager.shutdown().await.expect("shutdown");
     }
