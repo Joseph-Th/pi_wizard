@@ -41,6 +41,7 @@ export interface AutomationExecutionSnapshot {
 }
 
 export interface DesktopAutomationSnapshot {
+  projectId: string | null;
   catalog: {
     chains: AutomationChain[];
     recoveryNotice: string | null;

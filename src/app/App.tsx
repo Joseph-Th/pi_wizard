@@ -266,10 +266,13 @@ export function App(props: { startup: AppStartupSnapshot }) {
     }
   };
 
-  const refreshAutomation = async () => {
+  const refreshAutomation = async (projectId?: string) => {
     const requestSequence = ++automationRequestSequence;
+    const requestedProjectId = projectId ?? automation()?.projectId ?? null;
     try {
-      const snapshot = await invokeDesktop<DesktopAutomationSnapshot>("runtime_automation_snapshot");
+      const snapshot = await invokeDesktop<DesktopAutomationSnapshot>("runtime_automation_snapshot", {
+        request: { projectId: requestedProjectId },
+      });
       if (!disposed && requestSequence >= lastAppliedAutomationRequest) {
         lastAppliedAutomationRequest = requestSequence;
         setAutomation(snapshot);

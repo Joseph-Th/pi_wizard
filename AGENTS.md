@@ -63,7 +63,7 @@ Optimize for Windows desktop reliability, Pi integration, Git/worktree correctne
 - Live synchronization prefers stable incremental Pi entry cursors; cold history remains bounded and file-backed.
 - Drafts are session-scoped backend-owned user data with generation-safe persistence. Renderer lifetime is not draft lifetime.
 - App-owned registries, preferences, catalogs, and recovery journals are bounded, schema-versioned, and recoverable. Corruption in one app-owned domain must not hide or modify Pi JSONL or unrelated state.
-- Durable app state lives under the portable `pi-wizard-data` root. Generated build output is disposable; user state is not.
+- Global durable app state lives under the portable `pi-wizard-data` root, except project-scoped prompt-chain definitions. Prompt chains live at `<project>/.pi-wizard/prompt-chains.json` under the exact registered canonical project and must never fall back to AppData/global state. Generated build output is disposable; user state is not.
 
 ### Projects, Git, and trust
 

@@ -1,8 +1,10 @@
 use std::sync::Arc;
 
-use pi_wizard_core::automation::{AutomationChain, AutomationExecutionSnapshot};
+use pi_wizard_core::automation::{
+    AutomationCatalogSnapshot, AutomationChain, AutomationExecutionSnapshot, AutomationStore,
+};
 use pi_wizard_core::launch::{ContextFilesPolicy, ExtensionDiscoveryPolicy};
-use pi_wizard_core::project::ProjectRegisteredLocation;
+use pi_wizard_core::project::{ProjectBinding, ProjectRegisteredLocation};
 use pi_wizard_core::rpc::ThinkingLevel;
 use pi_wizard_core::{AutomationChainId, AutomationExecutionId, ProjectId};
 use serde::Deserialize;
@@ -13,9 +15,44 @@ use crate::services::automation::{
 };
 use crate::{DesktopRuntime, LaunchSelection};
 
+const PROJECT_AUTOMATION_DIRECTORY: &str = ".pi-wizard";
+
+fn project_automation_root(project: &ProjectBinding) -> std::path::PathBuf {
+    project.canonical_root().join(PROJECT_AUTOMATION_DIRECTORY)
+}
+
+fn open_project_automation_store(
+    project: &ProjectBinding,
+    limits: pi_wizard_core::RuntimeLimits,
+) -> Result<AutomationStore, String> {
+    AutomationStore::open(project_automation_root(project), limits)
+        .map_err(|error| error.to_string())
+}
+
+async fn resolve_project_for_automation(
+    runtime: &DesktopRuntime,
+    project_id: ProjectId,
+) -> Result<ProjectBinding, String> {
+    let project = runtime.registered_project(project_id).await?;
+    if project.verify_registered_location() != ProjectRegisteredLocation::Present {
+        return Err(
+            "selected project is detached or moved; relocate it before automation".to_owned(),
+        );
+    }
+    Ok(project)
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ProjectAutomationRequest {
+    #[serde(default)]
+    pub(crate) project_id: Option<ProjectId>,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct SaveAutomationChainRequest {
+    pub(crate) project_id: ProjectId,
     #[serde(default)]
     pub(crate) id: Option<AutomationChainId>,
     pub(crate) name: String,
@@ -25,6 +62,7 @@ pub(crate) struct SaveAutomationChainRequest {
 #[derive(Clone, Copy, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AutomationChainRequest {
+    pub(crate) project_id: ProjectId,
     pub(crate) id: AutomationChainId,
 }
 
@@ -50,8 +88,17 @@ pub(crate) struct AutomationExecutionRequest {
 #[tauri::command]
 pub(crate) async fn runtime_automation_snapshot(
     runtime: tauri::State<'_, DesktopRuntime>,
+    request: Option<ProjectAutomationRequest>,
 ) -> Result<DesktopAutomationSnapshot, String> {
-    Ok(runtime.automation.snapshot().await)
+    let project_id = request.and_then(|request| request.project_id);
+    let catalog = if let Some(project_id) = project_id {
+        let project = resolve_project_for_automation(&runtime, project_id).await?;
+        let _catalog_gate = runtime.automation.catalog_gate.lock().await;
+        open_project_automation_store(&project, runtime.limits)?.snapshot()
+    } else {
+        AutomationCatalogSnapshot::default()
+    };
+    Ok(runtime.automation.snapshot(project_id, catalog).await)
 }
 
 #[tauri::command]
@@ -66,18 +113,15 @@ pub(crate) async fn runtime_save_automation_chain(
     runtime: tauri::State<'_, DesktopRuntime>,
     request: SaveAutomationChainRequest,
 ) -> Result<AutomationChain, String> {
+    let project = resolve_project_for_automation(&runtime, request.project_id).await?;
     let chain = AutomationChain {
         id: request.id.unwrap_or_default(),
         name: request.name,
         prompts: request.prompts,
     };
-    let saved = runtime
-        .automation
-        .store
-        .lock()
-        .await
-        .upsert(chain)
-        .map_err(|error| error.to_string())?;
+    let _catalog_gate = runtime.automation.catalog_gate.lock().await;
+    let mut store = open_project_automation_store(&project, runtime.limits)?;
+    let saved = store.upsert(chain).map_err(|error| error.to_string())?;
     runtime.automation.signal_catalog_changed();
     Ok(saved)
 }
@@ -87,11 +131,10 @@ pub(crate) async fn runtime_delete_automation_chain(
     runtime: tauri::State<'_, DesktopRuntime>,
     request: AutomationChainRequest,
 ) -> Result<bool, String> {
-    let removed = runtime
-        .automation
-        .store
-        .lock()
-        .await
+    let project = resolve_project_for_automation(&runtime, request.project_id).await?;
+    let _catalog_gate = runtime.automation.catalog_gate.lock().await;
+    let mut store = open_project_automation_store(&project, runtime.limits)?;
+    let removed = store
         .remove(request.id)
         .map_err(|error| error.to_string())?;
     if removed {
@@ -105,14 +148,14 @@ pub(crate) async fn runtime_start_automation(
     runtime: tauri::State<'_, DesktopRuntime>,
     request: StartAutomationRequest,
 ) -> Result<AutomationExecutionId, String> {
-    let chain = runtime
-        .automation
-        .store
-        .lock()
-        .await
-        .get(request.chain_id)
-        .cloned()
-        .ok_or_else(|| format!("unknown automation chain {}", request.chain_id))?;
+    let project = resolve_project_for_automation(&runtime, request.project_id).await?;
+    let chain = {
+        let _catalog_gate = runtime.automation.catalog_gate.lock().await;
+        open_project_automation_store(&project, runtime.limits)?
+            .get(request.chain_id)
+            .cloned()
+            .ok_or_else(|| format!("unknown automation chain {}", request.chain_id))?
+    };
     let selection = LaunchSelection::validate(
         ContextFilesPolicy::Inherit,
         ExtensionDiscoveryPolicy::Inherit,
@@ -120,12 +163,6 @@ pub(crate) async fn runtime_start_automation(
         request.model.clone(),
         request.thinking,
     )?;
-    let project = runtime.registered_project(request.project_id).await?;
-    if project.verify_registered_location() != ProjectRegisteredLocation::Present {
-        return Err(
-            "selected project is detached or moved; relocate it before automation".to_owned(),
-        );
-    }
     let profile = runtime.launch_profile().await?;
 
     let id = AutomationExecutionId::new();
@@ -165,6 +202,78 @@ pub(crate) async fn runtime_cancel_automation(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+
+    fn project_fixture(name: &str) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "pi-wizard-project-prompt-chains-{name}-{}",
+            AutomationExecutionId::new()
+        ));
+        fs::create_dir_all(&root).expect("create project prompt-chain fixture");
+        root
+    }
+
+    #[test]
+    fn project_prompt_chain_catalog_is_saved_inside_selected_directory_and_isolated() {
+        let first_root = project_fixture("first");
+        let second_root = project_fixture("second");
+        let first = ProjectBinding::register(&first_root).expect("register first project");
+        let second = ProjectBinding::register(&second_root).expect("register second project");
+        let limits = pi_wizard_core::RuntimeLimits::default();
+        let local_directory = first.canonical_root().join(PROJECT_AUTOMATION_DIRECTORY);
+
+        let mut first_store = open_project_automation_store(&first, limits).expect("open first");
+        assert!(
+            !local_directory.exists(),
+            "reading an empty project catalog must not create project state"
+        );
+        let chain = AutomationChain {
+            id: AutomationChainId::new(),
+            name: "Project-local chain".to_owned(),
+            prompts: vec!["work only in this project".to_owned()],
+        };
+        let saved = first_store.upsert(chain).expect("save project-local chain");
+        assert!(local_directory.join("prompt-chains.json").is_file());
+
+        let reopened = open_project_automation_store(&first, limits).expect("reopen first");
+        assert_eq!(reopened.get(saved.id), Some(&saved));
+        let other = open_project_automation_store(&second, limits).expect("open second");
+        assert!(other.snapshot().chains.is_empty());
+        assert!(
+            !second
+                .canonical_root()
+                .join(PROJECT_AUTOMATION_DIRECTORY)
+                .exists()
+        );
+
+        fs::remove_dir_all(first_root).expect("cleanup first project");
+        fs::remove_dir_all(second_root).expect("cleanup second project");
+    }
+
+    #[test]
+    fn automation_catalog_commands_require_project_identity() {
+        let project_id = ProjectId::new();
+        let save: SaveAutomationChainRequest = serde_json::from_value(serde_json::json!({
+            "projectId": project_id,
+            "name": "local",
+            "prompts": ["one"]
+        }))
+        .expect("save request project identity");
+        assert_eq!(save.project_id, project_id);
+
+        let snapshot: ProjectAutomationRequest = serde_json::from_value(serde_json::json!({
+            "projectId": project_id
+        }))
+        .expect("snapshot request project identity");
+        assert_eq!(snapshot.project_id, Some(project_id));
+
+        let remove: AutomationChainRequest = serde_json::from_value(serde_json::json!({
+            "projectId": project_id,
+            "id": AutomationChainId::new()
+        }))
+        .expect("delete request project identity");
+        assert_eq!(remove.project_id, project_id);
+    }
 
     #[test]
     fn automation_start_wire_shape_is_sequential_and_model_selectable() {

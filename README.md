@@ -87,7 +87,9 @@ Pi Wizard stores its own recoverable state under `pi-wizard-data`:
 - repository builds: `<repo>\pi-wizard-data`
 - standalone copied executable: sibling `pi-wizard-data`
 
-This root contains project/worktree registries, prompt chains, custom model profiles, preferences, and session drafts. It is intentionally outside disposable `target` output for repository builds.
+This root contains project/worktree registries, custom model profiles, preferences, and session drafts. It is intentionally outside disposable `target` output for repository builds.
+
+Prompt chains are project-local. A project's saved definitions live at `<project>\.pi-wizard\prompt-chains.json`; switching projects switches catalogs. Prompt chains are not read from or written to AppData or the portable `pi-wizard-data` root.
 
 Pi session JSONL remains in Pi's own session storage and is never replaced by an app-owned transcript database.
 

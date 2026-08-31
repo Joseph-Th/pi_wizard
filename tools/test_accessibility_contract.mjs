@@ -41,7 +41,12 @@ const mainCapability = JSON.parse(
 const desktopHost = [
   readFileSync(resolve(root, "src-tauri", "src", "app", "mod.rs"), "utf8"),
   readFileSync(resolve(root, "src-tauri", "src", "app", "desktop_commands.rs"), "utf8"),
+  readFileSync(resolve(root, "src-tauri", "src", "commands", "automation.rs"), "utf8"),
 ].join("\n");
+const automationStore = readFileSync(
+  resolve(root, "crates", "pi-wizard-core", "src", "automation.rs"),
+  "utf8",
+);
 const ui = [app, automation, supervision, models, projects, sessions, attention, runs].join("\n");
 const styles = [
   readFileSync(resolve(root, "src", "styles", "app.css"), "utf8"),
@@ -155,6 +160,13 @@ requireContract(
     !automation.includes("concurrency") &&
     !automation.includes("worktrees") &&
     automation.includes("promptChainViewDraft") &&
+    automation.includes("projectId: project") &&
+    automation.includes("visibleCatalog") &&
+    app.includes("request: { projectId: requestedProjectId }") &&
+    desktopHost.includes('const PROJECT_AUTOMATION_DIRECTORY: &str = ".pi-wizard"') &&
+    desktopHost.includes("project.canonical_root().join(PROJECT_AUTOMATION_DIRECTORY)") &&
+    automationStore.includes('root.join("prompt-chains.json")') &&
+    !desktopHost.includes("AutomationStore::open(root, limits)") &&
     !automation.includes("Git-isolated workers") &&
     !automation.includes("<span>Workers</span>") &&
     !automation.includes("supervisor") &&
@@ -171,7 +183,7 @@ requireContract(
     styles.includes(".automation-layout") &&
     styles.includes(".automation-step") &&
     styles.includes(".supervision-surface"),
-  "sequential Prompt chains and continuous multi-project Supervision must remain separate first-class keyboard-accessible surfaces driven by backend invalidation rather than polling",
+  "sequential project-local Prompt chains and continuous multi-project Supervision must remain separate first-class keyboard-accessible surfaces driven by backend invalidation rather than polling; prompt-chain definitions must be scoped to the selected project directory rather than the portable/AppData state root",
 );
 requireContract(
   entry.includes("waitForDesktopBackend") &&

@@ -13,7 +13,7 @@ import type {
 interface AutomationViewProps {
   snapshot: DesktopAutomationSnapshot | undefined;
   projects: DesktopProjectRecord[];
-  onRefresh: () => Promise<unknown>;
+  onRefresh: (projectId?: string) => Promise<unknown>;
   onOpenRun: (runId: string) => void;
 }
 
@@ -57,6 +57,13 @@ export function AutomationView(props: AutomationViewProps) {
   });
 
   createEffect(() => {
+    const currentProjectId = projectId();
+    if (currentProjectId && props.snapshot?.projectId !== currentProjectId) {
+      void props.onRefresh(currentProjectId);
+    }
+  });
+
+  createEffect(() => {
     if (!projectId()) {
       const project = props.projects.find((candidate) => candidate.status === "present");
       if (project) setProjectId(project.id);
@@ -65,6 +72,9 @@ export function AutomationView(props: AutomationViewProps) {
 
   const selectedProject = () =>
     props.projects.find((project) => project.id === projectId() && project.status === "present");
+
+  const visibleCatalog = () =>
+    props.snapshot?.projectId === projectId() ? props.snapshot.catalog : undefined;
 
   const loadChain = (chain: AutomationChain) => {
     setChainId(chain.id);
@@ -106,11 +116,17 @@ export function AutomationView(props: AutomationViewProps) {
 
   const saveChain = async () => {
     if (busy()) return;
+    const project = projectId();
+    if (!project) {
+      setError("Select a project before saving this chain.");
+      return;
+    }
     setBusy(true);
     setError(undefined);
     try {
       const saved = await invokeDesktop<AutomationChain>("runtime_save_automation_chain", {
         request: {
+          projectId: project,
           id: chainId() ?? null,
           name: name(),
           prompts: prompts(),
@@ -119,7 +135,7 @@ export function AutomationView(props: AutomationViewProps) {
       setChainId(saved.id);
       setName(saved.name);
       setPrompts([...saved.prompts]);
-      await props.onRefresh();
+      await props.onRefresh(project);
     } catch (caught) {
       setError(String(caught));
     } finally {
@@ -129,13 +145,16 @@ export function AutomationView(props: AutomationViewProps) {
 
   const deleteChain = async () => {
     const id = chainId();
-    if (!id || busy()) return;
+    const project = projectId();
+    if (!id || !project || busy()) return;
     setBusy(true);
     setError(undefined);
     try {
-      await invokeDesktop<boolean>("runtime_delete_automation_chain", { request: { id } });
+      await invokeDesktop<boolean>("runtime_delete_automation_chain", {
+        request: { projectId: project, id },
+      });
       newChain();
-      await props.onRefresh();
+      await props.onRefresh(project);
     } catch (caught) {
       setError(String(caught));
     } finally {
@@ -163,7 +182,7 @@ export function AutomationView(props: AutomationViewProps) {
           thinking: thinking() || null,
         },
       });
-      await props.onRefresh();
+      await props.onRefresh(project);
     } catch (caught) {
       setError(String(caught));
     } finally {
@@ -174,7 +193,7 @@ export function AutomationView(props: AutomationViewProps) {
   const cancelExecution = async (id: string) => {
     try {
       await invokeDesktop<void>("runtime_cancel_automation", { request: { id } });
-      await props.onRefresh();
+      await props.onRefresh(projectId() || undefined);
     } catch (caught) {
       setError(String(caught));
     }
@@ -187,7 +206,7 @@ export function AutomationView(props: AutomationViewProps) {
         <button type="button" onClick={newChain}>New chain</button>
       </header>
 
-      <Show when={props.snapshot?.catalog.recoveryNotice}>
+      <Show when={visibleCatalog()?.recoveryNotice}>
         {(notice) => <p class="app-error">Saved prompt chains were reset: {notice()}</p>}
       </Show>
       <Show when={error()}>{(message) => <p class="app-error">Prompt chains: {message()}</p>}</Show>
@@ -195,7 +214,7 @@ export function AutomationView(props: AutomationViewProps) {
       <div class="automation-layout">
         <aside class="automation-library" aria-label="Saved chains">
           <strong>Saved chains</strong>
-          <For each={props.snapshot?.catalog.chains ?? []}>
+          <For each={visibleCatalog()?.chains ?? []}>
             {(chain) => (
               <button
                 type="button"
@@ -207,7 +226,7 @@ export function AutomationView(props: AutomationViewProps) {
               </button>
             )}
           </For>
-          <Show when={(props.snapshot?.catalog.chains.length ?? 0) === 0}>
+          <Show when={(visibleCatalog()?.chains.length ?? 0) === 0}>
             <span class="sidebar-note">No saved chains.</span>
           </Show>
         </aside>
@@ -250,6 +269,7 @@ export function AutomationView(props: AutomationViewProps) {
               <select
                 value={projectId()}
                 onChange={(event) => {
+                  newChain();
                   setProjectId(event.currentTarget.value);
                   setModel(undefined);
                   setThinking("");

@@ -163,13 +163,9 @@ impl AutomationStore {
 
     pub fn open(root: impl AsRef<Path>, limits: RuntimeLimits) -> Result<Self, AutomationError> {
         let root = root.as_ref();
-        fs::create_dir_all(root).map_err(|source| AutomationError::CreateDirectory {
-            path: root.to_path_buf(),
-            source,
-        })?;
         let mut store = Self {
-            path: Some(root.join("automation-chains.json")),
-            quarantine_dir: Some(root.join("automation-quarantine")),
+            path: Some(root.join("prompt-chains.json")),
+            quarantine_dir: Some(root.join("prompt-chain-quarantine")),
             limits,
             chains: HashMap::new(),
             recovery_notice: None,
@@ -343,6 +339,13 @@ impl AutomationStore {
                 limit: self.limits.max_automation_state_bytes,
             });
         }
+        let parent = path
+            .parent()
+            .expect("persistent automation path has a parent directory");
+        fs::create_dir_all(parent).map_err(|source| AutomationError::CreateDirectory {
+            path: parent.to_path_buf(),
+            source,
+        })?;
         let mut file = AtomicWriteFile::options().open(path).map_err(|source| {
             AutomationError::OpenAtomic {
                 path: path.clone(),
@@ -374,7 +377,7 @@ impl AutomationStore {
             });
         }
         let quarantine_path = quarantine_dir.join(format!(
-            "{}-automation-chains.json",
+            "{}-prompt-chains.json",
             AutomationExecutionId::new()
         ));
         fs::rename(path, quarantine_path).map_err(|source| AutomationError::QuarantineFailed {
@@ -498,6 +501,7 @@ mod tests {
             .expect("save");
         assert_eq!(saved.name, "Review loop");
         assert_eq!(saved.prompts, [" first task ", "second task"]);
+        assert!(root.join("prompt-chains.json").is_file());
         drop(store);
 
         let reopened = AutomationStore::open(&root, limits).expect("reopen");
@@ -532,12 +536,12 @@ mod tests {
     #[test]
     fn corrupt_catalog_is_quarantined_independently() {
         let root = fixture("quarantine");
-        fs::write(root.join("automation-chains.json"), b"{broken").expect("corrupt file");
+        fs::write(root.join("prompt-chains.json"), b"{broken").expect("corrupt file");
         let recovered = AutomationStore::open(&root, RuntimeLimits::default()).expect("recover");
         assert!(recovered.snapshot().chains.is_empty());
         assert!(recovered.snapshot().recovery_notice.is_some());
-        assert!(!root.join("automation-chains.json").exists());
-        assert!(root.join("automation-quarantine").is_dir());
+        assert!(!root.join("prompt-chains.json").exists());
+        assert!(root.join("prompt-chain-quarantine").is_dir());
         fs::remove_dir_all(root).expect("cleanup");
     }
 

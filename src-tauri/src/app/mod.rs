@@ -8,7 +8,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
-use pi_wizard_core::automation::AutomationStore;
 use pi_wizard_core::compatibility::{PiVersion, probe_pi_version};
 use pi_wizard_core::environment::{
     EnvironmentResolutionError, LaunchEnvironmentDiagnostics, LaunchEnvironmentInput,
@@ -420,10 +419,6 @@ impl DesktopRuntime {
             }
             None => WorktreeRegistry::ephemeral(limits),
         };
-        let automation_store = match state_root.as_ref() {
-            Some(root) => AutomationStore::open(root, limits).map_err(|error| error.to_string())?,
-            None => AutomationStore::ephemeral(limits),
-        };
         let model_store = match state_root.as_ref() {
             Some(root) => {
                 ModelCatalogStore::open(root, limits).map_err(|error| error.to_string())?
@@ -438,7 +433,7 @@ impl DesktopRuntime {
             preferences: Mutex::new(preferences),
             projects: Mutex::new(projects),
             worktrees: Arc::new(Mutex::new(worktrees)),
-            automation: AutomationCoordinator::new(automation_store, limits),
+            automation: AutomationCoordinator::new(limits),
             supervision: SupervisionCoordinator::new(limits),
             models: Arc::new(Mutex::new(model_store)),
             git_review_jobs: Mutex::new(GitReviewJobRegistry::new(
@@ -935,17 +930,12 @@ mod portable_state_tests {
         let legacy = root.join("legacy-runtime-state");
         fs::create_dir_all(legacy.join("drafts")).expect("legacy drafts");
         fs::create_dir_all(&executable_dir).expect("executable directory");
-        fs::write(legacy.join("automation-chains.json"), b"chains").expect("legacy chains");
         fs::write(legacy.join("model-profiles.json"), b"models").expect("legacy models");
         fs::write(legacy.join("drafts").join("one.json"), b"draft").expect("legacy draft");
 
         let portable = prepare_portable_state_root(&executable, Some(&legacy))
             .expect("migrate legacy portable state");
         assert_eq!(portable, executable_dir.join(PORTABLE_STATE_DIRECTORY));
-        assert_eq!(
-            fs::read(portable.join("automation-chains.json")).expect("migrated chains"),
-            b"chains"
-        );
         assert_eq!(
             fs::read(portable.join("model-profiles.json")).expect("migrated models"),
             b"models"

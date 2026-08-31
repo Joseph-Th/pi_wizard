@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use pi_wizard_core::automation::{
     AutomationCatalogSnapshot, AutomationChain, AutomationExecutionSnapshot,
-    AutomationExecutionStatus, AutomationStepStatus, AutomationStore,
+    AutomationExecutionStatus, AutomationStepStatus,
 };
 use pi_wizard_core::environment::ResolvedLaunchEnvironment;
 use pi_wizard_core::launch::{PiLaunchSpec, ProjectTrustPolicy, SessionLaunch};
@@ -13,7 +13,7 @@ use pi_wizard_core::rpc::{AssistantStopReason, RpcCommand, RpcRequest};
 use pi_wizard_core::runtime::{
     ExecutionIsolation, ProcessState, RunRecord, RunStartSpec, RuntimeManagerHandle,
 };
-use pi_wizard_core::{AutomationExecutionId, PiSessionId, RunId, RuntimeLimits};
+use pi_wizard_core::{AutomationExecutionId, PiSessionId, ProjectId, RunId, RuntimeLimits};
 use serde::Serialize;
 use tokio::sync::{Mutex, broadcast, watch};
 
@@ -30,7 +30,7 @@ pub(crate) enum AutomationChangedSignal {
 
 #[derive(Clone)]
 pub(crate) struct AutomationCoordinator {
-    pub(crate) store: Arc<Mutex<AutomationStore>>,
+    pub(crate) catalog_gate: Arc<Mutex<()>>,
     executions: Arc<Mutex<HashMap<AutomationExecutionId, ActiveAutomationExecution>>>,
     changed: broadcast::Sender<AutomationChangedSignal>,
     limits: RuntimeLimits,
@@ -44,15 +44,16 @@ struct ActiveAutomationExecution {
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct DesktopAutomationSnapshot {
+    pub(crate) project_id: Option<ProjectId>,
     pub(crate) catalog: AutomationCatalogSnapshot,
     pub(crate) executions: Vec<AutomationExecutionSnapshot>,
 }
 
 impl AutomationCoordinator {
-    pub(crate) fn new(store: AutomationStore, limits: RuntimeLimits) -> Self {
+    pub(crate) fn new(limits: RuntimeLimits) -> Self {
         let (changed, _) = broadcast::channel(limits.max_runtime_command_queue);
         Self {
-            store: Arc::new(Mutex::new(store)),
+            catalog_gate: Arc::new(Mutex::new(())),
             executions: Arc::new(Mutex::new(HashMap::new())),
             changed,
             limits,
@@ -71,9 +72,13 @@ impl AutomationCoordinator {
         let _ = self.changed.send(AutomationChangedSignal::Executions);
     }
 
-    pub(crate) async fn snapshot(&self) -> DesktopAutomationSnapshot {
-        let catalog = self.store.lock().await.snapshot();
+    pub(crate) async fn snapshot(
+        &self,
+        project_id: Option<ProjectId>,
+        catalog: AutomationCatalogSnapshot,
+    ) -> DesktopAutomationSnapshot {
         DesktopAutomationSnapshot {
+            project_id,
             catalog,
             executions: self.execution_snapshot().await,
         }
@@ -797,7 +802,7 @@ mod tests {
             ..RuntimeLimits::default()
         };
         let manager = spawn_runtime_manager(limits).expect("automation runtime manager");
-        let coordinator = AutomationCoordinator::new(AutomationStore::ephemeral(limits), limits);
+        let coordinator = AutomationCoordinator::new(limits);
         let project = ProjectBinding::register(&fixture.root).expect("register fixture project");
 
         let mut blocker_launch = PiLaunchSpec::new(
@@ -911,7 +916,7 @@ mod tests {
             ..RuntimeLimits::default()
         };
         let manager = spawn_runtime_manager(limits).expect("automation runtime manager");
-        let coordinator = AutomationCoordinator::new(AutomationStore::ephemeral(limits), limits);
+        let coordinator = AutomationCoordinator::new(limits);
         let project = ProjectBinding::register(&fixture.root).expect("register fixture project");
         let chain = AutomationChain {
             id: pi_wizard_core::AutomationChainId::new(),

@@ -493,13 +493,36 @@ async function launchDesktop(executablePath, fakeNpmPi) {
     const page = await waitForCdp(port, child);
     const client = new CdpClient(page.webSocketDebuggerUrl);
     await client.open();
-    await delay(1_000);
+    await waitForTauriBridge(client, child);
     return { child, client, webviewData };
   } catch (error) {
     await stopChild(child);
     await removeTree(webviewData, true);
     throw error;
   }
+}
+
+async function waitForTauriBridge(client, child) {
+  const deadline = Date.now() + 12_000;
+  while (Date.now() < deadline) {
+    requireContract(child.exitCode === null, `desktop exited before Tauri IPC became ready with code ${child.exitCode}`);
+    try {
+      const evaluation = await client.send(
+        "Runtime.evaluate",
+        {
+          expression: 'typeof window.__TAURI_INTERNALS__?.invoke === "function" && Boolean(document.querySelector(".app-shell"))',
+          returnByValue: true,
+        },
+        1_000,
+      );
+      if (!evaluation.exceptionDetails && evaluation.result?.value === true) return;
+    } catch {
+      // WebView navigation can replace the execution context between the CDP
+      // target becoming visible and Tauri injecting its IPC bridge.
+    }
+    await delay(50);
+  }
+  throw new Error("packaged desktop smoke failed: Tauri IPC bridge and app shell did not become ready");
 }
 
 async function smokeRealInstalledPi() {
@@ -817,6 +840,35 @@ async function smokeIsolatedTranscriptHandoff() {
       ) {
         return { error: "brand-new Pi session identity/path was not advertised before history read", started, beforeRun };
       }
+      const projectId = beforeRun.run.projectId;
+      if (!projectId) {
+        return { error: "started packaged run did not expose authoritative project identity", started, beforeRun };
+      }
+      const savedChain = await invoke("runtime_save_automation_chain", {
+        request: {
+          projectId,
+          name: "Packaged project-local chain",
+          prompts: ["first packaged chain prompt", "second packaged chain prompt"]
+        }
+      });
+      const chainSnapshot = await invoke("runtime_automation_snapshot", {
+        request: { projectId }
+      });
+      const projectChain = chainSnapshot?.catalog?.chains?.find(
+        (chain) => chain.id === savedChain?.id
+      );
+      if (
+        chainSnapshot?.projectId !== projectId ||
+        projectChain?.name !== "Packaged project-local chain" ||
+        projectChain?.prompts?.length !== 2
+      ) {
+        return {
+          error: "packaged project-local prompt chain did not round-trip through IPC",
+          started,
+          savedChain,
+          chainSnapshot
+        };
+      }
       const emptyHistory = await invoke("runtime_read_session_history", {
         request: { runId: started.runId, cursor: null }
       });
@@ -1031,6 +1083,8 @@ async function smokeIsolatedTranscriptHandoff() {
       }
       return {
         started,
+        savedChain,
+        chainSnapshot,
         emptySnapshot,
         sawLiveAnswer,
         sawLiveReasoning,
@@ -1042,6 +1096,15 @@ async function smokeIsolatedTranscriptHandoff() {
     })()`, 20_000);
 
     requireContract(!result.error, result.error ?? "packaged transcript handoff failed");
+    requireContract(
+      existsSync(resolve(projectRoot, ".pi-wizard", "prompt-chains.json")),
+      `packaged prompt chain was not saved inside the selected project directory: ${JSON.stringify(result)}`,
+    );
+    requireContract(
+      !existsSync(resolve(appRoot, "pi-wizard-data", "automation-chains.json")) &&
+        !existsSync(resolve(appRoot, "pi-wizard-data", "prompt-chains.json")),
+      `packaged prompt chain leaked into global portable/AppData-style state: ${JSON.stringify(result)}`,
+    );
     requireContract(
       result.started.initialTaskSubmitted === false &&
         result.emptySnapshot?.items === 0 &&
@@ -1476,7 +1539,7 @@ async function main() {
         ["runtime_capacity", {}],
         ["runtime_list_projects", {}],
         ["runtime_model_catalog", {}],
-        ["runtime_automation_snapshot", {}],
+        ["runtime_automation_snapshot", { request: { projectId: null } }],
         ["runtime_supervision_snapshot", {}],
         ["runtime_diagnostics", {}]
       ];
@@ -1783,7 +1846,7 @@ async function main() {
   await smokeIsolatedModelPreferences();
   await smokeIsolatedTranscriptHandoff();
   console.log("packaged desktop WebView smoke passed");
-  console.log("verified: custom IPC, event listen/unlisten ACL, global model discovery, first-run Muse default, remembered New Run model, favorites-first persistence, project preset routing without sidebar manager, CSP-safe keyboard sidebar resizing, full-width New Run/Supervision surfaces, dashboard/right-rail run status, Pi session usage metrics and run facts, oversized get_entries cold-resync recovery without process failure, real packaged run streaming-to-persisted transcript handoff with stale messageCount, terminal-run persisted history after Pi process exit, sanitized rich final Markdown, native session HTML export, one-shot Bash streaming/result with context exclusion, direct-Bash execution-root ownership across renderer reload with cancellation and mutation gating, main navigation, no visible ACL/CSP/runtime-update failure");
+  console.log("verified: custom IPC, event listen/unlisten ACL, global model discovery, first-run Muse default, remembered New Run model, favorites-first persistence, project preset routing without sidebar manager, project-local prompt-chain persistence with no global catalog, CSP-safe keyboard sidebar resizing, full-width New Run/Supervision surfaces, dashboard/right-rail run status, Pi session usage metrics and run facts, oversized get_entries cold-resync recovery without process failure, real packaged run streaming-to-persisted transcript handoff with stale messageCount, terminal-run persisted history after Pi process exit, sanitized rich final Markdown, native session HTML export, one-shot Bash streaming/result with context exclusion, direct-Bash execution-root ownership across renderer reload with cancellation and mutation gating, main navigation, no visible ACL/CSP/runtime-update failure");
 }
 
 try {
