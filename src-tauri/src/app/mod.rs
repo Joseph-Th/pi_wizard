@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
+use pi_wizard_core::automation::AutomationStore;
 use pi_wizard_core::compatibility::{PiVersion, probe_pi_version};
 use pi_wizard_core::environment::{
     EnvironmentResolutionError, LaunchEnvironmentDiagnostics, LaunchEnvironmentInput,
@@ -55,6 +56,7 @@ use tauri_plugin_dialog::DialogExt;
 use tokio::sync::{Mutex, broadcast};
 use tokio::task::{AbortHandle, JoinHandle};
 
+use crate::commands::automation::PROJECT_AUTOMATION_DIRECTORY;
 use crate::services::automation::{AutomationChangedSignal, AutomationCoordinator};
 use crate::services::supervision::SupervisionCoordinator;
 
@@ -64,6 +66,33 @@ const AUTOMATION_CHANGED_EVENT: &str = "automation://changed";
 const SUPERVISION_CHANGED_EVENT: &str = "supervision://changed";
 const PORTABLE_STATE_DIRECTORY: &str = "pi-wizard-data";
 const PORTABLE_STATE_MIGRATION_DIRECTORY: &str = "pi-wizard-data.migrating";
+const LEGACY_AUTOMATION_CATALOG_FILE: &str = "automation-chains.json";
+
+fn migrate_legacy_prompt_chains(
+    state_root: &Path,
+    projects: &ProjectRegistry,
+    limits: RuntimeLimits,
+) -> Result<bool, String> {
+    let legacy_path = state_root.join(LEGACY_AUTOMATION_CATALOG_FILE);
+    if !legacy_path.is_file() {
+        return Ok(false);
+    }
+    let mut present = projects.bindings().into_iter().filter(|project| {
+        project.verify_registered_location() == ProjectRegisteredLocation::Present
+    });
+    let Some(project) = present.next() else {
+        return Ok(false);
+    };
+    if present.next().is_some() {
+        return Ok(false);
+    }
+    AutomationStore::migrate_legacy_catalog(
+        &legacy_path,
+        project.canonical_root().join(PROJECT_AUTOMATION_DIRECTORY),
+        limits,
+    )
+    .map_err(|error| error.to_string())
+}
 
 fn portable_state_root(executable: &Path) -> Result<PathBuf, io::Error> {
     let executable_dir = executable
@@ -413,6 +442,12 @@ impl DesktopRuntime {
             Some(root) => ProjectRegistry::open(root, limits).map_err(|error| error.to_string())?,
             None => ProjectRegistry::ephemeral(limits),
         };
+        if let Some(root) = state_root.as_ref() {
+            // Obsolete global state must never make startup fail. Migration is
+            // lossless on success and leaves the legacy source untouched on
+            // conflicts, corruption, or write failures for later recovery.
+            let _ = migrate_legacy_prompt_chains(root, &projects, limits);
+        }
         let worktrees = match state_root.as_ref() {
             Some(root) => {
                 WorktreeRegistry::open(root, limits).map_err(|error| error.to_string())?
@@ -854,6 +889,78 @@ pub fn run() {
 #[cfg(test)]
 mod portable_state_tests {
     use super::*;
+
+    #[test]
+    fn single_present_project_receives_legacy_global_prompt_chain_catalog() {
+        let root = std::env::temp_dir().join(format!(
+            "pi-wizard-legacy-prompt-chain-migration-{}",
+            RunId::new()
+        ));
+        let state_root = root.join("pi-wizard-data");
+        let project_root = root.join("project");
+        fs::create_dir_all(&state_root).expect("state root");
+        fs::create_dir_all(&project_root).expect("project root");
+        let mut projects =
+            ProjectRegistry::open(&state_root, RuntimeLimits::default()).expect("project registry");
+        let project = projects
+            .resolve_or_register(&project_root)
+            .expect("register project");
+        let legacy = state_root.join(LEGACY_AUTOMATION_CATALOG_FILE);
+        fs::write(
+            &legacy,
+            br#"{"schemaVersion":1,"chains":[{"id":"01a055e5-0f40-7100-9e4e-4ed55ecc10de","name":"Main Chain","prompts":["one"]}]}"#,
+        )
+        .expect("legacy catalog");
+
+        assert!(
+            migrate_legacy_prompt_chains(&state_root, &projects, RuntimeLimits::default())
+                .expect("migrate legacy prompt chains")
+        );
+        assert!(!legacy.exists());
+        let target = project
+            .canonical_root()
+            .join(PROJECT_AUTOMATION_DIRECTORY)
+            .join("prompt-chains.json");
+        assert!(target.is_file());
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn legacy_global_prompt_chains_are_not_guessed_across_multiple_projects() {
+        let root = std::env::temp_dir().join(format!(
+            "pi-wizard-legacy-prompt-chain-ambiguous-{}",
+            RunId::new()
+        ));
+        let state_root = root.join("pi-wizard-data");
+        let first_root = root.join("first");
+        let second_root = root.join("second");
+        fs::create_dir_all(&state_root).expect("state root");
+        fs::create_dir_all(&first_root).expect("first project root");
+        fs::create_dir_all(&second_root).expect("second project root");
+        let mut projects =
+            ProjectRegistry::open(&state_root, RuntimeLimits::default()).expect("project registry");
+        projects
+            .resolve_or_register(&first_root)
+            .expect("register first");
+        projects
+            .resolve_or_register(&second_root)
+            .expect("register second");
+        let legacy = state_root.join(LEGACY_AUTOMATION_CATALOG_FILE);
+        fs::write(
+            &legacy,
+            br#"{"schemaVersion":1,"chains":[{"id":"01a055e5-0f40-7100-9e4e-4ed55ecc10de","name":"Main Chain","prompts":["one"]}]}"#,
+        )
+        .expect("legacy catalog");
+
+        assert!(
+            !migrate_legacy_prompt_chains(&state_root, &projects, RuntimeLimits::default())
+                .expect("skip ambiguous legacy prompt chains")
+        );
+        assert!(legacy.is_file());
+        assert!(!first_root.join(PROJECT_AUTOMATION_DIRECTORY).exists());
+        assert!(!second_root.join(PROJECT_AUTOMATION_DIRECTORY).exists());
+        fs::remove_dir_all(root).expect("cleanup");
+    }
 
     #[test]
     fn portable_state_root_is_sibling_of_the_executable() {

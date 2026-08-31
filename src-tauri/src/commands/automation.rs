@@ -15,7 +15,7 @@ use crate::services::automation::{
 };
 use crate::{DesktopRuntime, LaunchSelection};
 
-const PROJECT_AUTOMATION_DIRECTORY: &str = ".pi-wizard";
+pub(crate) const PROJECT_AUTOMATION_DIRECTORY: &str = ".pi-wizard";
 
 fn project_automation_root(project: &ProjectBinding) -> std::path::PathBuf {
     project.canonical_root().join(PROJECT_AUTOMATION_DIRECTORY)

@@ -188,6 +188,61 @@ impl AutomationStore {
         }
     }
 
+    /// Moves the pre-project-scoped catalog into one project-local store.
+    ///
+    /// The target is committed first. The legacy file is removed only after
+    /// the merged project-local catalog is durable, so a failed migration
+    /// never destroys the only copy of a saved chain.
+    pub fn migrate_legacy_catalog(
+        legacy_path: impl AsRef<Path>,
+        target_root: impl AsRef<Path>,
+        limits: RuntimeLimits,
+    ) -> Result<bool, AutomationError> {
+        let legacy_path = legacy_path.as_ref();
+        let mut legacy = Self {
+            path: Some(legacy_path.to_path_buf()),
+            quarantine_dir: None,
+            limits,
+            chains: HashMap::new(),
+            recovery_notice: None,
+        };
+        match legacy.load_from_disk() {
+            Ok(()) => {}
+            Err(AutomationError::Read { source, .. })
+                if source.kind() == std::io::ErrorKind::NotFound =>
+            {
+                return Ok(false);
+            }
+            Err(error) => return Err(error),
+        }
+
+        let target = Self::open(target_root, limits)?;
+        let mut merged = target.chains.clone();
+        for (id, chain) in legacy.chains {
+            match merged.get(&id) {
+                Some(existing) if existing == &chain => {}
+                Some(_) => return Err(AutomationError::MigrationConflict { id }),
+                None => {
+                    merged.insert(id, chain);
+                }
+            }
+        }
+        for chain in merged.values() {
+            target.validate_chain(chain)?;
+        }
+        if merged.len() > limits.max_automation_chains {
+            return Err(AutomationError::ChainLimit {
+                limit: limits.max_automation_chains,
+            });
+        }
+        target.persist(&merged)?;
+        fs::remove_file(legacy_path).map_err(|source| AutomationError::RemoveLegacy {
+            path: legacy_path.to_path_buf(),
+            source,
+        })?;
+        Ok(true)
+    }
+
     #[must_use]
     pub fn get(&self, id: AutomationChainId) -> Option<&AutomationChain> {
         self.chains.get(&id)
@@ -414,6 +469,8 @@ pub enum AutomationError {
     UnsupportedSchema { actual: u32, supported: u32 },
     #[error("automation definitions contain duplicate chain id {id}")]
     DuplicateChain { id: AutomationChainId },
+    #[error("legacy automation chain {id} conflicts with an existing project-local chain")]
+    MigrationConflict { id: AutomationChainId },
     #[error("could not create automation state directory {path}: {source}")]
     CreateDirectory {
         path: PathBuf,
@@ -440,6 +497,11 @@ pub enum AutomationError {
     },
     #[error("could not commit automation definitions {path}: {source}")]
     Commit {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    #[error("could not remove migrated legacy automation definitions {path}: {source}")]
+    RemoveLegacy {
         path: PathBuf,
         source: std::io::Error,
     },
@@ -507,6 +569,86 @@ mod tests {
         let reopened = AutomationStore::open(&root, limits).expect("reopen");
         assert_eq!(reopened.get(saved.id), Some(&saved));
         assert!(reopened.recovery_notice.is_none());
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn legacy_catalog_migration_commits_project_local_copy_before_removing_source() {
+        let root = fixture("legacy-migration");
+        let global = root.join("global");
+        let project = root.join("project").join(".pi-wizard");
+        fs::create_dir_all(&global).expect("global fixture");
+        let legacy_path = global.join("automation-chains.json");
+        let saved = chain("Legacy chain", &["one", "two"]);
+        fs::write(
+            &legacy_path,
+            serde_json::to_vec(&PersistedAutomationCatalog {
+                schema_version: AUTOMATION_SCHEMA_VERSION,
+                chains: vec![saved.clone()],
+            })
+            .expect("encode legacy catalog"),
+        )
+        .expect("write legacy catalog");
+
+        assert!(
+            AutomationStore::migrate_legacy_catalog(
+                &legacy_path,
+                &project,
+                RuntimeLimits::default()
+            )
+            .expect("migrate legacy catalog")
+        );
+        assert!(!legacy_path.exists());
+        assert!(project.join("prompt-chains.json").is_file());
+        let migrated = AutomationStore::open(&project, RuntimeLimits::default())
+            .expect("open migrated catalog");
+        assert_eq!(migrated.get(saved.id), Some(&saved));
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn legacy_catalog_migration_refuses_conflicting_project_local_identity() {
+        let root = fixture("legacy-conflict");
+        let global = root.join("global");
+        let project = root.join("project").join(".pi-wizard");
+        fs::create_dir_all(&global).expect("global fixture");
+        let legacy_path = global.join("automation-chains.json");
+        let id = AutomationChainId::new();
+        let legacy_chain = AutomationChain {
+            id,
+            name: "Legacy".to_owned(),
+            prompts: vec!["legacy".to_owned()],
+        };
+        fs::write(
+            &legacy_path,
+            serde_json::to_vec(&PersistedAutomationCatalog {
+                schema_version: AUTOMATION_SCHEMA_VERSION,
+                chains: vec![legacy_chain],
+            })
+            .expect("encode legacy catalog"),
+        )
+        .expect("write legacy catalog");
+        let mut local = AutomationStore::open(&project, RuntimeLimits::default())
+            .expect("open project catalog");
+        let local_chain = AutomationChain {
+            id,
+            name: "Local".to_owned(),
+            prompts: vec!["local".to_owned()],
+        };
+        local.upsert(local_chain.clone()).expect("save local chain");
+
+        assert!(matches!(
+            AutomationStore::migrate_legacy_catalog(
+                &legacy_path,
+                &project,
+                RuntimeLimits::default()
+            ),
+            Err(AutomationError::MigrationConflict { id: conflict }) if conflict == id
+        ));
+        assert!(legacy_path.is_file());
+        let reopened = AutomationStore::open(&project, RuntimeLimits::default())
+            .expect("reopen project catalog");
+        assert_eq!(reopened.get(id), Some(&local_chain));
         fs::remove_dir_all(root).expect("cleanup");
     }
 
