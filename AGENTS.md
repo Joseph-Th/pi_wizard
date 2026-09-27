@@ -22,11 +22,11 @@ Finish the authorized task; a plan, progress update, or deferred note is not del
 
 ### AG-2 Make the calls yourself
 
-Make design and implementation decisions within scope; state consequential choices briefly and continue. Ask only when the answer changes the result and cannot be inferred. Read the project card once, then the task's authority, owner, and proof route. Begin when those are clear; expand for unresolved questions or crossed boundaries. Links and profiles are lookups, not a recursive reading list. Use product workflows before internals for research or artifact authoring.
+Make design and implementation decisions within scope; state consequential choices briefly and continue. Ask only when the answer changes the result and cannot be inferred. Read the project card once, then the task's authority, owner, and proof route. Begin when those are clear; expand for unclear scope or crossed boundaries. Links and profiles are lookups, not a recursive reading list. Use product workflows before internals for research or artifact authoring.
 
 ### AG-3 Stay in your project (hard)
 
-Identify the requested project before working. Do not create top-level directories or write output to the workspace root or a project's parent. Scratch work belongs in the project's ignored output location (normally `target/agent-output/`) or OS temp. Standards maintenance owns the tracked root standards and `tools/`; contract propagation uses the synchronizer.
+Identify the requested project before working. Do not create top-level directories or write output to the workspace root or a project's parent. Scratch work belongs in the project's ignored output location (normally `target/agent-output/`) or OS temp.
 
 ### AG-4 Done means the user's copy works (hard)
 
@@ -34,7 +34,7 @@ Check every requested requirement against the actual result. Refresh and verify 
 
 ### AG-5 Look at what you made
 
-Render or run changed visual, audio, interactive, or published output and inspect it against the applicable [`STANDARDS_QUALITY.md`](../STANDARDS_QUALITY.md) rubric and references. Inspect individual assets at useful scales and angles, verify every requested file, and fix defects. Include rendered evidence in the report. Internal engineering prose needs direct readability and route review, not a publication workflow. Tests do not prove appearance.
+Render or run changed visual, audio, interactive, or published output and inspect it against the applicable [`STANDARDS_QUALITY.md`](../STANDARDS_QUALITY.md) rubric and references. Inspect individual assets at useful scales and angles, verify every requested file, and fix defects. Include rendered evidence in the report. Internal prose needs readability and route review only, not a publication workflow. Tests do not prove appearance.
 
 ### AG-6 Real behavior over proxies
 
@@ -42,7 +42,7 @@ Observe the behavior the user experiences. A passing test, harness, validator, o
 
 ### AG-7 Answer first, then stop talking
 
-Answer questions directly; do not treat them as permission to act. Reports state what changed, verification and its limits, and any required user action. Put long audits or research in a project file and link it. No lectures, repeated caveats, or revisiting dismissed topics.
+Answer questions directly; do not treat them as permission to act. Reports state what changed, verification and its limits, and any required user action. Put long audits or research in a project file and link it. No lectures or revisiting dismissed topics.
 
 ### AG-8 Own mistakes; trust the user's evidence
 
