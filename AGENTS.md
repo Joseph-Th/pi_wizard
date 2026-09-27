@@ -163,21 +163,13 @@ Optimize for Windows desktop reliability, Pi integration, Git/worktree correctne
 
 ## Documentation and comments
 
-Current documentation and production comments follow STANDARDS.md DOC-3, DOC-4, DOC-8, and SCOPE-7:
-
-- describe current behavior in present tense;
-- put the contract before rationale or evidence;
-- keep one documentary owner for mutable facts and link to it elsewhere;
-- remove implementation diaries, incident narratives, superseded designs, and milestone history from current docs;
-- comments explain non-obvious ownership, ordering, invariants, external constraints, or why a simpler-looking approach is invalid;
-- comments do not restate syntax, narrate bug history, preserve obsolete approaches, or embed one-off measurements/debugging stories;
-- compatibility comments state the current external constraint and the condition under which the special handling applies.
+Current documentation and production comments follow `STANDARDS.md` DOC-3, DOC-4, DOC-8, and SCOPE-7.
 
 When implementation evidence changes a current contract, update the owning document in the same change. Use version control for history.
 
 ## Verification
 
-Repository-local verification is authoritative; GitHub Actions are prohibited by workspace policy.
+Repository-local verification is authoritative.
 
 - `python tools/verify.py quick` — ordinary core/renderer changes.
 - `python tools/verify.py standard` — routine cross-surface or desktop-host changes.
