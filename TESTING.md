@@ -54,6 +54,16 @@ It launches Pi only as `--mode rpc --no-session --no-context-files --no-extensio
 
 `quick` runs `tools/test_smoke_live_pi.py` with Python bytecode writes disabled against disposable Python subprocesses to prove the optional smoke's parser, rejection handling, deadline termination, and streaming output cap without requiring an installed Pi. Python cache artifacts are ignored so verification never becomes a source-tree cleanliness requirement.
 
+## Rust agent diagnostics
+
+These are optional investigation tools and are not additions to `quick`, `standard`, or `full`:
+
+- For core ownership, use `cargo modules structure -p pi-wizard-core --lib --no-fns --no-traits --no-types --max-depth 4`. For desktop ownership, use the same command with `-p pi-wizard-desktop`. Narrow with `--focus-on <module>` once the subsystem is known; global cycle/orphan output is not a validation gate.
+- Start test-strength review with `cargo mutants --list --package pi-wizard-core --file <owner.rs>` or the corresponding desktop package. Execute only a narrow file/selected mutant set when a runtime, persistence, process, Git, or IPC proof may accept a meaningful wrong behavior. Mutation score is not a repository metric.
+- Use `cargo expand -p pi-wizard-core --lib <module::item>` or `cargo expand -p pi-wizard-desktop --lib <module::item>` only when derive/proc-macro output is material to the task.
+
+Keep mutation execution in the tool's isolated scratch copy. Do not switch to `--in-place` on a dirty or concurrently used worktree to work around copy/cache problems.
+
 ## 2. Deterministic Pi boundary tests
 
 The core suite exercises framing, parsing, encoding, request correlation, bounded projections, lifecycle state, and a deterministic fake Pi subprocess that speaks through the same newline-delimited async transport used by production.

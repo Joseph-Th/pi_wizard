@@ -2,6 +2,9 @@
 
 **BCA policy:** advisory
 
+
+**Rust agent diagnostics:** advisory. Use bounded cargo-modules structure views when ownership across the core/Tauri Rust workspace is still unclear, targeted cargo-mutants selection/execution when focused runtime, persistence, process, or Git-contract tests may not constrain behavior, and cargo-expand only for material macro/derive expansion. These diagnostics are not completion gates. [TESTING.md](TESTING.md) remains the verification authority.
+
 **Profiles:** Universal, Stateful Application
 
 Follow workspace `../AGENTS.md` and portfolio `../STANDARDS.md` first. Pi Wizard applies the Universal and Stateful Application profiles.
