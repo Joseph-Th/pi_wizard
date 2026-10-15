@@ -50,7 +50,7 @@ On a user-reported failure, re-check your work before blaming setup; own and fix
 
 ### AG-9 The outcome outranks the process
 
-If procedure harms the result or costs more than it protects, favor the result and state what you skipped. Hard rules still apply.
+Skip ceremony, optional diagnostics, or intermediate process when they cost more than they protect, and state what you skipped. Do not use this rule to skip the smallest complete verification lane (AG-4), applicable inspection of user-visible output (AG-5), or real-behavior evidence (AG-6). Hard rules still apply.
 
 ### AG-10 Leave nothing running
 
@@ -58,7 +58,7 @@ Stop task-owned processes, servers, watchers, and terminals; release locks and r
 
 ### AG-11 Git: `main`, commit, push (hard)
 
-Work on `main`; branches or worktrees only when asked. Commit and push verified work unless told not to. Never revert, stash, or discard others' changes. Include sound shared progress when appropriate; leave broken unrelated work out and report it.
+Work on `main`; branches or worktrees only when asked. Commit and push verified work unless told not to. In a dirty shared tree, stage task-owned paths explicitly; broad add/commit-all modes MUST NOT sweep in unrelated changes. Never revert, stash, overwrite, or discard others' changes. Shared progress MAY be included only when deliberately selected, reviewed, and verified as complete; otherwise leave it untouched and report it.
 
 ### AG-12 Current docs describe the present
 
