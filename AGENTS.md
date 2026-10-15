@@ -75,34 +75,16 @@ Pi Wizard is a personal **Windows desktop** control surface for the Pi coding ha
 
 Optimize for Windows desktop reliability, Pi integration, Git/worktree correctness, durable state, recovery, performance, and daily-use UX. Do not treat macOS/Linux delivery, browser/web deployment, app-store distribution, signing, public release certification, remote clients, or general IDE features as project gaps unless the user explicitly expands scope.
 
-## Cold-start route
+## Authorities
 
-1. Inspect Git state and preserve unrelated work.
-2. Read `README.md` for the product and repository map.
-3. Read `STATUS.md` for current implemented capability and known limitations.
-4. Read only the authority needed for the task:
-   - product/UI behavior: `DESIGN.md`
-   - runtime, persistence, process, Git, and performance contracts: `ARCHITECTURE.md`
-   - verification obligations: `TESTING.md`
-   - future scope: `ROADMAP.md`
-   - external evidence for a design decision: `RESEARCH.md`
-5. Identify the owning source subsystem and the narrowest existing test before editing.
+- `README.md` owns product orientation and the repository map.
+- `STATUS.md` owns current implemented capability and limitations.
+- `DESIGN.md` owns product and UI behavior.
+- `ARCHITECTURE.md` owns runtime, persistence, process, Git, and performance contracts.
+- `TESTING.md` owns verification lanes and focused fixtures.
+- `ROADMAP.md` owns future scope. `RESEARCH.md` is supporting evidence, not current product authority.
 
-`RESEARCH.md` is evidence, not current product authority. Version control owns implementation history.
-
-## Repository map
-
-| Area | Owns |
-| --- | --- |
-| `crates/pi-wizard-core/` | Pi protocol, runtime state, process-independent orchestration rules, persistence primitives, session/history/catalog logic, worktree and Git-review contracts |
-| `src-tauri/src/app/` | desktop composition, startup, portable-state wiring, environment/profile ownership |
-| `src-tauri/src/commands/` | typed Tauri command adapters |
-| `src-tauri/src/services/` | desktop orchestration services such as Automation and Supervision |
-| `src-tauri/src/platform/` | Windows-specific process/lifecycle integration |
-| `src/app/` | application shell and top-level renderer state composition |
-| `src/features/` | user-facing workflow surfaces and bounded projections |
-| `src/lib/`, `src/types/`, `src/styles/` | shared renderer utilities, wire types, and styling |
-| `tools/` | repository verification, release checks, and deterministic smoke fixtures |
+Use the change-routing table below to select the owning subsystem and companion proof. Version control owns implementation history.
 
 ## Non-negotiable invariants
 
