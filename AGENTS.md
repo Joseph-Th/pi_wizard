@@ -24,9 +24,9 @@ Finish the authorized task; plans, progress, or deferred notes are not delivery.
 
 Make in-scope decisions yourself; state consequential choices briefly and continue. Do not ask permission for routine verification, bounded evaluations, or the next in-scope step; ask only when a choice changes the deliverable and cannot be inferred. Read the project card once, then resolve authority, owner, and proof. Expand only for unresolved scope or boundaries. Links and profiles are lookups; research and artifact work starts at the product workflow.
 
-### AG-3 Stay in your project (hard)
+### AG-3 Write only in your project (hard)
 
-Work only in the requested project. Do not create top-level directories or write to the workspace root or project parent. Put scratch work in the project's ignored output (normally `target/agent-output/`) or OS temp.
+Write only in the requested project. Bounded read-only inspection of maintained sibling projects is allowed when it materially helps prior-art discovery or comparison; it never authorizes edits there. Do not create top-level directories or write to the workspace root, project parent, or sibling projects. Put scratch work in the project's ignored output (normally `target/agent-output/`) or OS temp.
 
 ### AG-4 Done means the user's copy works (hard)
 
@@ -70,7 +70,7 @@ Use repository-owned local verification. Never create, enable, invoke, or push `
 
 ### Shared workspace tools
 
-Shared portfolio tools are optional accelerators available from this project root through `../tools/`; using them does not authorize edits outside this project. Skip them when native model/harness navigation already provides equivalent evidence or ordinary source inspection is cheaper. No shared analysis command is a prerequisite to editing. When useful:
+Shared portfolio tools are optional accelerators available from this project root through `../tools/`; using them does not authorize edits outside this project. Skip them when native model/harness navigation already provides equivalent evidence or ordinary source inspection is cheaper. No shared analysis command is a prerequisite to editing. Tool output is evidence, never authority; if it conflicts with current source or project authority, trust the authority and treat the tool result as stale or defective. When useful:
 
 ```text
 python ../tools/agent_context.py brief pi_wizard <task ...>
@@ -78,7 +78,7 @@ python ../tools/agent_context.py --help
 python ../tools/agent_context.py diff-impact pi_wizard
 ```
 
-`agent_context.py` provides `brief`, `context`, `impact`, `diff-impact`, `outline`, `structure`, `architecture`, `backends`, `audit`, `rule`, and `exemplar`. `brief` returns copyable optional next commands for the current working directory. `exemplar` surfaces non-normative cross-project prior art; adapt ideas locally unless a real shared contract justifies shared code.
+`agent_context.py` provides `brief`, `context`, `impact`, `diff-impact`, `outline`, `structure`, `architecture`, `backends`, `audit`, `rule`, and `exemplar`. `brief` returns only task-grounded optional next commands for the current working directory. `exemplar` surfaces non-normative sibling-project prior art and automatically excludes the assigned project when run from its root; adapt ideas locally unless a real shared contract justifies shared code.
 For Cargo projects, `python ../tools/rust_agent_tools.py check` verifies the shared Rust diagnostics; use them only as routed by this card's Rust diagnostics marker and `TESTING.md`.
 <!-- workspace-contract:end -->
 
