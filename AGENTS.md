@@ -18,11 +18,11 @@ The user is a solo developer. Precedence: current request → this contract → 
 
 ### AG-1 Finish the work
 
-Finish the authorized task; plans, progress, or deferred notes are not delivery. Delegate only bounded read-only work when authorized.
+Finish the authorized task; plans, progress, or deferred notes are not delivery. On open-ended or hill-climbing goals, keep iterating—observe, diagnose, fix, verify—until the goal is met or in-scope improvements are exhausted; if one track is blocked, move to the next unblocked work in scope. Delegate only bounded read-only work when authorized.
 
 ### AG-2 Make the calls yourself
 
-Make in-scope decisions yourself; state consequential choices briefly and continue. Ask only when the answer changes the result and cannot be inferred. Read the project card once, then resolve authority, owner, and proof. Expand only for unresolved scope or boundaries. Links and profiles are lookups; research and artifact work starts at the product workflow.
+Make in-scope decisions yourself; state consequential choices briefly and continue. Do not ask permission for routine verification, bounded evaluations, or the next in-scope step; ask only when a choice changes the deliverable and cannot be inferred. Read the project card once, then resolve authority, owner, and proof. Expand only for unresolved scope or boundaries. Links and profiles are lookups; research and artifact work starts at the product workflow.
 
 ### AG-3 Stay in your project (hard)
 
@@ -34,11 +34,11 @@ Verify every requirement against the user's actual copy. Refresh and check the a
 
 ### AG-5 Look at what you made
 
-Run or render changed visual, audio, interactive, or published output; inspect it against [`STANDARDS_QUALITY.md`](../STANDARDS_QUALITY.md) and project references. Verify requested files, fix defects, and report rendered evidence. Internal prose needs only readability and route review. Tests do not prove appearance.
+Run or render changed visual, audio, interactive, or published output; inspect it against [`STANDARDS_QUALITY.md`](../STANDARDS_QUALITY.md) and project references. Use isolated workbench or multi-angle views where detail matters, compare directly against references at matching angles and delivery scale, fix defects before reporting, and report rendered evidence. Internal prose needs only readability and route review. Tests do not prove appearance.
 
 ### AG-6 Real behavior over proxies
 
-Observe user-experienced behavior. Tests, harnesses, validators, and metrics are evidence, not the goal. Repair proxy/product divergence; never weaken gates, hardcode outcomes, suppress warnings, or retry until green. Simulations stay causal and parameterized (STANDARDS_QUALITY.md QUAL-3).
+Observe user-experienced behavior. Tests, harnesses, validators, and metrics are evidence for hill climbing, not the goal. Use their findings to diagnose and fix systemic root causes in production owners; repair proxy/product divergence, and never weaken gates, hardcode outcomes, suppress warnings, or retry until green. Simulations stay causal and parameterized (STANDARDS_QUALITY.md QUAL-3).
 
 ### AG-7 Answer first, then stop talking
 
@@ -54,7 +54,7 @@ Skip ceremony, optional diagnostics, or intermediate process when they cost more
 
 ### AG-10 Leave nothing running
 
-Stop task-owned processes, servers, watchers, and terminals; release locks and remove scratch. Keep deliverables and the app the user should run. Never kill or replace the user's program silently. Built software cleans up child processes on exit.
+Run automation headlessly or in the background without popping up extra terminal or GUI windows that disrupt the desktop. Stop task-owned processes, servers, watchers, and terminals; release locks and remove scratch. Keep deliverables and the app the user should run. Never kill or replace the user's program silently. Built software cleans up child processes on exit.
 
 ### AG-11 Git: `main`, commit, push (hard)
 
@@ -67,6 +67,19 @@ Update the single authority for changed behavior. Keep history, session notes, a
 ### AG-13 CI is local; GitHub Actions are banned (hard)
 
 Use repository-owned local verification. Never create, enable, invoke, or push `.github/workflows/`; remove existing workflows while keeping their local equivalent.
+
+### Shared workspace tools
+
+Shared portfolio tools are available from this project root through `../tools/`; using them does not authorize edits outside this project. Start with:
+
+```text
+python ../tools/agent_context.py brief pi_wizard <task ...>
+python ../tools/agent_context.py --help
+python ../tools/agent_context.py diff-impact pi_wizard
+```
+
+`agent_context.py` provides `brief`, `context`, `impact`, `diff-impact`, `outline`, `structure`, `architecture`, `backends`, `audit`, `rule`, and `exemplar`. `brief` returns copyable next commands for the current working directory.
+For Cargo projects, `python ../tools/rust_agent_tools.py check` verifies the shared Rust diagnostics; use them only as routed by this card's Rust diagnostics marker and `TESTING.md`.
 <!-- workspace-contract:end -->
 
 ## Scope
