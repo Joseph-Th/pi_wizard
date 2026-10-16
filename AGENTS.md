@@ -70,7 +70,7 @@ Use repository-owned local verification. Never create, enable, invoke, or push `
 
 ### Shared workspace tools
 
-Shared portfolio tools are available from this project root through `../tools/`; using them does not authorize edits outside this project. Start with:
+Shared portfolio tools are optional accelerators available from this project root through `../tools/`; using them does not authorize edits outside this project. Skip them when native model/harness navigation already provides equivalent evidence or ordinary source inspection is cheaper. No shared analysis command is a prerequisite to editing. When useful:
 
 ```text
 python ../tools/agent_context.py brief pi_wizard <task ...>
@@ -78,7 +78,7 @@ python ../tools/agent_context.py --help
 python ../tools/agent_context.py diff-impact pi_wizard
 ```
 
-`agent_context.py` provides `brief`, `context`, `impact`, `diff-impact`, `outline`, `structure`, `architecture`, `backends`, `audit`, `rule`, and `exemplar`. `brief` returns copyable next commands for the current working directory.
+`agent_context.py` provides `brief`, `context`, `impact`, `diff-impact`, `outline`, `structure`, `architecture`, `backends`, `audit`, `rule`, and `exemplar`. `brief` returns copyable optional next commands for the current working directory. `exemplar` surfaces non-normative cross-project prior art; adapt ideas locally unless a real shared contract justifies shared code.
 For Cargo projects, `python ../tools/rust_agent_tools.py check` verifies the shared Rust diagnostics; use them only as routed by this card's Rust diagnostics marker and `TESTING.md`.
 <!-- workspace-contract:end -->
 
