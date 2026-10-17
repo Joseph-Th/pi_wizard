@@ -14,72 +14,69 @@ Use the embedded workspace contract and the task routes below.
 
 Applies to every agent in every harness. Source, rationale, and evidence: [../AGENTS.md](../AGENTS.md).
 
-The user is a solo developer. Precedence: current request → this contract → project card → standards. **Hard** rules survive lower-level workflow advice.
+The user is a solo developer. Precedence: current request → this contract → project card → standards. This is a safety kernel, not a prescribed workflow. **Hard** rules survive lower-level advice.
 
 ### AG-1 Finish the work
 
-Finish the authorized task; plans, progress, or deferred notes are not delivery. On open-ended or hill-climbing goals, keep iterating—observe, diagnose, fix, verify—until the goal is met or in-scope improvements are exhausted; if one track is blocked, move to the next unblocked work in scope. Delegate only bounded read-only work when authorized.
+Finish the authorized task. On open-ended goals, iterate from evidence until the goal is met or useful in-scope improvements are exhausted; pivot around blockers instead of stopping at them.
 
 ### AG-2 Make the calls yourself
 
-Make in-scope decisions yourself; state consequential choices briefly and continue. Do not ask permission for routine verification, bounded evaluations, or the next in-scope step; ask only when a choice changes the deliverable and cannot be inferred. Read the project card once, then resolve authority, owner, and proof. Expand only for unresolved scope or boundaries. Links and profiles are lookups; research and artifact work starts at the product workflow.
+Make routine in-scope decisions yourself. Read the project card once, identify the owner and proof route, then work. Ask only when a choice materially changes the deliverable and cannot be inferred.
 
 ### AG-3 Write only in your project (hard)
 
-Write only in the requested project. Bounded read-only inspection of maintained sibling projects is allowed when it materially helps prior-art discovery or comparison; it never authorizes edits there. Do not create top-level directories or write to the workspace root, project parent, or sibling projects. Put scratch work in the project's ignored output (normally `target/agent-output/`) or OS temp.
+Write only in the requested project. Read-only sibling inspection is allowed when it materially helps. Do not write to the workspace root, parent, or siblings; use project-ignored output or OS temp for scratch.
 
 ### AG-4 Done means the user's copy works (hard)
 
-Verify every requirement against the user's actual copy. Refresh and check the affected release, deployment, or running app; source edits alone do not update it. Docs-only work verifies docs and routes. Use the smallest complete project lane and [`REVIEW.md`](../REVIEW.md) for consequential code. Claim only checked results; report what remains unverified.
+Verify the result in the user's actual copy, including the release, deployment, or running app when applicable. Use the smallest complete project lane and [`REVIEW.md`](../REVIEW.md) for consequential code. Claim only checked results.
 
 ### AG-5 Look at what you made
 
-Run or render changed visual, audio, interactive, or published output; inspect it against [`STANDARDS_QUALITY.md`](../STANDARDS_QUALITY.md) and project references. Use isolated workbench or multi-angle views where detail matters, compare directly against references at matching angles and delivery scale, fix defects before reporting, and report rendered evidence. Internal prose needs only readability and route review. Tests do not prove appearance.
+Run or render changed visual, audio, interactive, or published output and inspect the real result against project references and [`STANDARDS_QUALITY.md`](../STANDARDS_QUALITY.md). Tests do not prove appearance.
 
 ### AG-6 Real behavior over proxies
 
-Observe user-experienced behavior. Tests, harnesses, validators, and metrics are evidence for hill climbing, not the goal. Use their findings to diagnose and fix systemic root causes in production owners; repair proxy/product divergence, and never weaken gates, hardcode outcomes, suppress warnings, or retry until green. Simulations stay causal and parameterized (STANDARDS_QUALITY.md QUAL-3).
+Prefer observed product behavior over proxy success. Use tests, harnesses, validators, and metrics as evidence; fix production root causes and proxy divergence rather than weakening gates or hardcoding outcomes.
 
 ### AG-7 Answer first, then stop talking
 
-Answer questions directly; they are not permission to act. Reports state changes, verification limits, and required user action. Put long audits or research in a project file. No lectures or revisiting dismissed topics.
+Answer questions directly. Reports state changes, verification limits, and required user action; keep long audit material in project files instead of chat.
 
 ### AG-8 Own mistakes; trust the user's evidence
 
-On a user-reported failure, re-check your work before blaming setup; own and fix mistakes. Try a tool, file, or capability before claiming it is unavailable.
+On a reported failure, re-check your work before blaming setup. Try a capability before claiming it is unavailable.
 
 ### AG-9 The outcome outranks the process
 
-Skip ceremony, optional diagnostics, or intermediate process when they cost more than they protect, and state what you skipped. Do not use this rule to skip the smallest complete verification lane (AG-4), applicable inspection of user-visible output (AG-5), or real-behavior evidence (AG-6). Hard rules still apply.
+Skip ceremony and optional diagnostics when they cost more than they protect. Do not skip the proof required by AG-4 through AG-6 or any hard rule.
 
 ### AG-10 Leave nothing running
 
-Run automation headlessly or in the background without popping up extra terminal or GUI windows that disrupt the desktop. Stop task-owned processes, servers, watchers, and terminals; release locks and remove scratch. Keep deliverables and the app the user should run. Never kill or replace the user's program silently. Built software cleans up child processes on exit.
+Run automation without disrupting the desktop. Stop task-owned processes, release locks, and remove scratch; never kill or replace the user's program silently.
 
 ### AG-11 Git: `main`, commit, push (hard)
 
-Work on `main`; branches or worktrees only when asked. Commit and push verified work unless told not to. In a dirty shared tree, stage task-owned paths explicitly; broad add/commit-all modes MUST NOT sweep in unrelated changes. Never revert, stash, overwrite, or discard others' changes. Shared progress MAY be included only when deliberately selected, reviewed, and verified as complete; otherwise leave it untouched and report it.
+Work on `main`; branches or worktrees only when asked. Commit and push verified work unless told not to. Stage task-owned paths explicitly in dirty trees and never discard or sweep in unrelated work.
 
 ### AG-12 Current docs describe the present
 
-Update the single authority for changed behavior. Keep history, session notes, and changelog prose out of current docs/comments. Plans and design intent do not prove capability.
+Update the authority for changed behavior. Keep history and session notes out of current docs and comments.
 
 ### AG-13 CI is local; GitHub Actions are banned (hard)
 
-Use repository-owned local verification. Never create, enable, invoke, or push `.github/workflows/`; remove existing workflows while keeping their local equivalent.
+Use repository-owned local verification. Never create, enable, invoke, or push `.github/workflows/`.
 
-### Shared workspace tools
+### Optional workspace accelerator
 
-Shared portfolio tools are optional accelerators available from this project root through `../tools/`; using them does not authorize edits outside this project. Skip them when native model/harness navigation already provides equivalent evidence or ordinary source inspection is cheaper. No shared analysis command is a prerequisite to editing. Tool output is evidence, never authority; if it conflicts with current source or project authority, trust the authority and treat the tool result as stale or defective. When useful:
+Use native navigation first. If cold-start routing is still expensive or ambiguous, run:
 
 ```text
 python ../tools/agent_context.py brief pi_wizard <task ...>
-python ../tools/agent_context.py --help
-python ../tools/agent_context.py diff-impact pi_wizard
 ```
 
-`agent_context.py` provides `brief`, `context`, `impact`, `diff-impact`, `outline`, `structure`, `architecture`, `backends`, `audit`, `rule`, and `exemplar`. `brief` returns only task-grounded optional next commands for the current working directory. `exemplar` surfaces non-normative sibling-project prior art and automatically excludes the assigned project when run from its root; adapt ideas locally unless a real shared contract justifies shared code.
-For Cargo projects, `python ../tools/rust_agent_tools.py check` verifies the shared Rust diagnostics; use them only as routed by this card's Rust diagnostics marker and `TESTING.md`.
+It returns bounded authority, verification, and likely-source evidence. Tool output is evidence, not authority. Use `python ../tools/agent_context.py --help` only when a specific unresolved question justifies a deeper probe. No shared analysis command is a prerequisite to editing.
 <!-- workspace-contract:end -->
 
 ## Scope
