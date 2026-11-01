@@ -167,13 +167,13 @@ This launches a disposable copy of the release executable, requires the desktop 
 
 | Question | Authority |
 | --- | --- |
-| Product and repository orientation | `README.md` |
-| Contributor routing and invariants | `AGENTS.md` |
-| Implemented capability and known limitations | `STATUS.md` |
-| User interaction and information architecture | `DESIGN.md` |
-| Runtime/persistence/Git/process contracts | `ARCHITECTURE.md` |
-| Verification contract | `TESTING.md` |
-| Future scope and entry criteria | `ROADMAP.md` |
-| External evidence supporting design constraints | `RESEARCH.md` |
+| Product and repository orientation | [`README.md`](README.md) |
+| Contributor routing and invariants | [`AGENTS.md`](AGENTS.md) |
+| Implemented capability and known limitations | [`STATUS.md`](STATUS.md) |
+| User interaction and information architecture | [`DESIGN.md`](DESIGN.md) |
+| Runtime/persistence/Git/process contracts | [`ARCHITECTURE.md`](ARCHITECTURE.md) |
+| Verification contract | [`TESTING.md`](TESTING.md) |
+| Future scope and entry criteria | [`ROADMAP.md`](ROADMAP.md) |
+| External evidence supporting design constraints | [`RESEARCH.md`](RESEARCH.md) |
 
 Current docs describe the system in present tense. Version control owns implementation history.
