@@ -84,7 +84,7 @@ It should deterministically exercise:
 - dedicated recovered-queue message/byte ceilings before queue strings are cloned into retained Stop state;
 - `queue_update` text is copied only after those same message/byte ceilings pass, retained privately inside the controller rather than `RunRecord`/hydration, and updated from Pi's complete user steering/follow-up arrays;
 - explicit `clear_queue` rejection may recover that latest bounded event snapshot only while exact-process termination is mandatory; clear-queue timeout/malformed-accepted paths do not reuse it because side effects are uncertain;
-- an end-to-end fake-Pi fixture matching current stable 0.84.3's unknown `clear_queue` behavior proves Stop terminates the owned process, restores the last observed user steering/follow-up text ahead of the existing draft, and cannot leave continuation work running;
+- an end-to-end fake-Pi fixture matching the installed stable Pi's unknown `clear_queue` behavior (version owned by [`STATUS.md`](STATUS.md)) proves Stop terminates the owned process, restores the last observed user steering/follow-up text ahead of the existing draft, and cannot leave continuation work running;
 - Stop prepending recovered steering/follow-up text to existing unsent draft text without overwriting it, including non-destructive overflow failure;
 - abort success, rejection, and no-response deadlines;
 - provider auto-retry start/end event projection, `abort_retry` Stop during retry delay, normal `abort` after the retry attempt restarts, and exact-process escalation if retry cancellation is rejected;

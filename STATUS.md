@@ -15,7 +15,7 @@ The repository `full` verification lane is the release boundary. It includes det
 - Write-capable Resume requires an LF-terminated Pi JSONL tail; Pi Wizard never repairs authoritative session files.
 - Provider retry, summarization retry, compaction outcomes, extension errors, and quiet-working advisories are projected as bounded runtime state. Pi Wizard does not replay prompts automatically.
 - Pi `set_auto_retry` is exposed as a command, but no durable enabled-state is invented when Pi does not report one through `get_state`.
-- Pi 0.84.3 does not expose the documented `clear_queue` RPC command. On explicit unsupported-command rejection, Stop recovers only the private bounded user queue snapshot and terminates the exact Pi process so queued/custom continuation work cannot execute. Pi builds that support `clear_queue` keep the reusable Stop path.
+- Installed stable Pi `0.84.3` does not expose the documented `clear_queue` RPC command. On explicit unsupported-command rejection, Stop recovers only the private bounded user queue snapshot and terminates the exact Pi process so queued/custom continuation work cannot execute. Pi builds that support `clear_queue` keep the reusable Stop path.
 - Standard Windows npm Pi installs use Pi's public `pi.cmd` launcher through a hidden app-owned `cmd.exe` wrapper. The runtime does not infer npm package-internal Node/CLI paths; wrapper and delegated descendants remain one exact owned process tree with no console window. Unsupported script hosts fail before live spawn.
 
 ## Implemented capability
